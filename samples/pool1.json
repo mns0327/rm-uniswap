@@ -1,0 +1,34 @@
+{
+  "state": {
+    "sqrt_price_x96": "0x10002719920c2a9948cdd25f2",
+    "tick": 0,
+    "liquidity": 22043685663814
+  },
+  "fee": 20,
+  "tick_spacing": 1,
+  "ticks": {
+    "tick_spacing": 1,
+    "inner": {
+      "-5": {
+        "liquidity_gross": 5609029060868,
+        "liquidity_net": 5609029060868
+      },
+      "-3": {
+        "liquidity_gross": 1429877564585,
+        "liquidity_net": 1429877564585
+      },
+      "-1": {
+        "liquidity_gross": 15004779038361,
+        "liquidity_net": 15004779038361
+      },
+      "3": {
+        "liquidity_gross": 16434656602946,
+        "liquidity_net": -16434656602946
+      },
+      "4": {
+        "liquidity_gross": 5609029060868,
+        "liquidity_net": -5609029060868
+      }
+    }
+  }
+}
