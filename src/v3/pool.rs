@@ -84,15 +84,12 @@
 
 use std::sync::Arc;
 
-use arb_types::cache::price::PriceCache;
-use arb_types::sqrt_price_x96_to_price;
 use parking_lot::RwLock;
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub use arb_types::pool::TickEntry;
-
 use crate::v3::cache::PoolCache;
+use crate::v3::price::PriceCache;
 use crate::v3::sqrt_price_math::{
     get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
     get_next_sqrt_price_from_output,
@@ -107,11 +104,18 @@ use crate::v3::{
 
 use super::{
     full_math::MathError,
-    swap_math::{get_sqrt_price_target, SwapMathError},
-    tick_math::{get_sqrt_price_at_tick, get_tick_at_sqrt_price, MAX_TICK, MIN_TICK},
+    swap_math::{SwapMathError, get_sqrt_price_target},
+    tick_math::{MAX_TICK, MIN_TICK, get_sqrt_price_at_tick, get_tick_at_sqrt_price},
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Fee denominator used by Uniswap-style fee pips.
+///
+/// A fee of `500` means `500 / 1_000_000`, or `0.05%`.
+const FEE_DENOMINATOR: f64 = 1_000_000.0;
+
+const Q96_F64: f64 = 7.922_816_251_426_434e28;
 
 /// Minimum valid tick spacing (1 = finest granularity).
 pub const MIN_TICK_SPACING: i32 = 1;
@@ -928,11 +932,7 @@ pub fn delta_amount_out(delta: &BalanceDelta, zero_for_one: bool) -> u128 {
     } else {
         delta.amount0
     };
-    if raw > 0 {
-        raw as u128
-    } else {
-        0
-    }
+    if raw > 0 { raw as u128 } else { 0 }
 }
 
 #[inline(always)]
@@ -942,11 +942,7 @@ pub fn delta_amount_in(delta: &BalanceDelta, zero_for_one: bool) -> u128 {
     } else {
         delta.amount1
     };
-    if raw < 0 {
-        raw.unsigned_abs()
-    } else {
-        0
-    }
+    if raw < 0 { raw.unsigned_abs() } else { 0 }
 }
 
 /// Minimal swap-step output used by the lightweight simulator.
@@ -1162,6 +1158,25 @@ fn compute_swap_step_exact_in_fast(
         amount_out,
         fee_amount,
     })
+}
+
+fn u256_to_f64(v: U256) -> f64 {
+    let limbs = v.into_limbs();
+    if limbs[2] == 0 && limbs[3] == 0 {
+        let lo = (limbs[0] as u128) | ((limbs[1] as u128) << 64);
+        return lo as f64;
+    }
+    (limbs[0] as f64)
+        + (limbs[1] as f64) * 1.844_674_407_370_955_2e19
+        + (limbs[2] as f64) * 3.402_823_669_209_384_6e38
+        + (limbs[3] as f64) * 6.277_101_735_386_680e57
+}
+
+#[inline]
+pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> f64 {
+    let sqrt_price = u256_to_f64(sqrt_price_x96) / Q96_F64;
+
+    sqrt_price * sqrt_price
 }
 
 /// Exact-output swap-step calculation for the lightweight pool loop.

@@ -1,4 +1,5 @@
 pub mod amount;
+pub mod atomic_f64;
 pub mod cache;
 pub mod error;
 /// Uniswap V3/V4 math library — Rust port.
@@ -29,6 +30,7 @@ pub mod error;
 /// [`V3FullSimulator`].
 pub mod full_math;
 pub mod pool;
+pub mod price;
 pub mod sqrt_price_math;
 pub mod swap_math;
 pub mod tick_math;
@@ -36,7 +38,6 @@ pub mod ticks;
 pub mod types;
 
 pub use amount::SignedAmount;
-pub use arb_types::pool::TickEntry;
 pub use pool::{FullSwapResult, Pool, PoolState};
 pub use swap_math::{SwapMathError, SwapStep};
 pub use tick_math::{MAX_TICK, MIN_TICK};
@@ -44,8 +45,25 @@ pub use ticks::{PoolTicks, TickInfo};
 
 use ruint::aliases::U256;
 
+use serde::{Deserialize, Serialize};
 use swap_math::compute_swap_step;
 use tick_math::{MAX_SQRT_PRICE, MIN_SQRT_PRICE};
+
+// ─── Tick ────────────────────────────────────────────────────────────────────
+
+/// A single initialized tick in a V3/V4 pool.
+///
+/// Stored only while `liquidity_gross > 0`. When a burn/remove operation
+/// drains the last liquidity from a tick, the entry is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickEntry {
+    pub tick_idx: i32,
+    /// Signed net liquidity crossing this tick upward.
+    /// Uniswap convention: add when crossing up, subtract when crossing down.
+    pub liquidity_net: i128,
+    /// Total outstanding liquidity referencing this tick as a boundary.
+    pub liquidity_gross: u128,
+}
 
 // ─── Pool state ───────────────────────────────────────────────────────────────
 

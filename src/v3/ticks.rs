@@ -4,11 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use arb_types::pool::TickEntry;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::v3::{error::SwapSimError, tick_math::MAX_TICK_SPACING, MAX_TICK, MIN_TICK};
+use crate::v3::{MAX_TICK, MIN_TICK, TickEntry, error::SwapSimError, tick_math::MAX_TICK_SPACING};
 
 pub const MIN_TICK_SPACING: i32 = 1;
 
