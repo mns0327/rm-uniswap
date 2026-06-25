@@ -62,20 +62,6 @@ impl From<SqrtPriceMathError> for SwapMathError {
     }
 }
 
-// ── Cold error constructors ───────────────────────────────────────────────────
-
-#[cold]
-#[inline(never)]
-fn err_fee_too_large() -> SwapMathError {
-    SwapMathError::FeeTooLarge
-}
-
-#[cold]
-#[inline(never)]
-fn err_max_fee_exact_out() -> SwapMathError {
-    SwapMathError::MaxFeeExactOut
-}
-
 // ── Output type ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +84,7 @@ impl FeeParams {
     #[inline(always)]
     fn new(fee_pips: u32) -> Result<Self, SwapMathError> {
         if fee_pips > MAX_SWAP_FEE {
-            return Err(err_fee_too_large());
+            return Err(SwapMathError::FeeTooLarge);
         }
 
         Ok(Self {
@@ -295,7 +281,7 @@ pub fn compute_swap_step(
     let exact_in = amount.is_negative();
 
     if !exact_in && fee.is_max() {
-        return Err(err_max_fee_exact_out());
+        return Err(SwapMathError::MaxFeeExactOut);
     }
 
     let zero_for_one = sqrt_ratio_current_x96 >= sqrt_ratio_target_x96;
