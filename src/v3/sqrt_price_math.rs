@@ -27,26 +27,8 @@ const Q96_MASK_U512: U512 = U512::from_limbs([u64::MAX, 0xFFFF_FFFF, 0, 0, 0, 0,
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqrtPriceMathError {
-    ZeroPrice,
-    ZeroLiquidity,
-    PriceOverflow,
-    PriceUnderflow,
-    InsufficientToken0Reserves,
-    DivisionByZero,
-    FullMath(MathError),
-}
-
-impl From<MathError> for SqrtPriceMathError {
-    #[inline(always)]
-    fn from(err: MathError) -> Self {
-        match err {
-            MathError::Overflow => SqrtPriceMathError::PriceOverflow,
-            MathError::ZeroDenominator => SqrtPriceMathError::DivisionByZero,
-        }
-    }
-}
+/// Backward-compatible name for the crate-wide compact error code.
+pub type SqrtPriceMathError = crate::Error;
 
 // ─── Basic helpers ────────────────────────────────────────────────────────────
 
@@ -607,7 +589,7 @@ pub fn get_next_sqrt_price_from_output(
 #[inline]
 pub(crate) fn div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathError> {
     if b.is_zero() {
-        return Err(SqrtPriceMathError::DivisionByZero);
+        return Err(SqrtPriceMathError::ZeroDenominator);
     }
 
     Ok(div_rounding_up_u256_nonzero(a, b)?)
@@ -630,7 +612,7 @@ mod tests {
     #[inline(always)]
     fn ref_div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathError> {
         if b.is_zero() {
-            return Err(SqrtPriceMathError::DivisionByZero);
+            return Err(SqrtPriceMathError::ZeroDenominator);
         }
 
         let (q, r) = a.div_rem(b);
@@ -1477,7 +1459,7 @@ mod tests {
 
         assert_eq!(
             div_rounding_up(U256::ONE, U256::ZERO),
-            Err(SqrtPriceMathError::DivisionByZero)
+            Err(SqrtPriceMathError::ZeroDenominator)
         );
     }
 }

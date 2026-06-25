@@ -17,7 +17,7 @@ use crate::types::I256 as SignedAmount;
 use super::full_math::MathError;
 use super::sqrt_price_math::{
     get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
-    get_next_sqrt_price_from_output, SqrtPriceMathError,
+    get_next_sqrt_price_from_output,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -27,40 +27,8 @@ pub const MAX_SWAP_FEE: u32 = 1_000_000;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwapMathError {
-    FeeTooLarge,
-    MaxFeeExactOut,
-    Math(MathError),
-    SqrtPrice(SqrtPriceMathError),
-}
-
-impl core::fmt::Display for SwapMathError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            SwapMathError::FeeTooLarge => f.write_str("swap_math: fee_pips exceeds MAX_SWAP_FEE"),
-            SwapMathError::MaxFeeExactOut => {
-                f.write_str("swap_math: exact-out swap with 100% fee is undefined")
-            }
-            SwapMathError::Math(e) => write!(f, "swap_math: full_math error: {e}"),
-            SwapMathError::SqrtPrice(e) => write!(f, "swap_math: sqrt_price_math error: {e:?}"),
-        }
-    }
-}
-
-impl From<MathError> for SwapMathError {
-    #[inline(always)]
-    fn from(e: MathError) -> Self {
-        SwapMathError::Math(e)
-    }
-}
-
-impl From<SqrtPriceMathError> for SwapMathError {
-    #[inline(always)]
-    fn from(e: SqrtPriceMathError) -> Self {
-        SwapMathError::SqrtPrice(e)
-    }
-}
+/// Backward-compatible name for the crate-wide compact error code.
+pub type SwapMathError = crate::Error;
 
 // ── Output type ───────────────────────────────────────────────────────────────
 

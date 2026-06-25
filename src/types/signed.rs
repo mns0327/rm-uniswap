@@ -2,16 +2,7 @@ use std::fmt;
 
 use ruint::aliases::U256;
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum I256Error {
-    Overflow,
-    DivisionByZero,
-    I128Overflow,
-}
+use crate::Error;
 
 // ---------------------------------------------------------------------------
 // Core type
@@ -112,15 +103,15 @@ impl From<U256> for I256 {
 }
 
 impl TryFrom<I256> for i128 {
-    type Error = I256Error;
+    type Error = Error;
     fn try_from(s: I256) -> Result<Self, Self::Error> {
         let max = U256::from(i128::MAX as u128);
         if s.value > max {
-            return Err(I256Error::I128Overflow);
+            return Err(Error::I128Overflow);
         }
         let v = s.value.to::<u128>() as i128;
         if s.negative {
-            v.checked_neg().ok_or(I256Error::Overflow)
+            v.checked_neg().ok_or(Error::SignedOverflow)
         } else {
             Ok(v)
         }
@@ -284,7 +275,7 @@ impl I256 {
     /// Used for **exact-input** swaps: `amount_remaining` starts negative and
     /// moves toward zero as input tokens (net + fee) are consumed each step.
     #[inline]
-    pub fn add_unsigned(&mut self, rhs: U256) -> Result<(), I256Error> {
+    pub fn add_unsigned(&mut self, rhs: U256) -> Result<(), Error> {
         if self.negative {
             if rhs >= self.value {
                 self.value = rhs - self.value;
@@ -293,7 +284,7 @@ impl I256 {
                 self.value -= rhs;
             }
         } else {
-            self.value = self.value.checked_add(rhs).ok_or(I256Error::Overflow)?;
+            self.value = self.value.checked_add(rhs).ok_or(Error::SignedOverflow)?;
         }
         Ok(())
     }
@@ -304,9 +295,9 @@ impl I256 {
     /// Used for **exact-output** swaps: `amount_remaining` starts positive and
     /// moves toward zero as output tokens are filled each step.
     #[inline]
-    pub fn sub_unsigned(&mut self, rhs: U256) -> Result<(), I256Error> {
+    pub fn sub_unsigned(&mut self, rhs: U256) -> Result<(), Error> {
         if self.negative {
-            self.value = self.value.checked_add(rhs).ok_or(I256Error::Overflow)?;
+            self.value = self.value.checked_add(rhs).ok_or(Error::SignedOverflow)?;
         } else if rhs >= self.value {
             self.value = rhs - self.value;
             self.negative = !self.value.is_zero();

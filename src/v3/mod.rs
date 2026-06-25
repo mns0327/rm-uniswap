@@ -36,9 +36,10 @@ pub mod tick_math;
 pub mod ticks;
 pub mod types;
 
+pub use crate::Error;
 pub use crate::types::I256 as SignedAmount;
 pub use pool::{FullSwapResult, Pool, PoolState};
-pub use swap_math::{SwapMathError, SwapStep};
+pub use swap_math::SwapStep;
 pub use tick_math::{MAX_TICK, MIN_TICK};
 pub use ticks::{PoolTicks, TickInfo};
 
@@ -125,7 +126,7 @@ pub struct TickCrossResult {
 ///
 /// # Error handling
 ///
-/// All methods return `Result<_, SwapMathError>` rather than panicking.
+/// All methods return `Result<_, Error>` rather than panicking.
 /// In arbitrage-critical code, a panic kills the whole process; returning an
 /// error lets the caller skip this route and try the next one.
 pub struct V3FastSimulator;
@@ -142,14 +143,14 @@ impl V3FastSimulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`SwapMathError`] from `compute_swap_step`.  The most
-    /// common cause is `fee >= 1_000_000` ([`SwapMathError::FeeTooLarge`]).
+    /// Propagates [`Error`] from `compute_swap_step`. The most common cause is
+    /// `fee >= 1_000_000` ([`Error::FeeTooLarge`]).
     #[inline]
     pub fn quote_exact_input(
         state: &V3PoolState,
         amount_in: U256,
         zero_for_one: bool,
-    ) -> Result<U256, SwapMathError> {
+    ) -> Result<U256, Error> {
         Ok(Self::step_exact_input(state, amount_in, zero_for_one)?.amount_out)
     }
 
@@ -162,15 +163,15 @@ impl V3FastSimulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`SwapMathError`].  Note that exact-output with
+    /// Propagates [`Error`]. Note that exact-output with
     /// `fee == 1_000_000` (100 %) is always an error
-    /// ([`SwapMathError::MaxFeeExactOut`]).
+    /// ([`Error::MaxFeeExactOut`]).
     #[inline]
     pub fn quote_exact_output(
         state: &V3PoolState,
         amount_out: U256,
         zero_for_one: bool,
-    ) -> Result<U256, SwapMathError> {
+    ) -> Result<U256, Error> {
         let step = Self::step_exact_output(state, amount_out, zero_for_one)?;
         Ok(step.amount_in + step.fee_amount)
     }
@@ -184,13 +185,13 @@ impl V3FastSimulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`SwapMathError`].
+    /// Propagates [`Error`].
     #[inline]
     pub fn step_exact_input(
         state: &V3PoolState,
         amount_in: U256,
         zero_for_one: bool,
-    ) -> Result<SwapStep, SwapMathError> {
+    ) -> Result<SwapStep, Error> {
         // FIX: compute_swap_step now returns Result — propagate with `?`.
         compute_swap_step(
             state.sqrt_price_x96,
@@ -207,14 +208,14 @@ impl V3FastSimulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`SwapMathError`].  100 % fee + exact-out is always an
-    /// error ([`SwapMathError::MaxFeeExactOut`]).
+    /// Propagates [`Error`]. A 100% fee with exact-output is always an error
+    /// ([`Error::MaxFeeExactOut`]).
     #[inline]
     pub fn step_exact_output(
         state: &V3PoolState,
         amount_out: U256,
         zero_for_one: bool,
-    ) -> Result<SwapStep, SwapMathError> {
+    ) -> Result<SwapStep, Error> {
         // FIX: propagate Result.
         compute_swap_step(
             state.sqrt_price_x96,
@@ -244,7 +245,7 @@ impl V3FastSimulator {
     ///
     /// # Errors
     ///
-    /// Propagates [`SwapMathError`].
+    /// Propagates [`Error`].
     ///
     /// # Example
     ///
@@ -261,7 +262,7 @@ impl V3FastSimulator {
         amount_in: U256,
         zero_for_one: bool,
         next_initialized_tick_price_x96: U256,
-    ) -> Result<TickCrossResult, SwapMathError> {
+    ) -> Result<TickCrossResult, Error> {
         // FIX: propagate Result.
         let step = compute_swap_step(
             state.sqrt_price_x96,
@@ -495,7 +496,7 @@ mod tests {
         pool.fee = 1_000_000; // 100 % — undefined for exact-out.
         let err = V3FastSimulator::step_exact_output(&pool, U256::from(1_000u64), true)
             .expect_err("exact-out with 100% fee must fail");
-        assert_eq!(err, SwapMathError::MaxFeeExactOut);
+        assert_eq!(err, Error::MaxFeeExactOut);
     }
 
     // ── Property-based tests ──────────────────────────────────────────────────

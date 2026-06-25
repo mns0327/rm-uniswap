@@ -39,18 +39,8 @@ use ruint::{aliases::U256, uint};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
-/// Errors returned by TickMath operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TickMathError {
-    /// Tick is outside the valid range `[MIN_TICK, MAX_TICK]`.
-    InvalidTick,
-    /// `sqrt_price_x96` is outside the valid range `[MIN_SQRT_PRICE, MAX_SQRT_PRICE)`.
-    InvalidSqrtPrice,
-    /// Tick spacing is ≤ 0 or exceeds `MAX_TICK_SPACING`.
-    InvalidTickSpacing,
-    /// Input value is zero where a non-zero value is required.
-    ZeroValue,
-}
+/// Backward-compatible name for the crate-wide compact error code.
+pub type TickMathError = crate::Error;
 
 // ── Public constants ──────────────────────────────────────────────────────────
 

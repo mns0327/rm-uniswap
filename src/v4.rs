@@ -6,7 +6,7 @@
 
 use ruint::aliases::U256;
 
-use crate::v3::{SwapMathError, SwapStep, V3FastSimulator, V3PoolState};
+use crate::v3::{Error, SwapStep, V3FastSimulator, V3PoolState};
 
 /// Uniswap V4 pool state.
 ///
@@ -64,7 +64,7 @@ impl V4FastSimulator {
         state: &V4PoolState,
         amount_in: U256,
         zero_for_one: bool,
-    ) -> Result<U256, SwapMathError> {
+    ) -> Result<U256, Error> {
         V3FastSimulator::quote_exact_input(&state.as_v3(), amount_in, zero_for_one)
     }
 
@@ -76,7 +76,7 @@ impl V4FastSimulator {
         state: &V4PoolState,
         amount_out: U256,
         zero_for_one: bool,
-    ) -> Result<U256, SwapMathError> {
+    ) -> Result<U256, Error> {
         V3FastSimulator::quote_exact_output(&state.as_v3(), amount_out, zero_for_one)
     }
 
@@ -86,7 +86,7 @@ impl V4FastSimulator {
         state: &V4PoolState,
         amount_in: U256,
         zero_for_one: bool,
-    ) -> Result<SwapStep, SwapMathError> {
+    ) -> Result<SwapStep, Error> {
         V3FastSimulator::step_exact_input(&state.as_v3(), amount_in, zero_for_one)
     }
 
@@ -96,7 +96,7 @@ impl V4FastSimulator {
         state: &V4PoolState,
         amount_out: U256,
         zero_for_one: bool,
-    ) -> Result<SwapStep, SwapMathError> {
+    ) -> Result<SwapStep, Error> {
         V3FastSimulator::step_exact_output(&state.as_v3(), amount_out, zero_for_one)
     }
 }

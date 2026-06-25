@@ -30,24 +30,8 @@ use ruint::aliases::{U256, U512};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
-/// Errors returned by [`mul_div`] and [`mul_div_rounding_up`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MathError {
-    /// The denominator passed to a division was zero.
-    ZeroDenominator,
-    /// The true quotient `⌊a·b / d⌋` exceeds [`U256::MAX`] and cannot be
-    /// represented.
-    Overflow,
-}
-
-impl core::fmt::Display for MathError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            MathError::ZeroDenominator => f.write_str("mul_div: denominator is zero"),
-            MathError::Overflow => f.write_str("mul_div: result exceeds U256::MAX"),
-        }
-    }
-}
+/// Backward-compatible name for the crate-wide compact error code.
+pub type MathError = crate::Error;
 
 /// Returns true when `x` is a power of two.
 ///
