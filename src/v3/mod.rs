@@ -1,7 +1,6 @@
-pub mod amount;
-pub mod atomic_f64;
 pub mod cache;
 pub mod error;
+
 /// Uniswap V3/V4 math library — Rust port.
 ///
 /// # Module structure
@@ -37,7 +36,7 @@ pub mod tick_math;
 pub mod ticks;
 pub mod types;
 
-pub use amount::SignedAmount;
+pub use crate::types::I256 as SignedAmount;
 pub use pool::{FullSwapResult, Pool, PoolState};
 pub use swap_math::{SwapMathError, SwapStep};
 pub use tick_math::{MAX_TICK, MIN_TICK};
@@ -249,7 +248,7 @@ impl V3FastSimulator {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// let result = V3FastSimulator::step_until_tick(&pool, amount_in, true, next_price)?;
     /// if result.crossed {
     ///     // Fall back to full simulator.

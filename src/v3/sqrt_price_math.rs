@@ -239,7 +239,9 @@ fn div_u512_by_u512_rounding_up(numerator: U512, denominator: U512) -> Result<U2
 ///
 /// This replaces:
 ///
-///     mul_div_rounding_up(liquidity << 96, sqrt_p_x96, denominator)
+/// ```text
+/// mul_div_rounding_up(liquidity << 96, sqrt_p_x96, denominator)
+/// ```
 ///
 /// in the token0 next-price path.
 ///
@@ -537,7 +539,9 @@ fn amount0_delta_fast_or_wide(
 ///
 /// Formula:
 ///
-///     amount0 = liquidity * Q96 * (sqrt_b - sqrt_a) / (sqrt_a * sqrt_b)
+/// ```text
+/// amount0 = liquidity * Q96 * (sqrt_b - sqrt_a) / (sqrt_a * sqrt_b)
+/// ```
 ///
 /// This implementation is hybrid:
 /// - U256 fast path when `(liquidity << 96) * diff` fits.
@@ -562,7 +566,9 @@ pub fn get_amount0_delta(
 ///
 /// Formula:
 ///
-///     amount1 = liquidity * (sqrt_b - sqrt_a) / Q96
+/// ```text
+/// amount1 = liquidity * (sqrt_b - sqrt_a) / Q96
+/// ```
 ///
 /// Since Q96 is a power of two, this is multiply + right shift.
 /// The helper avoids U512 construction when the product fits in U256.

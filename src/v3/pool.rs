@@ -88,6 +88,7 @@ use parking_lot::RwLock;
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::types::I256 as SignedAmount;
 use crate::v3::cache::PoolCache;
 use crate::v3::price::PriceCache;
 use crate::v3::sqrt_price_math::{
@@ -96,7 +97,6 @@ use crate::v3::sqrt_price_math::{
 };
 use crate::v3::types::BalanceDelta;
 use crate::v3::{
-    amount::SignedAmount,
     error::SwapSimError,
     tick_math::{MAX_SQRT_PRICE, MAX_TICK_SPACING, MIN_SQRT_PRICE},
     ticks::{NextInitializedTick, PoolTicks, PoolTicksReadGuard},
@@ -2515,8 +2515,9 @@ pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use crate::v3::TickEntry;
+
     use super::*;
-    use arb_types::sqrt_price_x96_to_price;
     use proptest::prelude::*;
 
     // ── Shared helpers ────────────────────────────────────────────────────────

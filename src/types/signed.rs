@@ -6,14 +6,11 @@ use ruint::aliases::U256;
 // Error type
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SignedAmountError {
-    #[error("arithmetic overflow")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum I256Error {
     Overflow,
-    #[error("division by zero")]
     DivisionByZero,
-    #[error("value {0} exceeds i128::MAX")]
-    I128Overflow(U256),
+    I128Overflow,
 }
 
 // ---------------------------------------------------------------------------
@@ -30,7 +27,7 @@ pub enum SignedAmountError {
 /// # Invariant
 /// `self.negative == true` implies `self.value != U256::ZERO`.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct SignedAmount {
+pub struct I256 {
     negative: bool,
     value: U256,
 }
@@ -39,9 +36,9 @@ pub struct SignedAmount {
 // Construction
 // ---------------------------------------------------------------------------
 
-impl SignedAmount {
+impl I256 {
     /// The additive identity `0`.
-    #[inline]
+    #[inline(always)]
     pub const fn zero() -> Self {
         Self {
             negative: false,
@@ -56,7 +53,7 @@ impl SignedAmount {
     };
 
     /// Wraps a non-negative magnitude.
-    #[inline]
+    #[inline(always)]
     pub const fn positive(value: U256) -> Self {
         Self {
             negative: false,
@@ -66,7 +63,7 @@ impl SignedAmount {
 
     /// Wraps a non-positive magnitude.  If `value` is zero the result is
     /// canonical zero (sign is cleared).
-    #[inline]
+    #[inline(always)]
     pub fn negative(value: U256) -> Self {
         Self {
             negative: !value.is_zero(),
@@ -76,7 +73,7 @@ impl SignedAmount {
 
     /// Construct from a raw `(negative, magnitude)` pair, normalising the
     /// sign for zero.
-    #[inline]
+    #[inline(always)]
     pub fn from_raw(negative: bool, value: U256) -> Self {
         Self {
             negative: negative && !value.is_zero(),
@@ -89,7 +86,7 @@ impl SignedAmount {
 // From / TryFrom conversions
 // ---------------------------------------------------------------------------
 
-impl From<i128> for SignedAmount {
+impl From<i128> for I256 {
     fn from(v: i128) -> Self {
         if v < 0 {
             // i128::MIN.unsigned_abs() still fits in u128, so this is safe.
@@ -100,24 +97,33 @@ impl From<i128> for SignedAmount {
     }
 }
 
-impl From<u128> for SignedAmount {
+impl From<u128> for I256 {
     #[inline]
     fn from(v: u128) -> Self {
         Self::positive(U256::from(v))
     }
 }
 
-impl From<U256> for SignedAmount {
+impl From<U256> for I256 {
     #[inline]
     fn from(v: U256) -> Self {
         Self::positive(v)
     }
 }
 
-impl TryFrom<SignedAmount> for i128 {
-    type Error = SignedAmountError;
-    fn try_from(s: SignedAmount) -> Result<Self, Self::Error> {
-        s.to_i128_checked()
+impl TryFrom<I256> for i128 {
+    type Error = I256Error;
+    fn try_from(s: I256) -> Result<Self, Self::Error> {
+        let max = U256::from(i128::MAX as u128);
+        if s.value > max {
+            return Err(I256Error::I128Overflow);
+        }
+        let v = s.value.to::<u128>() as i128;
+        if s.negative {
+            v.checked_neg().ok_or(I256Error::Overflow)
+        } else {
+            Ok(v)
+        }
     }
 }
 
@@ -125,7 +131,7 @@ impl TryFrom<SignedAmount> for i128 {
 // Predicates & accessors
 // ---------------------------------------------------------------------------
 
-impl SignedAmount {
+impl I256 {
     /// Returns `true` if the value is zero.
     #[inline]
     pub fn is_zero(self) -> bool {
@@ -173,7 +179,7 @@ impl SignedAmount {
 // Checked arithmetic — returning `Option`
 // ---------------------------------------------------------------------------
 
-impl SignedAmount {
+impl I256 {
     /// Negation.  Always succeeds (sign-magnitude has no asymmetric MIN).
     #[inline]
     pub fn neg(self) -> Self {
@@ -271,14 +277,14 @@ impl SignedAmount {
 // Mutating helpers (used in swap-step loops)
 // ---------------------------------------------------------------------------
 
-impl SignedAmount {
+impl I256 {
     /// Add an unsigned `rhs` to this signed value, returning an error on
     /// overflow.
     ///
     /// Used for **exact-input** swaps: `amount_remaining` starts negative and
     /// moves toward zero as input tokens (net + fee) are consumed each step.
     #[inline]
-    pub fn add_unsigned(&mut self, rhs: U256) -> Result<(), SignedAmountError> {
+    pub fn add_unsigned(&mut self, rhs: U256) -> Result<(), I256Error> {
         if self.negative {
             if rhs >= self.value {
                 self.value = rhs - self.value;
@@ -287,10 +293,7 @@ impl SignedAmount {
                 self.value -= rhs;
             }
         } else {
-            self.value = self
-                .value
-                .checked_add(rhs)
-                .ok_or(SignedAmountError::Overflow)?;
+            self.value = self.value.checked_add(rhs).ok_or(I256Error::Overflow)?;
         }
         Ok(())
     }
@@ -301,12 +304,9 @@ impl SignedAmount {
     /// Used for **exact-output** swaps: `amount_remaining` starts positive and
     /// moves toward zero as output tokens are filled each step.
     #[inline]
-    pub fn sub_unsigned(&mut self, rhs: U256) -> Result<(), SignedAmountError> {
+    pub fn sub_unsigned(&mut self, rhs: U256) -> Result<(), I256Error> {
         if self.negative {
-            self.value = self
-                .value
-                .checked_add(rhs)
-                .ok_or(SignedAmountError::Overflow)?;
+            self.value = self.value.checked_add(rhs).ok_or(I256Error::Overflow)?;
         } else if rhs >= self.value {
             self.value = rhs - self.value;
             self.negative = !self.value.is_zero();
@@ -318,37 +318,16 @@ impl SignedAmount {
 }
 
 // ---------------------------------------------------------------------------
-// Fallible i128 conversion (kept for swap-sim compatibility)
-// ---------------------------------------------------------------------------
-
-impl SignedAmount {
-    /// Convert to [`i128`], failing if the magnitude exceeds [`i128::MAX`].
-    #[inline]
-    pub fn to_i128_checked(self) -> Result<i128, SignedAmountError> {
-        let max = U256::from(i128::MAX as u128);
-        if self.value > max {
-            return Err(SignedAmountError::I128Overflow(self.value));
-        }
-        let v = self.value.to::<u128>() as i128;
-        if self.negative {
-            v.checked_neg().ok_or(SignedAmountError::Overflow)
-        } else {
-            Ok(v)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Ordering
 // ---------------------------------------------------------------------------
 
-impl PartialOrd for SignedAmount {
+impl PartialOrd for I256 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for SignedAmount {
+impl Ord for I256 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering::*;
         match (self.negative, other.negative) {
@@ -364,7 +343,7 @@ impl Ord for SignedAmount {
 // Operator overloads
 // ---------------------------------------------------------------------------
 
-impl std::ops::Neg for SignedAmount {
+impl std::ops::Neg for I256 {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
@@ -372,7 +351,7 @@ impl std::ops::Neg for SignedAmount {
     }
 }
 
-impl std::ops::Add for SignedAmount {
+impl std::ops::Add for I256 {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
@@ -381,7 +360,7 @@ impl std::ops::Add for SignedAmount {
     }
 }
 
-impl std::ops::Sub for SignedAmount {
+impl std::ops::Sub for I256 {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
@@ -390,14 +369,14 @@ impl std::ops::Sub for SignedAmount {
     }
 }
 
-impl std::ops::AddAssign for SignedAmount {
+impl std::ops::AddAssign for I256 {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs;
     }
 }
 
-impl std::ops::SubAssign for SignedAmount {
+impl std::ops::SubAssign for I256 {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs;
@@ -408,7 +387,7 @@ impl std::ops::SubAssign for SignedAmount {
 // Formatting
 // ---------------------------------------------------------------------------
 
-impl fmt::Debug for SignedAmount {
+impl fmt::Debug for I256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -419,7 +398,7 @@ impl fmt::Debug for SignedAmount {
     }
 }
 
-impl fmt::Display for SignedAmount {
+impl fmt::Display for I256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.negative {
             write!(f, "-{}", self.value)
@@ -429,7 +408,7 @@ impl fmt::Display for SignedAmount {
     }
 }
 
-impl From<alloy::primitives::Signed<256, 4>> for SignedAmount {
+impl From<alloy::primitives::Signed<256, 4>> for I256 {
     #[inline]
     fn from(v: alloy::primitives::Signed<256, 4>) -> Self {
         Self::from_raw(v.is_negative(), v.unsigned_abs())
@@ -447,26 +426,26 @@ mod tests {
     fn u(v: u128) -> U256 {
         U256::from(v)
     }
-    fn pos(v: u128) -> SignedAmount {
-        SignedAmount::positive(u(v))
+    fn pos(v: u128) -> I256 {
+        I256::positive(u(v))
     }
-    fn neg(v: u128) -> SignedAmount {
-        SignedAmount::negative(u(v))
+    fn neg(v: u128) -> I256 {
+        I256::negative(u(v))
     }
 
     // --- invariant -----------------------------------------------------------
 
     #[test]
     fn negative_zero_is_canonical_zero() {
-        let z = SignedAmount::negative(U256::ZERO);
+        let z = I256::negative(U256::ZERO);
         assert!(!z.negative);
         assert!(z.is_zero());
     }
 
     #[test]
     fn from_raw_normalises_zero() {
-        let z = SignedAmount::from_raw(true, U256::ZERO);
-        assert_eq!(z, SignedAmount::zero());
+        let z = I256::from_raw(true, U256::ZERO);
+        assert_eq!(z, I256::zero());
     }
 
     // --- predicates ----------------------------------------------------------
@@ -475,12 +454,12 @@ mod tests {
     fn signum_values() {
         assert_eq!(pos(5).signum(), 1);
         assert_eq!(neg(5).signum(), -1);
-        assert_eq!(SignedAmount::zero().signum(), 0);
+        assert_eq!(I256::zero().signum(), 0);
     }
 
     #[test]
     fn is_positive_not_for_zero() {
-        assert!(!SignedAmount::zero().is_positive());
+        assert!(!I256::zero().is_positive());
         assert!(pos(1).is_positive());
         assert!(!neg(1).is_positive());
     }
@@ -501,8 +480,8 @@ mod tests {
 
     #[test]
     fn add_opposite_sign_exact_zero() {
-        assert_eq!(pos(5).checked_add(neg(5)), Some(SignedAmount::zero()));
-        assert_eq!(neg(5).checked_add(pos(5)), Some(SignedAmount::zero()));
+        assert_eq!(pos(5).checked_add(neg(5)), Some(I256::zero()));
+        assert_eq!(neg(5).checked_add(pos(5)), Some(I256::zero()));
     }
 
     #[test]
@@ -513,7 +492,7 @@ mod tests {
 
     #[test]
     fn add_overflow_returns_none() {
-        let big = SignedAmount::positive(U256::MAX);
+        let big = I256::positive(U256::MAX);
         assert_eq!(big.checked_add(pos(1)), None);
     }
 
@@ -531,15 +510,15 @@ mod tests {
     fn neg_toggles_sign() {
         assert_eq!(-pos(5), neg(5));
         assert_eq!(-neg(5), pos(5));
-        assert_eq!(-SignedAmount::zero(), SignedAmount::zero());
+        assert_eq!(-I256::zero(), I256::zero());
     }
 
     // --- ordering ------------------------------------------------------------
 
     #[test]
     fn ordering_across_signs() {
-        assert!(neg(1) < SignedAmount::zero());
-        assert!(SignedAmount::zero() < pos(1));
+        assert!(neg(1) < I256::zero());
+        assert!(I256::zero() < pos(1));
         assert!(neg(100) < neg(1));
         assert!(pos(1) < pos(100));
     }
@@ -586,22 +565,13 @@ mod tests {
         assert_eq!(r, neg(5));
     }
 
-    // #[test]
-    // fn sub_unsigned_overflow_detected() {
-    //     let mut r = neg(U256::MAX);
-    //     assert!(r.sub_unsigned(u(1)).is_err());
-    // }
-
     // --- checked_mul/div/rem -------------------------------------------------
 
     #[test]
     fn mul_unsigned() {
         assert_eq!(pos(7).checked_mul_unsigned(u(3)), Some(pos(21)));
         assert_eq!(neg(7).checked_mul_unsigned(u(3)), Some(neg(21)));
-        assert_eq!(
-            pos(7).checked_mul_unsigned(U256::ZERO),
-            Some(SignedAmount::zero())
-        );
+        assert_eq!(pos(7).checked_mul_unsigned(U256::ZERO), Some(I256::zero()));
     }
 
     #[test]
@@ -623,22 +593,24 @@ mod tests {
     #[test]
     fn to_i128_roundtrip() {
         for v in [0i128, 1, -1, i128::MAX, i128::MIN + 1] {
-            let s = SignedAmount::from(v);
-            assert_eq!(s.to_i128_checked().unwrap(), v);
+            let s = I256::from(v);
+            let result: Result<i128, _> = s.try_into();
+            assert_eq!(result.unwrap(), v);
         }
     }
 
     #[test]
     fn to_i128_overflow() {
-        let too_big = SignedAmount::positive(U256::from(i128::MAX as u128) + U256::from(1u128));
-        assert!(too_big.to_i128_checked().is_err());
+        let too_big = I256::positive(U256::from(i128::MAX as u128) + U256::from(1u128));
+        let result: Result<i128, _> = too_big.try_into();
+        assert!(result.is_err());
     }
 
     // --- From<i128> ----------------------------------------------------------
 
     #[test]
     fn from_i128_min() {
-        let s = SignedAmount::from(i128::MIN);
+        let s = I256::from(i128::MIN);
         assert!(s.is_negative());
         assert_eq!(s.abs(), U256::from(i128::MIN.unsigned_abs()));
     }
@@ -657,7 +629,7 @@ mod tests {
 
     #[test]
     fn display_zero() {
-        assert_eq!(SignedAmount::zero().to_string(), "0");
+        assert_eq!(I256::zero().to_string(), "0");
     }
 
     #[test]
@@ -671,7 +643,7 @@ mod tests {
     #[test]
     fn from_alloy_signed_positive() {
         let alloy = alloy::primitives::I256::unchecked_from(42i128);
-        let s = SignedAmount::from(alloy);
+        let s = I256::from(alloy);
 
         assert_eq!(s, pos(42));
         assert!(s.is_positive());
@@ -680,7 +652,7 @@ mod tests {
     #[test]
     fn from_alloy_signed_negative() {
         let alloy = alloy::primitives::I256::unchecked_from(-42i128);
-        let s = SignedAmount::from(alloy);
+        let s = I256::from(alloy);
 
         assert_eq!(s, neg(42));
         assert!(s.is_negative());
@@ -690,9 +662,9 @@ mod tests {
     #[test]
     fn from_alloy_signed_zero_is_canonical_zero() {
         let alloy = alloy::primitives::I256::ZERO;
-        let s = SignedAmount::from(alloy);
+        let s = I256::from(alloy);
 
-        assert_eq!(s, SignedAmount::zero());
+        assert_eq!(s, I256::zero());
         assert!(!s.is_negative());
         assert!(s.is_zero());
     }
@@ -700,7 +672,7 @@ mod tests {
     #[test]
     fn from_alloy_signed_min_preserves_full_magnitude() {
         let alloy = alloy::primitives::I256::MIN;
-        let s = SignedAmount::from(alloy);
+        let s = I256::from(alloy);
 
         assert!(s.is_negative());
         assert_eq!(s.abs(), U256::from(1u8) << 255);

@@ -363,11 +363,15 @@ pub fn mul_shift_right_rounding_up(a: U256, b: U256, shift: u32) -> Result<U256,
 ///
 /// This is a specialized replacement for:
 ///
-///     mul_div(amount, Q96, denominator)
+/// ```text
+/// mul_div(amount, Q96, denominator)
+/// ```
 ///
 /// Since Q96 = 2^96, the numerator is:
 ///
-///     amount << 96
+/// ```text
+/// amount << 96
+/// ```
 ///
 /// So we avoid a full U256 x U256 multiplication completely.
 #[inline(always)]
@@ -457,7 +461,9 @@ pub fn mul_q96_div(amount: U256, denominator: U256) -> Result<U256, MathError> {
 ///
 /// Specialized replacement for:
 ///
-///     mul_div_rounding_up(amount, Q96, denominator)
+/// ```text
+/// mul_div_rounding_up(amount, Q96, denominator)
+/// ```
 ///
 /// This avoids U256 x U256 multiplication and avoids the generic FullMath
 /// modular-inverse slow path.

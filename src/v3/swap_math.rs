@@ -12,7 +12,7 @@
 
 use ruint::aliases::U256;
 
-use crate::v3::amount::SignedAmount;
+use crate::types::I256 as SignedAmount;
 
 use super::full_math::MathError;
 use super::sqrt_price_math::{
@@ -120,7 +120,9 @@ impl FeeParams {
 
 /// Exact helper for:
 ///
-///     floor(a * mul / div)
+/// ```text
+/// floor(a * mul / div)
+/// ```
 ///
 /// where `mul` and `div` are small u32 values.
 ///
@@ -134,7 +136,9 @@ fn mul_div_u32_floor(a: U256, mul: u32, div: u32) -> Result<U256, MathError> {
 
 /// Exact helper for:
 ///
-///     ceil(a * mul / div)
+/// ```text
+/// ceil(a * mul / div)
+/// ```
 ///
 /// where `mul` and `div` are small u32 values.
 #[inline(always)]

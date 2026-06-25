@@ -17,7 +17,7 @@ use std::path::Path;
 
 use arb_dex::v2::{get_amount_out, optimal_input_v2v2, uint_sqrt, V2Pool};
 use arb_dex::v3::{
-    amount::SignedAmount,
+    SignedAmount,
     full_math::{self, mul_div, mul_div_rounding_up},
     pool::{ModifyLiquidityParams, Pool, PoolState, SwapParams},
     sqrt_price_math::{
