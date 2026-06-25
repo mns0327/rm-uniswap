@@ -7,7 +7,7 @@
 //! - Reject values outside the real Uniswap V3 domain instead of silently
 //!   truncating left shifts.
 
-use crate::v3::full_math::{MathError, mul_q96_div, mul_q96_div_rounding_up};
+use crate::core::math::full::{MathError, mul_q96_div, mul_q96_div_rounding_up};
 use ruint::aliases::{U256, U512};
 
 /// Q96 = 2^96.
@@ -600,7 +600,7 @@ pub(crate) fn div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v3::full_math::{
+    use crate::core::math::full::{
         mul_div, mul_div_rounding_up, mul_shift_right, mul_shift_right_rounding_up,
     };
 

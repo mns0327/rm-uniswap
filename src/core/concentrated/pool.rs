@@ -88,24 +88,27 @@ use parking_lot::RwLock;
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::types::I256 as SignedAmount;
-use crate::v3::cache::PoolCache;
-use crate::v3::price::PriceCache;
-use crate::v3::sqrt_price_math::{
-    get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
-    get_next_sqrt_price_from_output,
-};
-use crate::v3::types::BalanceDelta;
-use crate::v3::{
-    error::SwapSimError,
-    tick_math::{MAX_SQRT_PRICE, MAX_TICK_SPACING, MIN_SQRT_PRICE},
-    ticks::{NextInitializedTick, PoolTicks, PoolTicksReadGuard},
+use crate::Error as SwapSimError;
+use crate::core::{
+    math::{
+        full::MathError,
+        sqrt_price::{
+            get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
+            get_next_sqrt_price_from_output,
+        },
+        swap::{SwapMathError, get_sqrt_price_target},
+        tick::{
+            MAX_SQRT_PRICE, MAX_TICK, MAX_TICK_SPACING, MIN_SQRT_PRICE, MIN_TICK,
+            get_tick_at_sqrt_price,
+        },
+    },
+    types::{delta::BalanceDelta, signed::I256 as SignedAmount},
 };
 
 use super::{
-    full_math::MathError,
-    swap_math::{SwapMathError, get_sqrt_price_target},
-    tick_math::{MAX_TICK, MIN_TICK, get_sqrt_price_at_tick, get_tick_at_sqrt_price},
+    cache::PoolCache,
+    price::PriceCache,
+    ticks::{NextInitializedTick, PoolTicks, PoolTicksReadGuard},
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -2499,7 +2502,7 @@ fn validate_price_limit(
 /// # Panics
 ///
 /// Panics if `tick_spacing` is outside `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
-/// Use [`validate_tick_spacing`] before calling if the value is untrusted.
+/// Validate untrusted spacing before calling.
 pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
     assert!(
         tick_spacing >= MIN_TICK_SPACING && tick_spacing <= MAX_TICK_SPACING,
@@ -2515,7 +2518,8 @@ pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use crate::v3::TickEntry;
+    use crate::core::math::tick::get_sqrt_price_at_tick;
+    use crate::core::types::TickEntry;
 
     use super::*;
     use proptest::prelude::*;

@@ -1,15 +1,6 @@
 use ruint::aliases::U256;
 
-mod uint_exts;
-
-pub use uint_exts::uint_sqrt;
-
-pub struct V2Pool {
-    pub reserve_in: U256,
-    pub reserve_out: U256,
-    pub fee_numerator: u32,
-    pub fee_denominator: u32,
-}
+use crate::core::math::uint;
 
 /// Computes amount out for a Uniswap V2 style swap.
 ///
@@ -85,7 +76,7 @@ pub fn optimal_input_v2v2(
     }
 
     // √A_scaled via integer sqrt (no f64).
-    let sqrt_a = uint_exts::uint_sqrt(a);
+    let sqrt_a = uint::uint_sqrt(a);
 
     // numerator = √A_scaled − B_scaled
     let numerator = sqrt_a.saturating_sub(b);

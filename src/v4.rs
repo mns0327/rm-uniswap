@@ -6,14 +6,18 @@
 
 use ruint::aliases::U256;
 
-use crate::v3::{Error, SwapStep, V3FastSimulator, V3PoolState};
+pub use crate::v3::{BalanceDelta, FullMath, SqrtPriceMath, SwapMath, SwapStep, TickMath};
+use crate::{
+    Error,
+    v3::{QuoteState, Quoter},
+};
 
 /// Uniswap V4 pool state.
 ///
-/// Mirrors `V3PoolState` but includes explicit `tick_spacing`,
+/// Mirrors the V3 quote state but includes explicit `tick_spacing`,
 /// because V4 stores tick spacing directly in the PoolKey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct V4PoolState {
+pub struct PoolState {
     /// Current sqrt price X96.
     pub sqrt_price_x96: U256,
 
@@ -30,14 +34,14 @@ pub struct V4PoolState {
     pub tick_spacing: i32,
 }
 
-impl V4PoolState {
+impl PoolState {
     /// Convert this V4 state into a V3-compatible state.
     ///
     /// `tick_spacing` is intentionally dropped because it does not affect
     /// single-step swap math when no tick crossing is simulated.
     #[inline]
-    pub fn as_v3(&self) -> V3PoolState {
-        V3PoolState {
+    fn as_quote_state(&self) -> QuoteState {
+        QuoteState {
             sqrt_price_x96: self.sqrt_price_x96,
             liquidity: self.liquidity,
             tick: self.tick,
@@ -48,12 +52,12 @@ impl V4PoolState {
 
 /// Fast Uniswap V4 single-step simulator.
 ///
-/// This delegates to `V3FastSimulator`.
+/// This delegates to the shared concentrated-liquidity quote engine.
 /// Use this for cheap arbitrage pre-filtering.
 /// Use a full simulator when tick crossing matters.
-pub struct V4FastSimulator;
+pub struct Pool;
 
-impl V4FastSimulator {
+impl Pool {
     /// Quote an exact-input swap.
     ///
     /// Returns output amount for the given input amount.
@@ -61,11 +65,11 @@ impl V4FastSimulator {
     /// `zero_for_one = true` means selling currency0 for currency1.
     #[inline]
     pub fn quote_exact_input(
-        state: &V4PoolState,
+        state: &PoolState,
         amount_in: U256,
         zero_for_one: bool,
     ) -> Result<U256, Error> {
-        V3FastSimulator::quote_exact_input(&state.as_v3(), amount_in, zero_for_one)
+        Quoter::quote_exact_input(&state.as_quote_state(), amount_in, zero_for_one)
     }
 
     /// Quote an exact-output swap.
@@ -73,31 +77,31 @@ impl V4FastSimulator {
     /// Returns required input amount including fee.
     #[inline]
     pub fn quote_exact_output(
-        state: &V4PoolState,
+        state: &PoolState,
         amount_out: U256,
         zero_for_one: bool,
     ) -> Result<U256, Error> {
-        V3FastSimulator::quote_exact_output(&state.as_v3(), amount_out, zero_for_one)
+        Quoter::quote_exact_output(&state.as_quote_state(), amount_out, zero_for_one)
     }
 
     /// Return the full exact-input swap step.
     #[inline]
     pub fn step_exact_input(
-        state: &V4PoolState,
+        state: &PoolState,
         amount_in: U256,
         zero_for_one: bool,
     ) -> Result<SwapStep, Error> {
-        V3FastSimulator::step_exact_input(&state.as_v3(), amount_in, zero_for_one)
+        Quoter::step_exact_input(&state.as_quote_state(), amount_in, zero_for_one)
     }
 
     /// Return the full exact-output swap step.
     #[inline]
     pub fn step_exact_output(
-        state: &V4PoolState,
+        state: &PoolState,
         amount_out: U256,
         zero_for_one: bool,
     ) -> Result<SwapStep, Error> {
-        V3FastSimulator::step_exact_output(&state.as_v3(), amount_out, zero_for_one)
+        Quoter::step_exact_output(&state.as_quote_state(), amount_out, zero_for_one)
     }
 }
 
@@ -105,8 +109,8 @@ impl V4FastSimulator {
 mod tests {
     use super::*;
 
-    fn sample_v4_pool() -> V4PoolState {
-        V4PoolState {
+    fn sample_v4_pool() -> PoolState {
+        PoolState {
             sqrt_price_x96: U256::ONE << 96,
             liquidity: 1_000_000_000_000_000_000u128,
             tick: 0,
@@ -119,8 +123,7 @@ mod tests {
     fn v4_quote_exact_input_positive() {
         let pool = sample_v4_pool();
 
-        let out =
-            V4FastSimulator::quote_exact_input(&pool, U256::from(1_000_000u64), true).unwrap();
+        let out = Pool::quote_exact_input(&pool, U256::from(1_000_000u64), true).unwrap();
 
         assert!(out > U256::ZERO);
     }
@@ -129,8 +132,7 @@ mod tests {
     fn v4_quote_exact_output_positive() {
         let pool = sample_v4_pool();
 
-        let input =
-            V4FastSimulator::quote_exact_output(&pool, U256::from(1_000_000u64), true).unwrap();
+        let input = Pool::quote_exact_output(&pool, U256::from(1_000_000u64), true).unwrap();
 
         assert!(input > U256::ZERO);
     }
@@ -138,18 +140,18 @@ mod tests {
     #[test]
     fn v4_quote_matches_v3_for_identical_state() {
         let v4 = sample_v4_pool();
-        let v3 = v4.as_v3();
+        let v3 = v4.as_quote_state();
 
         let amount_in = U256::from(1_000_000u64);
 
         assert_eq!(
-            V4FastSimulator::quote_exact_input(&v4, amount_in, true).unwrap(),
-            V3FastSimulator::quote_exact_input(&v3, amount_in, true).unwrap(),
+            Pool::quote_exact_input(&v4, amount_in, true).unwrap(),
+            Quoter::quote_exact_input(&v3, amount_in, true).unwrap(),
         );
 
         assert_eq!(
-            V4FastSimulator::quote_exact_input(&v4, amount_in, false).unwrap(),
-            V3FastSimulator::quote_exact_input(&v3, amount_in, false).unwrap(),
+            Pool::quote_exact_input(&v4, amount_in, false).unwrap(),
+            Quoter::quote_exact_input(&v3, amount_in, false).unwrap(),
         );
     }
 
@@ -157,26 +159,26 @@ mod tests {
     fn tick_spacing_does_not_affect_single_step_quote() {
         let base = sample_v4_pool();
 
-        let pool_1 = V4PoolState {
+        let pool_1 = PoolState {
             tick_spacing: 1,
             ..base
         };
 
-        let pool_10 = V4PoolState {
+        let pool_10 = PoolState {
             tick_spacing: 10,
             ..base
         };
 
-        let pool_200 = V4PoolState {
+        let pool_200 = PoolState {
             tick_spacing: 200,
             ..base
         };
 
         let amount_in = U256::from(1_000_000u64);
 
-        let out_1 = V4FastSimulator::quote_exact_input(&pool_1, amount_in, true);
-        let out_10 = V4FastSimulator::quote_exact_input(&pool_10, amount_in, true);
-        let out_200 = V4FastSimulator::quote_exact_input(&pool_200, amount_in, true);
+        let out_1 = Pool::quote_exact_input(&pool_1, amount_in, true);
+        let out_10 = Pool::quote_exact_input(&pool_10, amount_in, true);
+        let out_200 = Pool::quote_exact_input(&pool_200, amount_in, true);
 
         assert_eq!(out_1, out_10);
         assert_eq!(out_1, out_200);
@@ -187,8 +189,8 @@ mod tests {
         let pool = sample_v4_pool();
         let amount_in = U256::from(1_000_000u64);
 
-        let step = V4FastSimulator::step_exact_input(&pool, amount_in, true).unwrap();
-        let quoted = V4FastSimulator::quote_exact_input(&pool, amount_in, true).unwrap();
+        let step = Pool::step_exact_input(&pool, amount_in, true).unwrap();
+        let quoted = Pool::quote_exact_input(&pool, amount_in, true).unwrap();
 
         assert_eq!(step.amount_out, quoted);
         assert!(step.amount_in + step.fee_amount <= amount_in);
@@ -199,8 +201,8 @@ mod tests {
         let pool = sample_v4_pool();
         let amount_out = U256::from(1_000_000u64);
 
-        let step = V4FastSimulator::step_exact_output(&pool, amount_out, false).unwrap();
-        let quoted = V4FastSimulator::quote_exact_output(&pool, amount_out, false).unwrap();
+        let step = Pool::step_exact_output(&pool, amount_out, false).unwrap();
+        let quoted = Pool::quote_exact_output(&pool, amount_out, false).unwrap();
 
         assert_eq!(quoted, step.amount_in + step.fee_amount);
         assert!(step.amount_out <= amount_out);

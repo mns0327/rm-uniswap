@@ -46,11 +46,7 @@ impl BalanceDelta {
             self.amount0 // caller receives token0
         };
 
-        if raw > 0 {
-            raw as u128
-        } else {
-            0
-        }
+        if raw > 0 { raw as u128 } else { 0 }
     }
 
     /// Direction-aware unsigned input amount.
@@ -66,11 +62,7 @@ impl BalanceDelta {
             self.amount1 // caller pays/owes token1
         };
 
-        if raw < 0 {
-            raw.unsigned_abs()
-        } else {
-            0
-        }
+        if raw < 0 { raw.unsigned_abs() } else { 0 }
     }
 }
 

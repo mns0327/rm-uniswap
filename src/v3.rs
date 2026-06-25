@@ -1,17 +1,9 @@
-pub mod cache;
-pub mod error;
-
-/// Uniswap V3/V4 math library — Rust port.
+/// Uniswap V3 facade.
 ///
 /// # Module structure
 ///
-/// | Submodule          | Mirrors                   | Responsibility                              |
-/// |--------------------|---------------------------|---------------------------------------------|
-/// | `full_math`        | `FullMath.sol`            | 512-bit `mulDiv` (overflow-safe)            |
-/// | `tick_math`        | `TickMath.sol`            | Tick ↔ `sqrtPriceX96` conversion           |
-/// | `sqrt_price_math`  | `SqrtPriceMath.sol`       | Token deltas from price moves               |
-/// | `swap_math`        | `SwapMath.sol`            | Single-step swap computation                |
-/// | `full_simulator`   | *(off-chain)*             | Multi-tick swap simulation                  |
+/// The public API mirrors the Solidity library names while using Rust naming
+/// for methods: [`FullMath`], [`SqrtPriceMath`], [`SwapMath`], and [`TickMath`].
 ///
 /// # Simulator selection guide
 ///
@@ -19,65 +11,209 @@ pub mod error;
 /// ┌──────────────────────────────────────────────────────────────┐
 /// │  Is the swap large enough to cross an initialized tick?      │
 /// │                                                              │
-/// │   No → V3FastSimulator (single step, O(1), no tick crossing) │
-/// │  Yes → V3FullSimulator (tick-crossing loop, O(log n / step)) │
+/// │   No → Quoter (single step, O(1), no tick crossing)          │
+/// │  Yes → Pool (tick-crossing loop)                             │
 /// └──────────────────────────────────────────────────────────────┘
 /// ```
 ///
-/// Use `V3FastSimulator` as a cheap pre-filter.  When it indicates a tick
-/// may be crossed ([`TickCrossResult::crossed`]), re-price with
-/// [`V3FullSimulator`].
-pub mod full_math;
-pub mod pool;
-pub mod price;
-pub mod sqrt_price_math;
-pub mod swap_math;
-pub mod tick_math;
-pub mod ticks;
-pub mod types;
-
+/// Use [`Quoter`] as a cheap pre-filter. When it reaches a tick boundary,
+/// re-price with [`Pool`].
 pub use crate::Error;
-pub use crate::types::I256 as SignedAmount;
-pub use pool::{FullSwapResult, Pool, PoolState};
-pub use swap_math::SwapStep;
-pub use tick_math::{MAX_TICK, MIN_TICK};
-pub use ticks::{PoolTicks, TickInfo};
+pub use crate::core::concentrated::pool::{
+    FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolState, SwapParams,
+    SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in, delta_amount_out,
+    tick_spacing_to_max_liquidity_per_tick,
+};
+pub use crate::core::concentrated::ticks::{PoolTicks, TickInfo};
+pub use crate::core::math::swap::SwapStep;
+pub use crate::core::types::TickEntry;
+pub use crate::core::types::delta::BalanceDelta;
+pub use crate::core::types::signed::I256 as SignedAmount;
 
 use ruint::aliases::U256;
 
-use serde::{Deserialize, Serialize};
+use crate::core::math::{
+    full as full_math, sqrt_price as sqrt_price_math, swap as swap_math, tick as tick_math,
+};
 use swap_math::compute_swap_step;
 use tick_math::{MAX_SQRT_PRICE, MIN_SQRT_PRICE};
 
-// ─── Tick ────────────────────────────────────────────────────────────────────
+/// Solidity-compatible facade for `FullMath.sol`.
+pub struct FullMath;
 
-/// A single initialized tick in a V3/V4 pool.
-///
-/// Stored only while `liquidity_gross > 0`. When a burn/remove operation
-/// drains the last liquidity from a tick, the entry is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TickEntry {
-    pub tick_idx: i32,
-    /// Signed net liquidity crossing this tick upward.
-    /// Uniswap convention: add when crossing up, subtract when crossing down.
-    pub liquidity_net: i128,
-    /// Total outstanding liquidity referencing this tick as a boundary.
-    pub liquidity_gross: u128,
+impl FullMath {
+    pub fn mul_div(a: U256, b: U256, denominator: U256) -> Result<U256, Error> {
+        full_math::mul_div(a, b, denominator)
+    }
+
+    pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> Result<U256, Error> {
+        full_math::mul_div_rounding_up(a, b, denominator)
+    }
+
+    pub fn mul_shift_right(a: U256, b: U256, shift: u32) -> Result<U256, Error> {
+        full_math::mul_shift_right(a, b, shift)
+    }
+
+    pub fn mul_shift_right_rounding_up(a: U256, b: U256, shift: u32) -> Result<U256, Error> {
+        full_math::mul_shift_right_rounding_up(a, b, shift)
+    }
 }
+
+/// Solidity-compatible facade for `SqrtPriceMath.sol`.
+pub struct SqrtPriceMath;
+
+impl SqrtPriceMath {
+    pub fn get_next_sqrt_price_from_amount0_rounding_up(
+        sqrt_price_x96: U256,
+        liquidity: U256,
+        amount: U256,
+        add: bool,
+    ) -> Result<U256, Error> {
+        sqrt_price_math::get_next_sqrt_price_from_amount0_rounding_up(
+            sqrt_price_x96,
+            liquidity,
+            amount,
+            add,
+        )
+    }
+
+    pub fn get_next_sqrt_price_from_amount1_rounding_down(
+        sqrt_price_x96: U256,
+        liquidity: U256,
+        amount: U256,
+        add: bool,
+    ) -> Result<U256, Error> {
+        sqrt_price_math::get_next_sqrt_price_from_amount1_rounding_down(
+            sqrt_price_x96,
+            liquidity,
+            amount,
+            add,
+        )
+    }
+
+    pub fn get_amount0_delta(
+        sqrt_a_x96: U256,
+        sqrt_b_x96: U256,
+        liquidity: U256,
+        round_up: bool,
+    ) -> Result<U256, Error> {
+        sqrt_price_math::get_amount0_delta(sqrt_a_x96, sqrt_b_x96, liquidity, round_up)
+    }
+
+    pub fn get_amount1_delta(
+        sqrt_a_x96: U256,
+        sqrt_b_x96: U256,
+        liquidity: U256,
+        round_up: bool,
+    ) -> Result<U256, Error> {
+        sqrt_price_math::get_amount1_delta(sqrt_a_x96, sqrt_b_x96, liquidity, round_up)
+    }
+
+    pub fn get_next_sqrt_price_from_input(
+        sqrt_price_x96: U256,
+        liquidity: U256,
+        amount_in: U256,
+        zero_for_one: bool,
+    ) -> Result<U256, Error> {
+        sqrt_price_math::get_next_sqrt_price_from_input(
+            sqrt_price_x96,
+            liquidity,
+            amount_in,
+            zero_for_one,
+        )
+    }
+
+    pub fn get_next_sqrt_price_from_output(
+        sqrt_price_x96: U256,
+        liquidity: U256,
+        amount_out: U256,
+        zero_for_one: bool,
+    ) -> Result<U256, Error> {
+        sqrt_price_math::get_next_sqrt_price_from_output(
+            sqrt_price_x96,
+            liquidity,
+            amount_out,
+            zero_for_one,
+        )
+    }
+}
+
+/// Solidity-compatible facade for `SwapMath.sol`.
+pub struct SwapMath;
+
+impl SwapMath {
+    pub const MAX_SWAP_FEE: u32 = swap_math::MAX_SWAP_FEE;
+
+    pub fn compute_swap_step(
+        sqrt_price_current_x96: U256,
+        sqrt_price_target_x96: U256,
+        liquidity: u128,
+        amount_remaining: SignedAmount,
+        fee_pips: u32,
+    ) -> Result<SwapStep, Error> {
+        swap_math::compute_swap_step(
+            sqrt_price_current_x96,
+            sqrt_price_target_x96,
+            liquidity,
+            amount_remaining,
+            fee_pips,
+        )
+    }
+
+    pub fn get_sqrt_price_target(
+        zero_for_one: bool,
+        sqrt_price_next_x96: U256,
+        sqrt_price_limit_x96: U256,
+    ) -> U256 {
+        swap_math::get_sqrt_price_target(zero_for_one, sqrt_price_next_x96, sqrt_price_limit_x96)
+    }
+}
+
+/// Solidity-compatible facade for `TickMath.sol`.
+pub struct TickMath;
+
+impl TickMath {
+    pub const MIN_TICK: i32 = tick_math::MIN_TICK;
+    pub const MAX_TICK: i32 = tick_math::MAX_TICK;
+    pub const MIN_SQRT_PRICE: U256 = tick_math::MIN_SQRT_PRICE;
+    pub const MAX_SQRT_PRICE: U256 = tick_math::MAX_SQRT_PRICE;
+
+    pub fn get_sqrt_price_at_tick(tick: i32) -> Result<U256, Error> {
+        tick_math::get_sqrt_price_at_tick(tick)
+    }
+
+    pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, Error> {
+        tick_math::get_tick_at_sqrt_price(sqrt_price_x96)
+    }
+
+    pub fn max_usable_tick(tick_spacing: i32) -> Result<i32, Error> {
+        tick_math::max_usable_tick(tick_spacing)
+    }
+
+    pub fn min_usable_tick(tick_spacing: i32) -> Result<i32, Error> {
+        tick_math::min_usable_tick(tick_spacing)
+    }
+
+    pub fn most_significant_bit(value: U256) -> Result<u32, Error> {
+        tick_math::most_significant_bit(value)
+    }
+}
+
+// ─── Tick ────────────────────────────────────────────────────────────────────
 
 // ─── Pool state ───────────────────────────────────────────────────────────────
 
 /// Lightweight V3 pool state used by the fast single-step simulator.
 ///
-/// For multi-tick simulation, use [`FullPoolState`] with [`V3FullSimulator`].
+/// For multi-tick simulation, use [`PoolState`] with [`Pool`].
 ///
 /// # Derivations
 ///
-/// `PartialEq` and `Hash` are derived so callers can use `V3PoolState` as a
+/// `PartialEq` and `Hash` are derived so callers can use `QuoteState` as a
 /// cache key when evaluating many routes in parallel — a common pattern in
 /// arbitrage bots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct V3PoolState {
+pub struct QuoteState {
     /// Current sqrt price in Q64.96 fixed-point.
     pub sqrt_price_x96: U256,
     /// Active liquidity in the current tick range.
@@ -90,7 +226,7 @@ pub struct V3PoolState {
 
 // ─── Tick-crossing result ─────────────────────────────────────────────────────
 
-/// Result of [`V3FastSimulator::step_until_tick`].
+/// Result of [`Quoter::step_until_tick`].
 ///
 /// Using a named struct instead of a raw tuple makes the `crossed` field
 /// self-documenting at every call site.
@@ -116,11 +252,11 @@ pub struct TickCrossResult {
 /// This is O(1) and suitable for high-frequency arbitrage opportunity
 /// screening.
 ///
-/// # When to use this vs [`V3FullSimulator`]
+/// # When to use this vs [`Pool`]
 ///
-/// * **Use `V3FastSimulator`** when the swap amount is expected to be small
+/// * **Use `Quoter`** when the swap amount is expected to be small
 ///   relative to the range depth, or as a first-pass filter.
-/// * **Use `V3FullSimulator`** when [`step_until_tick`][Self::step_until_tick]
+/// * **Use `Pool`** when [`step_until_tick`][Self::step_until_tick]
 ///   returns `crossed = true`, or when you need an accurate quote for a large
 ///   swap that crosses multiple ticks.
 ///
@@ -129,9 +265,9 @@ pub struct TickCrossResult {
 /// All methods return `Result<_, Error>` rather than panicking.
 /// In arbitrage-critical code, a panic kills the whole process; returning an
 /// error lets the caller skip this route and try the next one.
-pub struct V3FastSimulator;
+pub struct Quoter;
 
-impl V3FastSimulator {
+impl Quoter {
     /// Quote the output for an exact-input swap.
     ///
     /// Runs a single swap step with the price limit set to the extreme of the
@@ -147,7 +283,7 @@ impl V3FastSimulator {
     /// `fee >= 1_000_000` ([`Error::FeeTooLarge`]).
     #[inline]
     pub fn quote_exact_input(
-        state: &V3PoolState,
+        state: &QuoteState,
         amount_in: U256,
         zero_for_one: bool,
     ) -> Result<U256, Error> {
@@ -168,7 +304,7 @@ impl V3FastSimulator {
     /// ([`Error::MaxFeeExactOut`]).
     #[inline]
     pub fn quote_exact_output(
-        state: &V3PoolState,
+        state: &QuoteState,
         amount_out: U256,
         zero_for_one: bool,
     ) -> Result<U256, Error> {
@@ -188,7 +324,7 @@ impl V3FastSimulator {
     /// Propagates [`Error`].
     #[inline]
     pub fn step_exact_input(
-        state: &V3PoolState,
+        state: &QuoteState,
         amount_in: U256,
         zero_for_one: bool,
     ) -> Result<SwapStep, Error> {
@@ -212,7 +348,7 @@ impl V3FastSimulator {
     /// ([`Error::MaxFeeExactOut`]).
     #[inline]
     pub fn step_exact_output(
-        state: &V3PoolState,
+        state: &QuoteState,
         amount_out: U256,
         zero_for_one: bool,
     ) -> Result<SwapStep, Error> {
@@ -235,7 +371,7 @@ impl V3FastSimulator {
     ///   the current tick range — the fast result is accurate.
     /// * If [`TickCrossResult::crossed`] is `true`, the price reached the
     ///   next initialized tick boundary and you **must** call
-    ///   [`V3FullSimulator::swap`] to get an accurate quote.
+    ///   [`Pool::swap`] to get an accurate quote.
     ///
     /// # Parameters
     ///
@@ -250,17 +386,16 @@ impl V3FastSimulator {
     /// # Example
     ///
     /// ```ignore
-    /// let result = V3FastSimulator::step_until_tick(&pool, amount_in, true, next_price)?;
+    /// let result = Quoter::step_until_tick(&pool, amount_in, next_price)?;
     /// if result.crossed {
     ///     // Fall back to full simulator.
-    ///     let full = V3FullSimulator::swap(&full_state, params)?;
+    ///     let full = Pool::swap(&full_state, params)?;
     /// }
     /// ```
     #[inline]
     pub fn step_until_tick(
-        state: &V3PoolState,
+        state: &QuoteState,
         amount_in: U256,
-        zero_for_one: bool,
         next_initialized_tick_price_x96: U256,
     ) -> Result<TickCrossResult, Error> {
         // FIX: propagate Result.
@@ -303,7 +438,7 @@ fn extreme_price_target(zero_for_one: bool) -> U256 {
 
 #[cfg(test)]
 mod tests {
-    use crate::v3::tick_math::get_sqrt_price_at_tick;
+    use crate::core::math::tick::get_sqrt_price_at_tick;
 
     use super::*;
     use proptest::prelude::*;
@@ -319,8 +454,8 @@ mod tests {
         U256::ONE << 96
     }
 
-    fn basic_pool() -> V3PoolState {
-        V3PoolState {
+    fn basic_pool() -> QuoteState {
+        QuoteState {
             sqrt_price_x96: sqrt_price_1_1(),
             liquidity: 1_000_000_000_000_000_000u128,
             tick: 0,
@@ -333,7 +468,7 @@ mod tests {
     #[test]
     fn quote_exact_input_returns_positive_output() {
         let pool = basic_pool();
-        let out = V3FastSimulator::quote_exact_input(&pool, U256::from(1_000_000u64), true)
+        let out = Quoter::quote_exact_input(&pool, U256::from(1_000_000u64), true)
             .expect("quote should succeed");
         assert!(out > U256::ZERO);
     }
@@ -341,17 +476,15 @@ mod tests {
     #[test]
     fn quote_exact_output_returns_positive_input_required() {
         let pool = basic_pool();
-        let input_required =
-            V3FastSimulator::quote_exact_output(&pool, U256::from(1_000_000u64), true)
-                .expect("quote should succeed");
+        let input_required = Quoter::quote_exact_output(&pool, U256::from(1_000_000u64), true)
+            .expect("quote should succeed");
         assert!(input_required > U256::ZERO);
     }
 
     #[test]
     fn exact_input_zero_for_one_moves_price_down() {
         let pool = basic_pool();
-        let step =
-            V3FastSimulator::step_exact_input(&pool, ether(1), true).expect("step should succeed");
+        let step = Quoter::step_exact_input(&pool, ether(1), true).expect("step should succeed");
         assert!(step.sqrt_ratio_next_x96 < pool.sqrt_price_x96);
         assert!(step.amount_in > U256::ZERO);
         assert!(step.amount_out > U256::ZERO);
@@ -361,8 +494,7 @@ mod tests {
     #[test]
     fn exact_input_one_for_zero_moves_price_up() {
         let pool = basic_pool();
-        let step =
-            V3FastSimulator::step_exact_input(&pool, ether(1), false).expect("step should succeed");
+        let step = Quoter::step_exact_input(&pool, ether(1), false).expect("step should succeed");
         assert!(step.sqrt_ratio_next_x96 > pool.sqrt_price_x96);
         assert!(step.amount_in > U256::ZERO);
         assert!(step.amount_out > U256::ZERO);
@@ -372,8 +504,7 @@ mod tests {
     #[test]
     fn zero_amount_exact_input_returns_zero_amounts() {
         let pool = basic_pool();
-        let step = V3FastSimulator::step_exact_input(&pool, U256::ZERO, true)
-            .expect("step should succeed");
+        let step = Quoter::step_exact_input(&pool, U256::ZERO, true).expect("step should succeed");
         assert_eq!(step.sqrt_ratio_next_x96, pool.sqrt_price_x96);
         assert_eq!(step.amount_in, U256::ZERO);
         assert_eq!(step.amount_out, U256::ZERO);
@@ -383,8 +514,8 @@ mod tests {
     #[test]
     fn zero_amount_exact_output_returns_zero_amounts() {
         let pool = basic_pool();
-        let step = V3FastSimulator::step_exact_output(&pool, U256::ZERO, false)
-            .expect("step should succeed");
+        let step =
+            Quoter::step_exact_output(&pool, U256::ZERO, false).expect("step should succeed");
         assert_eq!(step.sqrt_ratio_next_x96, pool.sqrt_price_x96);
         assert_eq!(step.amount_in, U256::ZERO);
         assert_eq!(step.amount_out, U256::ZERO);
@@ -396,9 +527,9 @@ mod tests {
     #[test]
     fn exact_output_quote_equals_step_in_plus_fee() {
         let pool = basic_pool();
-        let step = V3FastSimulator::step_exact_output(&pool, U256::from(1_000_000u64), true)
+        let step = Quoter::step_exact_output(&pool, U256::from(1_000_000u64), true)
             .expect("step should succeed");
-        let quoted = V3FastSimulator::quote_exact_output(&pool, U256::from(1_000_000u64), true)
+        let quoted = Quoter::quote_exact_output(&pool, U256::from(1_000_000u64), true)
             .expect("quote should succeed");
         assert_eq!(quoted, step.amount_in + step.fee_amount);
     }
@@ -406,9 +537,9 @@ mod tests {
     #[test]
     fn exact_input_quote_equals_step_amount_out() {
         let pool = basic_pool();
-        let step = V3FastSimulator::step_exact_input(&pool, U256::from(1_000_000u64), false)
+        let step = Quoter::step_exact_input(&pool, U256::from(1_000_000u64), false)
             .expect("step should succeed");
-        let quoted = V3FastSimulator::quote_exact_input(&pool, U256::from(1_000_000u64), false)
+        let quoted = Quoter::quote_exact_input(&pool, U256::from(1_000_000u64), false)
             .expect("quote should succeed");
         assert_eq!(quoted, step.amount_out);
     }
@@ -421,7 +552,7 @@ mod tests {
         // FIX: get_sqrt_price_at_tick returns Result.
         let next_tick_price = get_sqrt_price_at_tick(-60).unwrap();
 
-        let result = V3FastSimulator::step_until_tick(&pool, ether(1_000), true, next_tick_price)
+        let result = Quoter::step_until_tick(&pool, ether(1_000), next_tick_price)
             .expect("step should succeed");
 
         // A large swap should reach the tick boundary.
@@ -436,9 +567,8 @@ mod tests {
         let pool = basic_pool();
         let next_tick_price = get_sqrt_price_at_tick(-60).unwrap();
 
-        let result =
-            V3FastSimulator::step_until_tick(&pool, U256::from(1_000u64), true, next_tick_price)
-                .expect("step should succeed");
+        let result = Quoter::step_until_tick(&pool, U256::from(1_000u64), next_tick_price)
+            .expect("step should succeed");
 
         // A tiny swap should not reach the tick boundary.
         assert!(
@@ -455,9 +585,9 @@ mod tests {
     #[test]
     fn larger_input_returns_at_least_as_much_output() {
         let pool = basic_pool();
-        let small_out = V3FastSimulator::quote_exact_input(&pool, U256::from(1_000u64), true)
+        let small_out = Quoter::quote_exact_input(&pool, U256::from(1_000u64), true)
             .expect("quote should succeed");
-        let large_out = V3FastSimulator::quote_exact_input(&pool, U256::from(1_000_000u64), true)
+        let large_out = Quoter::quote_exact_input(&pool, U256::from(1_000_000u64), true)
             .expect("quote should succeed");
         assert!(large_out >= small_out);
     }
@@ -468,11 +598,11 @@ mod tests {
     fn exact_input_round_trip_requires_positive_input() {
         let pool = basic_pool();
         let amount_in = U256::from(1_000_000u64);
-        let amount_out = V3FastSimulator::quote_exact_input(&pool, amount_in, true)
-            .expect("quote should succeed");
+        let amount_out =
+            Quoter::quote_exact_input(&pool, amount_in, true).expect("quote should succeed");
         if amount_out > U256::ZERO {
-            let input_required = V3FastSimulator::quote_exact_output(&pool, amount_out, true)
-                .expect("quote should succeed");
+            let input_required =
+                Quoter::quote_exact_output(&pool, amount_out, true).expect("quote should succeed");
             assert!(input_required > U256::ZERO);
         }
     }
@@ -485,7 +615,7 @@ mod tests {
         // so this should succeed, not error.  The error case is exact-out.
         let mut pool = basic_pool();
         pool.fee = 1_000_000;
-        let result = V3FastSimulator::step_exact_input(&pool, U256::from(1_000u64), true);
+        let result = Quoter::step_exact_input(&pool, U256::from(1_000u64), true);
         // SwapMath allows 100% fee for exact-in.
         assert!(result.is_ok());
     }
@@ -494,7 +624,7 @@ mod tests {
     fn exact_output_rejects_fee_of_100_percent() {
         let mut pool = basic_pool();
         pool.fee = 1_000_000; // 100 % — undefined for exact-out.
-        let err = V3FastSimulator::step_exact_output(&pool, U256::from(1_000u64), true)
+        let err = Quoter::step_exact_output(&pool, U256::from(1_000u64), true)
             .expect_err("exact-out with 100% fee must fail");
         assert_eq!(err, Error::MaxFeeExactOut);
     }
@@ -512,7 +642,7 @@ mod tests {
             fee         in 0u32..=1_000_000u32,
             liquidity   in 1u128..u128::MAX,
         ) {
-            let pool = V3PoolState {
+            let pool = QuoteState {
                 sqrt_price_x96: sqrt_price_1_1(),
                 liquidity: liquidity,
                 tick: 0,
@@ -521,7 +651,7 @@ mod tests {
 
             // A fee of exactly 1_000_000 with exact-in is valid per SwapMath.
             // We propagate the Result: if it errors, just skip this case.
-            let Ok(step) = V3FastSimulator::step_exact_input(
+            let Ok(step) = Quoter::step_exact_input(
                 &pool,
                 U256::from(amount),
                 zero_for_one,
@@ -552,7 +682,7 @@ mod tests {
             fee         in 0u32..999_999u32,
             liquidity   in 1u128..u128::MAX,
         ) {
-            let pool = V3PoolState {
+            let pool = QuoteState {
                 sqrt_price_x96: sqrt_price_1_1(),
                 liquidity: liquidity,
                 tick: 0,
@@ -560,7 +690,7 @@ mod tests {
             };
 
             // FIX: handle Result.
-            let step = V3FastSimulator::step_exact_output(
+            let step = Quoter::step_exact_output(
                 &pool,
                 U256::from(amount_out),
                 zero_for_one,

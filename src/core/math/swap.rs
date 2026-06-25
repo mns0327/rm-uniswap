@@ -12,10 +12,10 @@
 
 use ruint::aliases::U256;
 
-use crate::types::I256 as SignedAmount;
+use crate::core::types::signed::I256 as SignedAmount;
 
-use super::full_math::MathError;
-use super::sqrt_price_math::{
+use super::full::MathError;
+use super::sqrt_price::{
     get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
     get_next_sqrt_price_from_output,
 };

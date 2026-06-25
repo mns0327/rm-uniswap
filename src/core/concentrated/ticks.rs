@@ -7,7 +7,13 @@ use std::{
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::v3::{MAX_TICK, MIN_TICK, TickEntry, error::SwapSimError, tick_math::MAX_TICK_SPACING};
+use crate::{
+    Error as SwapSimError,
+    core::{
+        math::tick::{MAX_TICK, MAX_TICK_SPACING, MIN_TICK},
+        types::TickEntry,
+    },
+};
 
 pub const MIN_TICK_SPACING: i32 = 1;
 

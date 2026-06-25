@@ -1,6 +1,6 @@
 use alloy::primitives::U256;
 
-use crate::types::atomic_f64::AtomicF64;
+use crate::core::types::atomic_f64::AtomicF64;
 
 /// Fee denominator used by Uniswap-style fee pips.
 ///

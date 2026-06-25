@@ -3,10 +3,12 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use ruint::aliases::U256;
 
-use crate::v3::{
-    error::SwapSimError,
-    sqrt_price_math::{get_amount0_delta, get_amount1_delta},
-    tick_math::get_sqrt_price_at_tick as compute_sqrt_price_at_tick,
+use crate::{
+    Error as SwapSimError,
+    core::math::{
+        sqrt_price::{get_amount0_delta, get_amount1_delta},
+        tick::get_sqrt_price_at_tick as compute_sqrt_price_at_tick,
+    },
 };
 
 const MAX_SWAP_FEE: u32 = 1_000_000;
