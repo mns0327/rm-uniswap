@@ -7,7 +7,7 @@
 //! - Reject values outside the real Uniswap V3 domain instead of silently
 //!   truncating left shifts.
 
-use crate::v3::full_math::{mul_q96_div, mul_q96_div_rounding_up, MathError};
+use crate::v3::full_math::{MathError, mul_q96_div, mul_q96_div_rounding_up};
 use ruint::aliases::{U256, U512};
 
 /// Q96 = 2^96.
@@ -48,44 +48,6 @@ impl From<MathError> for SqrtPriceMathError {
     }
 }
 
-// ─── Cold error constructors ──────────────────────────────────────────────────
-
-#[cold]
-#[inline(never)]
-fn err_zero_price() -> SqrtPriceMathError {
-    SqrtPriceMathError::ZeroPrice
-}
-
-#[cold]
-#[inline(never)]
-fn err_zero_liquidity() -> SqrtPriceMathError {
-    SqrtPriceMathError::ZeroLiquidity
-}
-
-#[cold]
-#[inline(never)]
-fn err_price_overflow() -> SqrtPriceMathError {
-    SqrtPriceMathError::PriceOverflow
-}
-
-#[cold]
-#[inline(never)]
-fn err_price_underflow() -> SqrtPriceMathError {
-    SqrtPriceMathError::PriceUnderflow
-}
-
-#[cold]
-#[inline(never)]
-fn err_insufficient_token0() -> SqrtPriceMathError {
-    SqrtPriceMathError::InsufficientToken0Reserves
-}
-
-#[cold]
-#[inline(never)]
-fn err_division_by_zero() -> SqrtPriceMathError {
-    SqrtPriceMathError::DivisionByZero
-}
-
 // ─── Basic helpers ────────────────────────────────────────────────────────────
 
 #[inline(always)]
@@ -107,21 +69,17 @@ fn narrow_u512_to_u256(v: U512) -> Result<U256, MathError> {
 
 #[inline(always)]
 fn sort_sqrt_ratios(a: U256, b: U256) -> (U256, U256) {
-    if a > b {
-        (b, a)
-    } else {
-        (a, b)
-    }
+    if a > b { (b, a) } else { (a, b) }
 }
 
 #[inline(always)]
 fn validate_sqrt_price(sqrt_p_x96: U256) -> Result<(), SqrtPriceMathError> {
     if sqrt_p_x96.is_zero() {
-        return Err(err_zero_price());
+        return Err(SqrtPriceMathError::ZeroPrice);
     }
 
     if sqrt_p_x96 > MAX_UINT160 {
-        return Err(err_price_overflow());
+        return Err(SqrtPriceMathError::PriceOverflow);
     }
 
     Ok(())
@@ -130,11 +88,11 @@ fn validate_sqrt_price(sqrt_p_x96: U256) -> Result<(), SqrtPriceMathError> {
 #[inline(always)]
 fn validate_nonzero_liquidity(liquidity: U256) -> Result<(), SqrtPriceMathError> {
     if liquidity.is_zero() {
-        return Err(err_zero_liquidity());
+        return Err(SqrtPriceMathError::ZeroLiquidity);
     }
 
     if liquidity > MAX_UINT128 {
-        return Err(err_price_overflow());
+        return Err(SqrtPriceMathError::PriceOverflow);
     }
 
     Ok(())
@@ -143,7 +101,7 @@ fn validate_nonzero_liquidity(liquidity: U256) -> Result<(), SqrtPriceMathError>
 #[inline(always)]
 fn validate_liquidity_allow_zero(liquidity: U256) -> Result<(), SqrtPriceMathError> {
     if liquidity > MAX_UINT128 {
-        return Err(err_price_overflow());
+        return Err(SqrtPriceMathError::PriceOverflow);
     }
 
     Ok(())
@@ -166,11 +124,11 @@ fn validate_delta_inputs(
     liquidity: U256,
 ) -> Result<(), SqrtPriceMathError> {
     if sqrt_a.is_zero() {
-        return Err(err_zero_price());
+        return Err(SqrtPriceMathError::ZeroPrice);
     }
 
     if sqrt_b > MAX_UINT160 {
-        return Err(err_price_overflow());
+        return Err(SqrtPriceMathError::PriceOverflow);
     }
 
     validate_liquidity_allow_zero(liquidity)?;
@@ -348,7 +306,7 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up(
                     liquidity_sqrt_q96_div_rounding_up(liquidity, sqrt_p_x96, denominator)?;
 
                 if result > MAX_UINT160 {
-                    return Err(err_price_overflow());
+                    return Err(SqrtPriceMathError::PriceOverflow);
                 }
 
                 return Ok(result);
@@ -361,12 +319,14 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up(
         //
         // This matches the Solidity fallback branch.
         let base = numerator1 / sqrt_p_x96;
-        let denominator = base.checked_add(amount).ok_or_else(err_price_overflow)?;
+        let denominator = base
+            .checked_add(amount)
+            .ok_or_else(|| SqrtPriceMathError::PriceOverflow)?;
 
         let result = div_rounding_up_u256_nonzero(numerator1, denominator)?;
 
         if result > MAX_UINT160 {
-            return Err(err_price_overflow());
+            return Err(SqrtPriceMathError::PriceOverflow);
         }
 
         Ok(result)
@@ -374,7 +334,7 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up(
         let (product, product_overflowed) = amount.overflowing_mul(sqrt_p_x96);
 
         if product_overflowed || numerator1 <= product {
-            return Err(err_insufficient_token0());
+            return Err(SqrtPriceMathError::InsufficientToken0Reserves);
         }
 
         let denominator = numerator1 - product;
@@ -382,7 +342,7 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up(
         let result = liquidity_sqrt_q96_div_rounding_up(liquidity, sqrt_p_x96, denominator)?;
 
         if result > MAX_UINT160 {
-            return Err(err_price_overflow());
+            return Err(SqrtPriceMathError::PriceOverflow);
         }
 
         Ok(result)
@@ -418,10 +378,10 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down(
 
         let result = sqrt_p_x96
             .checked_add(quotient)
-            .ok_or_else(err_price_overflow)?;
+            .ok_or_else(|| SqrtPriceMathError::PriceOverflow)?;
 
         if result > MAX_UINT160 {
-            return Err(err_price_overflow());
+            return Err(SqrtPriceMathError::PriceOverflow);
         }
 
         Ok(result)
@@ -433,7 +393,7 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down(
         };
 
         if sqrt_p_x96 <= quotient {
-            return Err(err_price_underflow());
+            return Err(SqrtPriceMathError::PriceUnderflow);
         }
 
         Ok(sqrt_p_x96 - quotient)
@@ -647,7 +607,7 @@ pub fn get_next_sqrt_price_from_output(
 #[inline]
 pub(crate) fn div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathError> {
     if b.is_zero() {
-        return Err(err_division_by_zero());
+        return Err(SqrtPriceMathError::DivisionByZero);
     }
 
     Ok(div_rounding_up_u256_nonzero(a, b)?)
@@ -901,11 +861,7 @@ mod tests {
                 0,
             ]);
 
-            if v.is_zero() {
-                U256::ONE
-            } else {
-                v
-            }
+            if v.is_zero() { U256::ONE } else { v }
         }
 
         fn small_amount(&mut self) -> U256 {
@@ -1229,11 +1185,7 @@ mod tests {
             let sqrt_p = rng.u160_as_u256_nonzero();
             let liquidity = {
                 let v = rng.u128_as_u256();
-                if v.is_zero() {
-                    U256::ONE
-                } else {
-                    v
-                }
+                if v.is_zero() { U256::ONE } else { v }
             };
 
             // Keep most random cases within realistic swap sizes so both
@@ -1341,11 +1293,7 @@ mod tests {
             let sqrt_p = rng.u160_as_u256_nonzero();
             let liquidity = {
                 let v = rng.u128_as_u256();
-                if v.is_zero() {
-                    U256::ONE
-                } else {
-                    v
-                }
+                if v.is_zero() { U256::ONE } else { v }
             };
 
             let amount = rng.small_amount();
