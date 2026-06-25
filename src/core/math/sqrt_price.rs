@@ -1,10 +1,10 @@
-//! Optimized port of Uniswap V3 `SqrtPriceMath`.
+//! Optimized port of Uniswap V4 `SqrtPriceMath`.
 //!
 //! Design goals:
 //! - Keep Uniswap-compatible rounding semantics.
 //! - Avoid Solidity-style overflow checks that are expensive in Rust.
 //! - Avoid generic FullMath paths when the expression has a cheaper fixed form.
-//! - Reject values outside the real Uniswap V3 domain instead of silently
+//! - Reject values outside the real Uniswap V4 domain instead of silently
 //!   truncating left shifts.
 
 use crate::core::math::full::{MathError, mul_q96_div, mul_q96_div_rounding_up};
@@ -13,10 +13,10 @@ use ruint::aliases::{U256, U512};
 /// Q96 = 2^96.
 const Q96_SHIFT: u32 = 96;
 
-/// Maximum uint128: Uniswap V3 liquidity type.
+/// Maximum uint128: Uniswap V4 liquidity type.
 const MAX_UINT128: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0, 0]);
 
-/// Maximum uint160: Uniswap V3 sqrt price type.
+/// Maximum uint160: Uniswap V4 sqrt price type.
 const MAX_UINT160: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0xFFFF_FFFF, 0]);
 
 /// Low 96-bit mask for U256.

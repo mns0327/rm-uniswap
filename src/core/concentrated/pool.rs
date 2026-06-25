@@ -5,9 +5,7 @@
 //! The loop structure, amount-accounting variables, tick-crossing logic, and
 //! final `BalanceDelta` assembly mirror the Solidity source exactly.
 //!
-//! V4 pools use identical swap math to V3; the only structural difference is
-//! that `tick_spacing` comes from `PoolKey` rather than being inferred from
-//! the fee tier.
+//! Tick spacing is supplied explicitly from the V4 `PoolKey`.
 //!
 //! # BalanceDelta sign convention
 //!
@@ -108,7 +106,7 @@ use crate::core::{
 use super::{
     cache::PoolCache,
     price::PriceCache,
-    ticks::{NextInitializedTick, PoolTicks, PoolTicksReadGuard},
+    ticks::{NextInitializedTick, PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard, TickInfo},
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -172,6 +170,18 @@ impl TickCrossing for PoolTicksReadGuard<'_> {
     }
 }
 
+impl TickCrossing for PoolTicksWriteGuard<'_> {
+    #[inline]
+    fn next_initialized_tick(&self, current_tick: i32, zero_for_one: bool) -> NextInitializedTick {
+        PoolTicksWriteGuard::next_initialized_tick(self, current_tick, zero_for_one)
+    }
+
+    #[inline]
+    fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError> {
+        PoolTicksWriteGuard::cross_tick(self, tick_next)
+    }
+}
+
 #[cfg(feature = "protocol-fee")]
 mod protocol_fee_consts {
     /// `ProtocolFeeLibrary.MAX_PROTOCOL_FEE` = 1 000 (0.1 %).
@@ -182,7 +192,7 @@ mod protocol_fee_consts {
 
 // ─── Pool state ───────────────────────────────────────────────────────────────
 
-/// Complete V3/V4 pool state required for a full tick-crossing simulation.
+/// Complete V4 pool state required for a full tick-crossing simulation.
 ///
 /// # Invariants (caller-enforced)
 ///
@@ -199,7 +209,7 @@ pub struct Pool {
     /// Fee tier in pips (e.g. `3_000` = 0.30 %). Must be `<= 1_000_000`.
     pub fee: u32,
 
-    /// Tick spacing. V3: derived from fee. V4: explicit from `PoolKey.tickSpacing`.
+    /// Tick spacing from `PoolKey.tickSpacing`.
     /// Must lie in `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
     pub tick_spacing: i32,
 
@@ -276,8 +286,16 @@ pub struct PoolState {
     /// Current tick — must equal `floor(log_√1.0001(sqrt_price_x96))`.
     pub tick: i32,
 
-    /// Active liquidity for the current tick range (`uint128` matching V3/V4).
+    /// Active liquidity for the current tick range (`uint128` in V4).
     pub liquidity: u128,
+
+    /// All-time LP fee growth per unit of active liquidity in token0, Q128.
+    #[serde(default)]
+    pub fee_growth_global0_x128: U256,
+
+    /// All-time LP fee growth per unit of active liquidity in token1, Q128.
+    #[serde(default)]
+    pub fee_growth_global1_x128: U256,
 }
 
 // ─── Swap parameters ──────────────────────────────────────────────────────────
@@ -362,6 +380,12 @@ pub struct ModifyLiquidityResult {
 
     /// Whether the upper tick flipped initialized/uninitialized state.
     pub flipped_upper: bool,
+
+    /// Fee growth inside the position range after the position update.
+    pub fee_growth_inside0_x128: U256,
+
+    /// Fee growth inside the position range after the position update.
+    pub fee_growth_inside1_x128: U256,
 }
 
 // ─── Result types ─────────────────────────────────────────────────────────────
@@ -371,6 +395,8 @@ pub struct TickCrossInfo {
     pub cumulative_input: U256,
     pub tick: i32,
     pub liquidity_after: u128,
+    pub fee_growth_global0_x128: U256,
+    pub fee_growth_global1_x128: U256,
 }
 
 /// Output of a successful simulated swap.
@@ -385,6 +411,10 @@ pub struct FullSwapResult {
     /// Active liquidity after the swap. May differ from the input value
     /// if tick boundaries were crossed.
     pub liquidity: u128,
+
+    pub fee_growth_global0_x128: U256,
+
+    pub fee_growth_global1_x128: U256,
 
     /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
     ///
@@ -418,6 +448,10 @@ pub struct SwapSimulationResult {
     /// Active liquidity after the simulated swap.
     pub liquidity: u128,
 
+    pub fee_growth_global0_x128: U256,
+
+    pub fee_growth_global1_x128: U256,
+
     /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
     pub delta: BalanceDelta,
 
@@ -433,6 +467,8 @@ impl SwapSimulationResult {
             sqrt_price_x96: self.sqrt_price_x96,
             tick: self.tick,
             liquidity: self.liquidity,
+            fee_growth_global0_x128: self.fee_growth_global0_x128,
+            fee_growth_global1_x128: self.fee_growth_global1_x128,
             delta: self.delta,
             crossings,
             #[cfg(feature = "protocol-fee")]
@@ -470,6 +506,8 @@ impl Pool {
                 sqrt_price_x96,
                 tick,
                 liquidity,
+                fee_growth_global0_x128: U256::ZERO,
+                fee_growth_global1_x128: U256::ZERO,
             })),
             fee,
             tick_spacing,
@@ -510,11 +548,30 @@ impl Pool {
         let mut ticks = self.ticks.write();
         let mut state = self.state.write();
         validate_tick_range(state.tick)?;
+        let delta = liquidity_principal_delta(&state, &self.cache, params)?;
+        let liquidity_after = if params.liquidity_delta != 0
+            && state.tick >= params.tick_lower
+            && state.tick < params.tick_upper
+        {
+            add_liquidity_delta(state.liquidity, params.liquidity_delta)?
+        } else {
+            state.liquidity
+        };
 
         let mut flipped_lower = false;
         let mut flipped_upper = false;
+        let fee_growth_before = fee_growth_inside_from_ticks(
+            &ticks,
+            state.tick,
+            params.tick_lower,
+            params.tick_upper,
+            state.fee_growth_global0_x128,
+            state.fee_growth_global1_x128,
+        );
 
         if params.liquidity_delta != 0 {
+            let lower_was_uninitialized = ticks.get(params.tick_lower).is_none();
+            let upper_was_uninitialized = ticks.get(params.tick_upper).is_none();
             let max_liquidity_per_tick = if params.liquidity_delta > 0 {
                 Some(tick_spacing_to_max_liquidity_per_tick(self.tick_spacing))
             } else {
@@ -530,52 +587,78 @@ impl Pool {
 
             flipped_lower = lower.flipped;
             flipped_upper = upper.flipped;
+            ticks.initialize_fee_growth_if_needed(
+                params.tick_lower,
+                lower_was_uninitialized,
+                state.tick,
+                state.fee_growth_global0_x128,
+                state.fee_growth_global1_x128,
+            );
+            ticks.initialize_fee_growth_if_needed(
+                params.tick_upper,
+                upper_was_uninitialized,
+                state.tick,
+                state.fee_growth_global0_x128,
+                state.fee_growth_global1_x128,
+            );
         }
 
-        let mut delta = BalanceDelta::default();
-
-        if params.liquidity_delta != 0 {
-            let sqrt_price_lower_x96 = self.cache.get_sqrt_price_at_tick(params.tick_lower)?;
-            let sqrt_price_upper_x96 = self.cache.get_sqrt_price_at_tick(params.tick_upper)?;
-
-            if state.tick < params.tick_lower {
-                // Price is below the range — only token0 is involved.
-                delta.amount0 = get_amount0_delta_signed(
-                    sqrt_price_lower_x96,
-                    sqrt_price_upper_x96,
-                    params.liquidity_delta,
-                )?;
-            } else if state.tick < params.tick_upper {
-                // Price is inside the range — both tokens and active liquidity change.
-                delta.amount0 = get_amount0_delta_signed(
-                    state.sqrt_price_x96,
-                    sqrt_price_upper_x96,
-                    params.liquidity_delta,
-                )?;
-                delta.amount1 = get_amount1_delta_signed(
-                    sqrt_price_lower_x96,
-                    state.sqrt_price_x96,
-                    params.liquidity_delta,
-                )?;
-                state.liquidity = add_liquidity_delta(state.liquidity, params.liquidity_delta)?;
-            } else {
-                // Price is above the range — only token1 is involved.
-                delta.amount1 = get_amount1_delta_signed(
-                    sqrt_price_lower_x96,
-                    sqrt_price_upper_x96,
-                    params.liquidity_delta,
-                )?;
-            }
-        }
+        state.liquidity = liquidity_after;
 
         self.cache.clear_cross_amounts();
+
+        let (fee_growth_inside0_x128, fee_growth_inside1_x128) = if params.liquidity_delta < 0 {
+            fee_growth_before
+        } else {
+            fee_growth_inside_from_ticks(
+                &ticks,
+                state.tick,
+                params.tick_lower,
+                params.tick_upper,
+                state.fee_growth_global0_x128,
+                state.fee_growth_global1_x128,
+            )
+        };
 
         Ok(ModifyLiquidityResult {
             delta,
             liquidity: state.liquidity,
             flipped_lower,
             flipped_upper,
+            fee_growth_inside0_x128,
+            fee_growth_inside1_x128,
         })
+    }
+
+    /// Return current all-time fee growth inside a tick range.
+    pub fn fee_growth_inside(
+        &self,
+        tick_lower: i32,
+        tick_upper: i32,
+    ) -> Result<(U256, U256), SwapSimError> {
+        check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
+        let ticks = self.ticks.read();
+        let state = self.state.read();
+        Ok(fee_growth_inside_from_ticks(
+            &ticks,
+            state.tick,
+            tick_lower,
+            tick_upper,
+            state.fee_growth_global0_x128,
+            state.fee_growth_global1_x128,
+        ))
+    }
+
+    /// Quote principal token deltas for a liquidity change without mutation.
+    pub fn quote_modify_liquidity(
+        &self,
+        params: ModifyLiquidityParams,
+    ) -> Result<BalanceDelta, SwapSimError> {
+        validate_tick_spacing(self.tick_spacing)?;
+        check_ticks(params.tick_lower, params.tick_upper, self.tick_spacing)?;
+        let state = self.state.read();
+        validate_tick_range(state.tick)?;
+        liquidity_principal_delta(&state, &self.cache, params)
     }
 
     /// Execute a swap and commit the resulting state to this pool.
@@ -584,21 +667,41 @@ impl Pool {
     /// because callers that mutate pool state often need audit/debug metadata.
     /// For the fastest read-only quote path, use [`Pool::simulate_swap`].
     pub fn swap(&self, params: SwapParams) -> Result<FullSwapResult, SwapSimError> {
-        let prepared = self.prepare_swap(&params)?;
+        let exact_in = params.amount.is_negative();
+        #[cfg(feature = "protocol-fee")]
+        let effective_fee = calculate_swap_fee(params.protocol_fee, self.fee)?;
+        #[cfg(not(feature = "protocol-fee"))]
+        let effective_fee = self.fee;
+        validate_swap_fee_for_exactness(effective_fee, exact_in)?;
+        validate_tick_spacing(self.tick_spacing)?;
+        if self.ticks.tick_spacing() != self.tick_spacing {
+            return Err(SwapSimError::InvalidTickSpacing);
+        }
+
+        let mut ticks = self.ticks.write();
         let mut state = self.state.write();
 
         let result = execute_swap_full_from_state(
             &state,
-            &prepared.ticks,
-            prepared.cache,
-            prepared.effective_fee,
+            &ticks,
+            self.cache.as_ref(),
+            effective_fee,
             self.tick_spacing,
             params,
         )?;
 
         // Commit only after the full simulation succeeds.
+        for crossing in &result.crossings {
+            ticks.cross_fee_growth(
+                crossing.tick,
+                crossing.fee_growth_global0_x128,
+                crossing.fee_growth_global1_x128,
+            )?;
+        }
         state.sqrt_price_x96 = result.sqrt_price_x96;
         state.tick = result.tick;
+        state.fee_growth_global0_x128 = result.fee_growth_global0_x128;
+        state.fee_growth_global1_x128 = result.fee_growth_global1_x128;
         if state.liquidity != result.liquidity {
             state.liquidity = result.liquidity;
         }
@@ -743,6 +846,8 @@ struct SwapLoopState {
     sqrt_price_x96: U256,
     tick: i32,
     liquidity: u128,
+    fee_growth_global0_x128: U256,
+    fee_growth_global1_x128: U256,
 }
 
 // ─── Core swap executors ─────────────────────────────────────────────────────
@@ -766,6 +871,8 @@ fn execute_swap_light_from_state<G: TickCrossing>(
             sqrt_price_x96: state.sqrt_price_x96,
             tick: state.tick,
             liquidity: state.liquidity,
+            fee_growth_global0_x128: state.fee_growth_global0_x128,
+            fee_growth_global1_x128: state.fee_growth_global1_x128,
             delta: BalanceDelta::default(),
             #[cfg(feature = "protocol-fee")]
             protocol_fee_amount: 0,
@@ -835,6 +942,8 @@ fn execute_swap_core<G: TickCrossing, const RECORD_CROSSINGS: bool>(
                 sqrt_price_x96: state.sqrt_price_x96,
                 tick: state.tick,
                 liquidity: state.liquidity,
+                fee_growth_global0_x128: state.fee_growth_global0_x128,
+                fee_growth_global1_x128: state.fee_growth_global1_x128,
                 delta: BalanceDelta::default(),
                 #[cfg(feature = "protocol-fee")]
                 protocol_fee_amount: 0,
@@ -878,6 +987,31 @@ fn checked_add_u256(a: U256, b: U256) -> Result<U256, SwapSimError> {
 #[inline(always)]
 fn checked_sub_u256(a: U256, b: U256) -> Result<U256, SwapSimError> {
     a.checked_sub(b).ok_or(SwapSimError::AmountOverflow)
+}
+
+#[inline(always)]
+fn accrue_lp_fee(
+    result: &mut SwapLoopState,
+    fee_amount: U256,
+    zero_for_one: bool,
+) -> Result<(), SwapSimError> {
+    if fee_amount.is_zero() || result.liquidity == 0 {
+        return Ok(());
+    }
+
+    let growth = crate::core::math::full::mul_div(
+        fee_amount,
+        U256::ONE << 128u32,
+        U256::from(result.liquidity),
+    )
+    .map_err(|_| SwapSimError::AmountOverflow)?;
+
+    if zero_for_one {
+        result.fee_growth_global0_x128 = result.fee_growth_global0_x128.wrapping_add(growth);
+    } else {
+        result.fee_growth_global1_x128 = result.fee_growth_global1_x128.wrapping_add(growth);
+    }
+    Ok(())
 }
 
 #[inline(always)]
@@ -1398,9 +1532,10 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
     *amount_out_accum = checked_add_u256(*amount_out_accum, entry.amount_out_to_cross)?;
     result.sqrt_price_x96 = entry.sqrt_boundary_x96;
 
+    #[allow(unused_mut)]
+    let mut step_fee_amount = entry.fee_amount_to_cross;
     #[cfg(feature = "protocol-fee")]
     {
-        let mut step_fee_amount = entry.fee_amount_to_cross;
         deduct_protocol_fee_from_step(
             entry.amount_in_to_cross,
             &mut step_fee_amount,
@@ -1409,6 +1544,7 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
             total_protocol_fee,
         )?;
     }
+    accrue_lp_fee(result, step_fee_amount, params.zero_for_one)?;
 
     if tick_initialized {
         let liquidity_net_raw = ticks.cross_tick(tick_next)?;
@@ -1428,6 +1564,8 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
                 cumulative_input: checked_sub_u256(amount_specified, *amount_remaining)?,
                 tick: tick_next,
                 liquidity_after,
+                fee_growth_global0_x128: result.fee_growth_global0_x128,
+                fee_growth_global1_x128: result.fee_growth_global1_x128,
             });
         }
     }
@@ -1483,9 +1621,10 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
     *amount_in_accum = checked_add_u256(*amount_in_accum, entry.gross_in_to_cross)?;
     result.sqrt_price_x96 = entry.sqrt_boundary_x96;
 
+    #[allow(unused_mut)]
+    let mut step_fee_amount = entry.fee_amount_to_cross;
     #[cfg(feature = "protocol-fee")]
     {
-        let mut step_fee_amount = entry.fee_amount_to_cross;
         deduct_protocol_fee_from_step(
             entry.amount_in_to_cross,
             &mut step_fee_amount,
@@ -1494,6 +1633,7 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
             total_protocol_fee,
         )?;
     }
+    accrue_lp_fee(result, step_fee_amount, params.zero_for_one)?;
 
     if tick_initialized {
         let liquidity_net_raw = ticks.cross_tick(tick_next)?;
@@ -1513,6 +1653,8 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
                 cumulative_input: U256::ZERO,
                 tick: tick_next,
                 liquidity_after,
+                fee_growth_global0_x128: result.fee_growth_global0_x128,
+                fee_growth_global1_x128: result.fee_growth_global1_x128,
             });
         }
     }
@@ -1543,6 +1685,8 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
         sqrt_price_x96: state.sqrt_price_x96,
         tick: state.tick,
         liquidity: state.liquidity,
+        fee_growth_global0_x128: state.fee_growth_global0_x128,
+        fee_growth_global1_x128: state.fee_growth_global1_x128,
     };
 
     let amount_specified = params.amount.abs();
@@ -1614,6 +1758,7 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
         )?;
 
         result.sqrt_price_x96 = computed.sqrt_ratio_next_x96;
+        #[allow(unused_mut)]
         let mut step_fee_amount = computed.fee_amount;
 
         // V4 charges the caller the full swap fee for amount accounting first.
@@ -1630,6 +1775,7 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
             params.protocol_fee,
             &mut total_protocol_fee,
         )?;
+        accrue_lp_fee(&mut result, step_fee_amount, params.zero_for_one)?;
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
@@ -1665,6 +1811,8 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
         sqrt_price_x96: result.sqrt_price_x96,
         tick: result.tick,
         liquidity: result.liquidity,
+        fee_growth_global0_x128: result.fee_growth_global0_x128,
+        fee_growth_global1_x128: result.fee_growth_global1_x128,
         delta,
         #[cfg(feature = "protocol-fee")]
         protocol_fee_amount: {
@@ -1689,6 +1837,8 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
         sqrt_price_x96: state.sqrt_price_x96,
         tick: state.tick,
         liquidity: state.liquidity,
+        fee_growth_global0_x128: state.fee_growth_global0_x128,
+        fee_growth_global1_x128: state.fee_growth_global1_x128,
     };
 
     let amount_specified = params.amount.abs();
@@ -1759,6 +1909,7 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
         )?;
 
         result.sqrt_price_x96 = computed.sqrt_ratio_next_x96;
+        #[allow(unused_mut)]
         let mut step_fee_amount = computed.fee_amount;
 
         // V4 charges the caller the full swap fee for amount accounting first.
@@ -1775,6 +1926,7 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
             params.protocol_fee,
             &mut total_protocol_fee,
         )?;
+        accrue_lp_fee(&mut result, step_fee_amount, params.zero_for_one)?;
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
@@ -1810,6 +1962,8 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
         sqrt_price_x96: result.sqrt_price_x96,
         tick: result.tick,
         liquidity: result.liquidity,
+        fee_growth_global0_x128: result.fee_growth_global0_x128,
+        fee_growth_global1_x128: result.fee_growth_global1_x128,
         delta,
         #[cfg(feature = "protocol-fee")]
         protocol_fee_amount: {
@@ -1833,6 +1987,8 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         sqrt_price_x96: state.sqrt_price_x96,
         tick: state.tick,
         liquidity: state.liquidity,
+        fee_growth_global0_x128: state.fee_growth_global0_x128,
+        fee_growth_global1_x128: state.fee_growth_global1_x128,
     };
 
     let amount_specified = params.amount.abs();
@@ -1910,6 +2066,7 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         )?;
 
         result.sqrt_price_x96 = computed.sqrt_ratio_next_x96;
+        #[allow(unused_mut)]
         let mut step_fee_amount = computed.fee_amount;
 
         // V4 charges the caller the full swap fee for amount accounting first.
@@ -1926,6 +2083,7 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
             params.protocol_fee,
             &mut total_protocol_fee,
         )?;
+        accrue_lp_fee(&mut result, step_fee_amount, params.zero_for_one)?;
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
@@ -1947,6 +2105,8 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
                             cumulative_input: checked_sub_u256(amount_specified, amount_remaining)?,
                             tick: tick_next,
                             liquidity_after,
+                            fee_growth_global0_x128: result.fee_growth_global0_x128,
+                            fee_growth_global1_x128: result.fee_growth_global1_x128,
                         });
                     }
                 }
@@ -1974,6 +2134,8 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         sqrt_price_x96: result.sqrt_price_x96,
         tick: result.tick,
         liquidity: result.liquidity,
+        fee_growth_global0_x128: result.fee_growth_global0_x128,
+        fee_growth_global1_x128: result.fee_growth_global1_x128,
         delta,
         #[cfg(feature = "protocol-fee")]
         protocol_fee_amount: {
@@ -1999,6 +2161,8 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         sqrt_price_x96: state.sqrt_price_x96,
         tick: state.tick,
         liquidity: state.liquidity,
+        fee_growth_global0_x128: state.fee_growth_global0_x128,
+        fee_growth_global1_x128: state.fee_growth_global1_x128,
     };
 
     let amount_specified = params.amount.abs();
@@ -2075,6 +2239,7 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         )?;
 
         result.sqrt_price_x96 = computed.sqrt_ratio_next_x96;
+        #[allow(unused_mut)]
         let mut step_fee_amount = computed.fee_amount;
 
         // V4 charges the caller the full swap fee for amount accounting first.
@@ -2091,6 +2256,7 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
             params.protocol_fee,
             &mut total_protocol_fee,
         )?;
+        accrue_lp_fee(&mut result, step_fee_amount, params.zero_for_one)?;
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
@@ -2112,6 +2278,8 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
                             cumulative_input: U256::ZERO,
                             tick: tick_next,
                             liquidity_after,
+                            fee_growth_global0_x128: result.fee_growth_global0_x128,
+                            fee_growth_global1_x128: result.fee_growth_global1_x128,
                         });
                     }
                 }
@@ -2139,6 +2307,8 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         sqrt_price_x96: result.sqrt_price_x96,
         tick: result.tick,
         liquidity: result.liquidity,
+        fee_growth_global0_x128: result.fee_growth_global0_x128,
+        fee_growth_global1_x128: result.fee_growth_global1_x128,
         delta,
         #[cfg(feature = "protocol-fee")]
         protocol_fee_amount: {
@@ -2176,6 +2346,104 @@ fn check_ticks(tick_lower: i32, tick_upper: i32, tick_spacing: i32) -> Result<()
     validate_tick_index_for_spacing(tick_lower, tick_spacing)?;
     validate_tick_index_for_spacing(tick_upper, tick_spacing)?;
     Ok(())
+}
+
+trait FeeGrowthTicks {
+    fn fee_tick(&self, tick: i32) -> Option<TickInfo>;
+}
+
+impl FeeGrowthTicks for PoolTicksReadGuard<'_> {
+    fn fee_tick(&self, tick: i32) -> Option<TickInfo> {
+        self.get(tick)
+    }
+}
+
+impl FeeGrowthTicks for PoolTicksWriteGuard<'_> {
+    fn fee_tick(&self, tick: i32) -> Option<TickInfo> {
+        self.get(tick)
+    }
+}
+
+#[inline]
+fn fee_growth_inside_from_ticks<T: FeeGrowthTicks>(
+    ticks: &T,
+    tick_current: i32,
+    tick_lower: i32,
+    tick_upper: i32,
+    fee_growth_global0_x128: U256,
+    fee_growth_global1_x128: U256,
+) -> (U256, U256) {
+    let lower = ticks.fee_tick(tick_lower).unwrap_or_default();
+    let upper = ticks.fee_tick(tick_upper).unwrap_or_default();
+
+    if tick_current < tick_lower {
+        (
+            lower
+                .fee_growth_outside0_x128
+                .wrapping_sub(upper.fee_growth_outside0_x128),
+            lower
+                .fee_growth_outside1_x128
+                .wrapping_sub(upper.fee_growth_outside1_x128),
+        )
+    } else if tick_current >= tick_upper {
+        (
+            upper
+                .fee_growth_outside0_x128
+                .wrapping_sub(lower.fee_growth_outside0_x128),
+            upper
+                .fee_growth_outside1_x128
+                .wrapping_sub(lower.fee_growth_outside1_x128),
+        )
+    } else {
+        (
+            fee_growth_global0_x128
+                .wrapping_sub(lower.fee_growth_outside0_x128)
+                .wrapping_sub(upper.fee_growth_outside0_x128),
+            fee_growth_global1_x128
+                .wrapping_sub(lower.fee_growth_outside1_x128)
+                .wrapping_sub(upper.fee_growth_outside1_x128),
+        )
+    }
+}
+
+fn liquidity_principal_delta(
+    state: &PoolState,
+    cache: &PoolCache,
+    params: ModifyLiquidityParams,
+) -> Result<BalanceDelta, SwapSimError> {
+    if params.liquidity_delta == 0 {
+        return Ok(BalanceDelta::default());
+    }
+
+    let sqrt_price_lower_x96 = cache.get_sqrt_price_at_tick(params.tick_lower)?;
+    let sqrt_price_upper_x96 = cache.get_sqrt_price_at_tick(params.tick_upper)?;
+    let mut delta = BalanceDelta::default();
+
+    if state.tick < params.tick_lower {
+        delta.amount0 = get_amount0_delta_signed(
+            sqrt_price_lower_x96,
+            sqrt_price_upper_x96,
+            params.liquidity_delta,
+        )?;
+    } else if state.tick < params.tick_upper {
+        delta.amount0 = get_amount0_delta_signed(
+            state.sqrt_price_x96,
+            sqrt_price_upper_x96,
+            params.liquidity_delta,
+        )?;
+        delta.amount1 = get_amount1_delta_signed(
+            sqrt_price_lower_x96,
+            state.sqrt_price_x96,
+            params.liquidity_delta,
+        )?;
+    } else {
+        delta.amount1 = get_amount1_delta_signed(
+            sqrt_price_lower_x96,
+            sqrt_price_upper_x96,
+            params.liquidity_delta,
+        )?;
+    }
+    Ok(delta)
 }
 
 /// Unsigned token0 delta for a liquidity change between two sqrt prices.
@@ -2570,6 +2838,8 @@ mod tests {
                 sqrt_price_x96,
                 tick,
                 liquidity,
+                fee_growth_global0_x128: U256::ZERO,
+                fee_growth_global1_x128: U256::ZERO,
             })),
             fee,
             tick_spacing,

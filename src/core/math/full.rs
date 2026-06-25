@@ -1,6 +1,6 @@
 //! # FullMath — 512-bit Precision Multiply-Divide (Optimized)
 //!
-//! A fully optimized port of Uniswap V3's original `FullMath.sol`.
+//! A fully optimized port of the `FullMath` used by Uniswap V4.
 //!
 //! ## Core Idea
 //!

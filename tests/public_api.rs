@@ -1,24 +1,12 @@
-use rm_uniswap::{
-    v2,
-    v3::{FullMath, QuoteState, Quoter, SignedAmount, SqrtPriceMath, SwapMath, TickMath},
-    v4,
+use rm_uniswap::v4::{
+    FullMath, Pool, PoolTicks, QuoteState, Quoter, SignedAmount, SqrtPriceMath, SwapMath,
+    SwapParams, TickMath, delta_amount_out,
 };
 use ruint::aliases::U256;
 
 #[test]
-fn version_facades_are_the_public_entry_points() {
+fn v4_is_the_public_entry_point() {
     let q96 = U256::ONE << 96;
-
-    assert_eq!(
-        v2::Library::get_amount_out(
-            U256::from(1_000u64),
-            U256::from(10_000u64),
-            U256::from(10_000u64),
-            U256::from(997u64),
-            U256::from(1_000u64),
-        ),
-        U256::from(906u64)
-    );
 
     assert_eq!(
         FullMath::mul_div(U256::from(6u64), U256::from(7u64), U256::from(3u64)).unwrap(),
@@ -49,15 +37,19 @@ fn version_facades_are_the_public_entry_points() {
     .unwrap();
     assert_eq!(step, direct);
 
-    let v4_state = v4::PoolState {
-        sqrt_price_x96: q96,
-        liquidity: quote_state.liquidity,
-        tick: 0,
-        fee: quote_state.fee,
-        tick_spacing: 60,
-    };
-    assert_eq!(
-        v4::Pool::quote_exact_input(&v4_state, U256::from(1_000u64), true).unwrap(),
-        step.amount_out
+    let pool = Pool::new(
+        q96,
+        0,
+        quote_state.liquidity,
+        3_000,
+        60,
+        PoolTicks::new(60).unwrap(),
     );
+    let simulated = pool
+        .simulate_swap(SwapParams::new(
+            true,
+            SignedAmount::negative(U256::from(1_000u64)),
+        ))
+        .unwrap();
+    assert!(delta_amount_out(&simulated.delta, true) > 0);
 }

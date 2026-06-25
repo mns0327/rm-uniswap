@@ -5,6 +5,7 @@ use std::{
 };
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
@@ -28,6 +29,14 @@ pub struct TickInfo {
 
     /// Signed liquidity delta applied when crossing this tick from left to right.
     pub liquidity_net: i128,
+
+    /// Fee growth on the opposite side of this tick from the current price.
+    #[serde(default)]
+    pub fee_growth_outside0_x128: U256,
+
+    /// Fee growth on the opposite side of this tick from the current price.
+    #[serde(default)]
+    pub fee_growth_outside1_x128: U256,
 }
 
 impl From<TickEntry> for TickInfo {
@@ -36,6 +45,8 @@ impl From<TickEntry> for TickInfo {
         Self {
             liquidity_gross: entry.liquidity_gross,
             liquidity_net: entry.liquidity_net,
+            fee_growth_outside0_x128: U256::ZERO,
+            fee_growth_outside1_x128: U256::ZERO,
         }
     }
 }
@@ -322,7 +333,50 @@ impl<'a> PoolTicksWriteGuard<'a> {
         TickInfo {
             liquidity_gross: 0,
             liquidity_net: 0,
+            fee_growth_outside0_x128: U256::ZERO,
+            fee_growth_outside1_x128: U256::ZERO,
         }
+    }
+
+    #[inline]
+    pub fn next_initialized_tick(
+        &self,
+        current_tick: i32,
+        zero_for_one: bool,
+    ) -> NextInitializedTick {
+        if zero_for_one {
+            self.inner
+                .range(..=current_tick)
+                .next_back()
+                .map(|(&tick_next, _)| NextInitializedTick {
+                    tick_next,
+                    initialized: true,
+                })
+                .unwrap_or(NextInitializedTick {
+                    tick_next: MIN_TICK,
+                    initialized: false,
+                })
+        } else {
+            self.inner
+                .range((Excluded(current_tick), Unbounded))
+                .next()
+                .map(|(&tick_next, _)| NextInitializedTick {
+                    tick_next,
+                    initialized: true,
+                })
+                .unwrap_or(NextInitializedTick {
+                    tick_next: MAX_TICK,
+                    initialized: false,
+                })
+        }
+    }
+
+    #[inline]
+    pub fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError> {
+        self.inner
+            .get(&tick_next)
+            .map(|info| info.liquidity_net)
+            .ok_or(SwapSimError::MissingInitializedTick)
     }
 
     fn compute_tick_update(
@@ -356,6 +410,8 @@ impl<'a> PoolTicksWriteGuard<'a> {
             Some(TickInfo {
                 liquidity_gross: liquidity_gross_after,
                 liquidity_net,
+                fee_growth_outside0_x128: before.fee_growth_outside0_x128,
+                fee_growth_outside1_x128: before.fee_growth_outside1_x128,
             })
         };
 
@@ -436,6 +492,45 @@ impl<'a> PoolTicksWriteGuard<'a> {
         self.apply_tick_update(tick_upper, upper_after);
 
         Ok((lower_update, upper_update))
+    }
+
+    /// Initialize a newly-created tick's fee-growth outside values.
+    ///
+    /// Uniswap treats all fee growth before initialization as having happened
+    /// below the tick. Therefore ticks at or below the current tick snapshot
+    /// the current global fee growth.
+    pub fn initialize_fee_growth_if_needed(
+        &mut self,
+        tick_idx: i32,
+        was_uninitialized: bool,
+        current_tick: i32,
+        fee_growth_global0_x128: U256,
+        fee_growth_global1_x128: U256,
+    ) {
+        if was_uninitialized && tick_idx <= current_tick {
+            if let Some(info) = self.inner.get_mut(&tick_idx) {
+                info.fee_growth_outside0_x128 = fee_growth_global0_x128;
+                info.fee_growth_outside1_x128 = fee_growth_global1_x128;
+            }
+        }
+    }
+
+    /// Apply Uniswap's fee-growth transition when price crosses a tick.
+    pub fn cross_fee_growth(
+        &mut self,
+        tick_idx: i32,
+        fee_growth_global0_x128: U256,
+        fee_growth_global1_x128: U256,
+    ) -> Result<(), SwapSimError> {
+        let info = self
+            .inner
+            .get_mut(&tick_idx)
+            .ok_or(SwapSimError::MissingInitializedTick)?;
+        info.fee_growth_outside0_x128 =
+            fee_growth_global0_x128.wrapping_sub(info.fee_growth_outside0_x128);
+        info.fee_growth_outside1_x128 =
+            fee_growth_global1_x128.wrapping_sub(info.fee_growth_outside1_x128);
+        Ok(())
     }
 
     /// Return a copy of a tick if it exists. Useful for tests and diagnostics.

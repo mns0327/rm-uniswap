@@ -31,6 +31,11 @@ pub enum Error {
     LiquidityOverflow,
     AmountOverflow,
     IterationLimitExceeded,
+    PositionNotFound,
+    PositionAlreadyExists,
+    PositionNotEmpty,
+    Unauthorized,
+    SlippageExceeded,
 }
 
 impl fmt::Display for Error {
@@ -61,6 +66,11 @@ impl fmt::Display for Error {
             Self::LiquidityOverflow => "liquidity delta would overflow",
             Self::AmountOverflow => "amount does not fit in the target integer type",
             Self::IterationLimitExceeded => "swap iteration limit exceeded",
+            Self::PositionNotFound => "position does not exist",
+            Self::PositionAlreadyExists => "position already exists",
+            Self::PositionNotEmpty => "position still has liquidity or uncollected tokens",
+            Self::Unauthorized => "caller is not authorized for this position",
+            Self::SlippageExceeded => "position amount exceeds the configured slippage limit",
         })
     }
 }

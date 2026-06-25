@@ -1,4 +1,4 @@
-//! Benchmark suite for `arb-dex` — Uniswap V2/V3/V4 AMM math and swap simulation.
+//! Benchmark suite for Uniswap V4 AMM math and swap simulation.
 //!
 //! Run with: `cargo bench --package arb-dex --all-features`
 //!
@@ -6,7 +6,7 @@
 //!
 //! Each group is a Criterion `criterion::Benchmark` that measures one logical
 //! unit of work. Input values are chosen to be:
-//!   - **Realistic**: derived from existing test fixtures in `src/v3/mod.rs`
+//!   - **Realistic**: derived from the V4 pool fixtures
 //!   - **Representative**: exercises the hot-path operations that appear in
 //!     actual arbitrage simulations
 //!
@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::v3::{
+use rm_uniswap::v4::{
     FullMath, ModifyLiquidityParams, Pool, SignedAmount, SqrtPriceMath, SwapMath, SwapParams,
     TickMath,
 };

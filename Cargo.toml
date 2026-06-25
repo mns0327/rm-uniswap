@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-protocol-fee = []
+positions = []
+v4-hooks = ["positions"]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("protocol-fee"))'] }
 
 [dependencies]
 alloy = "2.1.0"

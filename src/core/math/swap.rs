@@ -1,6 +1,6 @@
 //! # SwapMath — Optimized single-tick swap step computation
 //!
-//! Production-focused Rust port of Uniswap V3/V4 swap-step math.
+//! Production-focused Rust port of Uniswap V4 swap-step math.
 //!
 //! Main optimizations:
 //! - No tracing in the hot arithmetic path.
@@ -483,7 +483,7 @@ mod tests {
 
     // ── Arbitrary-value strategies ────────────────────────────────────────────
 
-    /// Non-zero U160 — valid range for Uniswap V3 sqrt prices.
+    /// Non-zero U160 — valid range for Uniswap V4 sqrt prices.
     fn arb_sqrt_price() -> impl Strategy<Value = U256> {
         any::<[u64; 3]>()
             .prop_map(|limbs| {
