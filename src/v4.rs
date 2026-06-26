@@ -20,11 +20,11 @@
 /// re-price with [`Pool`].
 pub use crate::Error;
 pub use crate::core::concentrated::pool::{
-    FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolState, SwapParams,
-    SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in, delta_amount_out,
-    tick_spacing_to_max_liquidity_per_tick,
+    FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot, PoolState,
+    SwapParams, SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in,
+    delta_amount_out, tick_spacing_to_max_liquidity_per_tick,
 };
-pub use crate::core::concentrated::ticks::{PoolTicks, TickInfo};
+pub use crate::core::concentrated::ticks::{PoolTicks, PoolTicksSnapshot, TickInfo};
 pub use crate::core::math::swap::SwapStep;
 pub use crate::core::types::TickEntry;
 pub use crate::core::types::delta::BalanceDelta;
@@ -649,7 +649,7 @@ mod tests {
         ) {
             let pool = QuoteState {
                 sqrt_price_x96: sqrt_price_1_1(),
-                liquidity: liquidity,
+                liquidity,
                 tick: 0,
                 fee,
             };
@@ -689,7 +689,7 @@ mod tests {
         ) {
             let pool = QuoteState {
                 sqrt_price_x96: sqrt_price_1_1(),
-                liquidity: liquidity,
+                liquidity,
                 tick: 0,
                 fee,
             };

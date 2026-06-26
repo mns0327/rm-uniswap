@@ -173,6 +173,7 @@ impl I256 {
 impl I256 {
     /// Negation.  Always succeeds (sign-magnitude has no asymmetric MIN).
     #[inline]
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(self) -> Self {
         Self::from_raw(!self.negative, self.value)
     }

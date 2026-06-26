@@ -113,19 +113,12 @@ const TICK_RATIOS: [(u32, U256); 20] = [
 /// Used only where the intermediate value exceeds `i128` range but is too
 /// transient to justify a full signed-integer type. The magnitude fits in
 /// `U256`; the sign is tracked with a `bool`.
+#[cfg(test)]
 type S256 = (bool, U256);
-
-/// Multiply a signed `i128` by an unsigned `u64`, returning an `S256`.
-///
-/// Precondition: `|a| ≤ 2^71` and `b ≤ 2^58`, so the product fits in 130 bits
-/// and never overflows `U256`.
-#[inline(always)]
-fn smul_i128_u256(a: i128, b: U256) -> S256 {
-    (a < 0, U256::from(a.unsigned_abs()) * b)
-}
 
 /// Add two `S256` values using sign-magnitude arithmetic.
 #[inline(always)] // [O4]
+#[cfg(test)]
 fn sadd(a: S256, b: S256) -> S256 {
     if a.0 == b.0 {
         // Same sign: magnitudes add.
@@ -141,6 +134,7 @@ fn sadd(a: S256, b: S256) -> S256 {
 
 /// Subtract `b` from `a` in sign-magnitude arithmetic: `a - b = a + (-b)`.
 #[inline(always)] // [O4]
+#[cfg(test)]
 fn ssub(a: S256, b: S256) -> S256 {
     sadd(a, (!b.0, b.1))
 }
@@ -153,6 +147,7 @@ fn ssub(a: S256, b: S256) -> S256 {
 ///
 /// Precondition: after shifting by 128 the result is within ±887_272 ≤ i32::MAX.
 #[inline(always)] // [O4]
+#[cfg(test)]
 fn ssar(val: S256, shift: u32) -> i32 {
     let (neg, mag) = val;
     let quotient = (mag >> shift).as_limbs()[0] as i64;

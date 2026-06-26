@@ -79,24 +79,23 @@ pub struct PoolTicks {
     inner: Arc<RwLock<BTreeMap<i32, TickInfo>>>,
 }
 
+/// Serializable, owned snapshot of a pool's initialized ticks.
+///
+/// Unlike [`PoolTicks::clone`], this value does not share mutable state with
+/// the source pool. External snapshots are untrusted and must be rebuilt
+/// through [`PoolTicks::from_snapshot`], which validates every entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolTicksSnapshot {
+    pub tick_spacing: i32,
+    pub inner: BTreeMap<i32, TickInfo>,
+}
+
 impl Serialize for PoolTicks {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let inner_guard = self.inner.read();
-
-        #[derive(Serialize)]
-        struct PoolTicksSnapshot<'a> {
-            tick_spacing: i32,
-            inner: &'a BTreeMap<i32, TickInfo>,
-        }
-
-        PoolTicksSnapshot {
-            tick_spacing: self.tick_spacing,
-            inner: &*inner_guard,
-        }
-        .serialize(serializer)
+        self.owned_snapshot().serialize(serializer)
     }
 }
 
@@ -105,18 +104,8 @@ impl<'de> Deserialize<'de> for PoolTicks {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct PoolTicksSnapshot {
-            tick_spacing: i32,
-            inner: BTreeMap<i32, TickInfo>,
-        }
-
         let snapshot = PoolTicksSnapshot::deserialize(deserializer)?;
-
-        Ok(Self {
-            tick_spacing: snapshot.tick_spacing,
-            inner: Arc::new(RwLock::new(snapshot.inner)),
-        })
+        Self::from_snapshot(snapshot.tick_spacing, snapshot.inner).map_err(serde::de::Error::custom)
     }
 }
 
@@ -163,6 +152,15 @@ impl PoolTicks {
         self.inner.read().clone()
     }
 
+    /// Returns an owned snapshot that can be serialized or used to create an
+    /// independent pool.
+    pub fn owned_snapshot(&self) -> PoolTicksSnapshot {
+        PoolTicksSnapshot {
+            tick_spacing: self.tick_spacing,
+            inner: self.snapshot(),
+        }
+    }
+
     /// Rebuilds a PoolTicks from a snapshot.
     pub fn from_snapshot(
         tick_spacing: i32,
@@ -170,7 +168,11 @@ impl PoolTicks {
     ) -> Result<Self, SwapSimError> {
         let pool_ticks = Self::new(tick_spacing)?;
         for (tick_idx, info) in ticks {
-            pool_ticks.inner.write().insert(tick_idx, info);
+            if info.liquidity_gross == 0 || info.liquidity_net.unsigned_abs() > info.liquidity_gross
+            {
+                return Err(SwapSimError::InvalidTick);
+            }
+            pool_ticks.set(tick_idx, info)?;
         }
         Ok(pool_ticks)
     }
@@ -224,9 +226,10 @@ pub struct PoolTicksReadGuard<'a> {
 }
 
 impl<'a> PoolTicksReadGuard<'a> {
-    /// Create a read guard from a snapshot BTreeMap reference.
-    pub fn from_snapshot(_ticks: &'a BTreeMap<i32, TickInfo>) -> PoolTicksReadGuard<'a> {
-        unimplemented!("use PoolTicksSnapshotReadGuard instead")
+    /// Returns an owned copy of the initialized ticks while retaining the read
+    /// lock for the caller's surrounding state snapshot.
+    pub fn snapshot(&self) -> BTreeMap<i32, TickInfo> {
+        self.inner.clone()
     }
 
     /// Return the next initialized tick boundary in the given swap direction.
@@ -480,12 +483,11 @@ impl<'a> PoolTicksWriteGuard<'a> {
         let (upper_update, upper_after) =
             Self::compute_tick_update(upper_before, liquidity_delta, true)?;
 
-        if let Some(max_liquidity_per_tick) = max_liquidity_per_tick {
-            if lower_update.liquidity_gross_after > max_liquidity_per_tick
-                || upper_update.liquidity_gross_after > max_liquidity_per_tick
-            {
-                return Err(SwapSimError::LiquidityOverflow);
-            }
+        if let Some(max_liquidity_per_tick) = max_liquidity_per_tick
+            && (lower_update.liquidity_gross_after > max_liquidity_per_tick
+                || upper_update.liquidity_gross_after > max_liquidity_per_tick)
+        {
+            return Err(SwapSimError::LiquidityOverflow);
         }
 
         self.apply_tick_update(tick_lower, lower_after);
@@ -507,11 +509,12 @@ impl<'a> PoolTicksWriteGuard<'a> {
         fee_growth_global0_x128: U256,
         fee_growth_global1_x128: U256,
     ) {
-        if was_uninitialized && tick_idx <= current_tick {
-            if let Some(info) = self.inner.get_mut(&tick_idx) {
-                info.fee_growth_outside0_x128 = fee_growth_global0_x128;
-                info.fee_growth_outside1_x128 = fee_growth_global1_x128;
-            }
+        if was_uninitialized
+            && tick_idx <= current_tick
+            && let Some(info) = self.inner.get_mut(&tick_idx)
+        {
+            info.fee_growth_outside0_x128 = fee_growth_global0_x128;
+            info.fee_growth_outside1_x128 = fee_growth_global1_x128;
         }
     }
 
@@ -544,7 +547,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
 /// Reject tick spacings outside `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
 #[inline]
 fn validate_tick_spacing(tick_spacing: i32) -> Result<(), SwapSimError> {
-    if tick_spacing < MIN_TICK_SPACING || tick_spacing > MAX_TICK_SPACING {
+    if !(MIN_TICK_SPACING..=MAX_TICK_SPACING).contains(&tick_spacing) {
         Err(SwapSimError::InvalidTickSpacing)
     } else {
         Ok(())
@@ -556,7 +559,7 @@ fn validate_tick_spacing(tick_spacing: i32) -> Result<(), SwapSimError> {
 /// Used to validate both `state.tick` and individual tick-array entries.
 #[inline]
 fn validate_tick_range(tick: i32) -> Result<(), SwapSimError> {
-    if tick < MIN_TICK || tick > MAX_TICK {
+    if !(MIN_TICK..=MAX_TICK).contains(&tick) {
         Err(SwapSimError::InvalidTick)
     } else {
         Ok(())

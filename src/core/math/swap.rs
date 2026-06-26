@@ -277,25 +277,6 @@ pub fn compute_swap_step(
     }
 }
 
-#[inline]
-#[must_use]
-pub fn compute_swap_step_unwrap(
-    sqrt_ratio_current_x96: U256,
-    sqrt_ratio_target_x96: U256,
-    liquidity: u128,
-    amount: SignedAmount,
-    fee_pips: u32,
-) -> SwapStep {
-    compute_swap_step(
-        sqrt_ratio_current_x96,
-        sqrt_ratio_target_x96,
-        liquidity,
-        amount,
-        fee_pips,
-    )
-    .unwrap_or_else(|e| panic!("{e}"))
-}
-
 // ── Internal exact-input path ─────────────────────────────────────────────────
 
 #[inline]

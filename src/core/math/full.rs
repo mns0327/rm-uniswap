@@ -543,20 +543,6 @@ pub fn mul_q96_div_rounding_up(amount: U256, denominator: U256) -> Result<U256, 
     }
 }
 
-// ── Panic-on-error convenience wrappers ──────────────────────────────────────
-
-#[inline]
-#[must_use]
-pub fn mul_div_unwrap(a: U256, b: U256, denominator: U256) -> U256 {
-    mul_div(a, b, denominator).unwrap_or_else(|e| panic!("{e:?}"))
-}
-
-#[inline]
-#[must_use]
-pub fn mul_div_rounding_up_unwrap(a: U256, b: U256, denominator: U256) -> U256 {
-    mul_div_rounding_up(a, b, denominator).unwrap_or_else(|e| panic!("{e}"))
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -303,7 +303,7 @@ pub fn get_next_sqrt_price_from_amount0_rounding_up(
         let base = numerator1 / sqrt_p_x96;
         let denominator = base
             .checked_add(amount)
-            .ok_or_else(|| SqrtPriceMathError::PriceOverflow)?;
+            .ok_or(SqrtPriceMathError::PriceOverflow)?;
 
         let result = div_rounding_up_u256_nonzero(numerator1, denominator)?;
 
@@ -360,7 +360,7 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down(
 
         let result = sqrt_p_x96
             .checked_add(quotient)
-            .ok_or_else(|| SqrtPriceMathError::PriceOverflow)?;
+            .ok_or(SqrtPriceMathError::PriceOverflow)?;
 
         if result > MAX_UINT160 {
             return Err(SqrtPriceMathError::PriceOverflow);
@@ -587,12 +587,13 @@ pub fn get_next_sqrt_price_from_output(
 // ─── Public internal arithmetic ───────────────────────────────────────────────
 
 #[inline]
+#[cfg(test)]
 pub(crate) fn div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathError> {
     if b.is_zero() {
         return Err(SqrtPriceMathError::ZeroDenominator);
     }
 
-    Ok(div_rounding_up_u256_nonzero(a, b)?)
+    div_rounding_up_u256_nonzero(a, b)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

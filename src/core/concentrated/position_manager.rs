@@ -19,7 +19,7 @@ use crate::{
     },
 };
 use alloy::primitives::{Address, B256};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 pub use super::position::PositionState;
 
@@ -58,11 +58,20 @@ pub struct ModifyRequest {
 
 #[cfg(feature = "v4-hooks")]
 pub trait LiquidityHook: Send + Sync {
+    /// Called before quoting or mutating pool liquidity.
+    ///
+    /// The manager does not hold its position-map lock while invoking hooks.
+    /// Hooks may inspect the manager through another shared handle, but should
+    /// not recursively start another position mutation.
     fn before_modify_liquidity(&self, _request: &ModifyRequest) -> Result<(), Error> {
         Ok(())
     }
 
     /// Return an optional hook delta to add to the manager-facing result.
+    ///
+    /// This callback runs after the complete manager-facing result has been
+    /// predicted, but before pool state is mutated. Hook errors and hook-delta
+    /// overflow therefore leave both pool and position state unchanged.
     fn after_modify_liquidity(
         &self,
         _request: &ModifyRequest,
@@ -72,11 +81,19 @@ pub trait LiquidityHook: Send + Sync {
     }
 }
 
+/// Thread-safe position manager sharing one pool and position store.
+///
+/// Manager-owned mutations are serialized. User hooks run without the
+/// position-map lock, so read-only inspection remains available while a hook
+/// executes. Recursive position mutation from a hook is not supported.
 #[derive(Clone)]
 pub struct PositionManager {
     pool: ConcentratedPool,
     positions: Arc<RwLock<BTreeMap<u64, PositionInfo>>>,
     next_token_id: Arc<AtomicU64>,
+    /// Serializes manager-owned mutations without holding the position map
+    /// across user hooks or pool operations.
+    mutation_lock: Arc<Mutex<()>>,
     #[cfg(feature = "v4-hooks")]
     hook: Option<Arc<dyn LiquidityHook>>,
 }
@@ -87,6 +104,7 @@ impl PositionManager {
             pool,
             positions: Arc::new(RwLock::new(BTreeMap::new())),
             next_token_id: Arc::new(AtomicU64::new(1)),
+            mutation_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "v4-hooks")]
             hook: None,
         }
@@ -119,6 +137,7 @@ impl PositionManager {
         if liquidity == 0 || liquidity > i128::MAX as u128 {
             return Err(Error::ZeroLiquidity);
         }
+        let _mutation_guard = self.mutation_lock.lock();
         let token_id = self.next_token_id.fetch_add(1, Ordering::Relaxed);
         let salt = token_id_salt(token_id);
         let info = PositionInfo {
@@ -130,7 +149,7 @@ impl PositionManager {
         };
         self.positions.write().insert(token_id, info);
 
-        match self.modify(
+        match self.modify_locked(
             owner,
             token_id,
             liquidity as i128,
@@ -158,7 +177,8 @@ impl PositionManager {
         if liquidity > i128::MAX as u128 {
             return Err(Error::LiquidityOverflow);
         }
-        self.modify(
+        let _mutation_guard = self.mutation_lock.lock();
+        self.modify_locked(
             caller,
             token_id,
             liquidity as i128,
@@ -180,7 +200,8 @@ impl PositionManager {
         if liquidity > i128::MAX as u128 {
             return Err(Error::LiquidityOverflow);
         }
-        self.modify(
+        let _mutation_guard = self.mutation_lock.lock();
+        self.modify_locked(
             caller,
             token_id,
             -(liquidity as i128),
@@ -193,10 +214,12 @@ impl PositionManager {
 
     /// A zero-liquidity increase realizes fees without changing principal.
     pub fn collect_fees(&self, caller: Address, token_id: u64) -> Result<ModifyResult, Error> {
-        self.modify(caller, token_id, 0, u128::MAX, u128::MAX, 0, 0)
+        let _mutation_guard = self.mutation_lock.lock();
+        self.modify_locked(caller, token_id, 0, u128::MAX, u128::MAX, 0, 0)
     }
 
     pub fn burn(&self, caller: Address, token_id: u64) -> Result<(), Error> {
+        let _mutation_guard = self.mutation_lock.lock();
         let mut positions = self.positions.write();
         let position = positions.get(&token_id).ok_or(Error::PositionNotFound)?;
         authorize(position.owner, caller)?;
@@ -208,7 +231,7 @@ impl PositionManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn modify(
+    fn modify_locked(
         &self,
         caller: Address,
         token_id: u64,
@@ -218,8 +241,9 @@ impl PositionManager {
         amount0_min: u128,
         amount1_min: u128,
     ) -> Result<ModifyResult, Error> {
-        let mut positions = self.positions.write();
-        let snapshot = positions
+        let snapshot = self
+            .positions
+            .read()
             .get(&token_id)
             .copied()
             .ok_or(Error::PositionNotFound)?;
@@ -274,13 +298,24 @@ impl PositionManager {
             },
             liquidity: predicted_state.liquidity,
         };
-        #[cfg(not(feature = "v4-hooks"))]
-        let _ = (predicted_fee0, predicted_fee1);
         #[cfg(feature = "v4-hooks")]
-        let hook_delta = if let Some(hook) = &self.hook {
-            hook.after_modify_liquidity(&request, &predicted)?
-        } else {
-            BalanceDelta::default()
+        let result = {
+            let hook_delta = if let Some(hook) = &self.hook {
+                hook.after_modify_liquidity(&request, &predicted)?
+            } else {
+                BalanceDelta::default()
+            };
+
+            apply_hook_delta(predicted, hook_delta)?
+        };
+        #[cfg(not(feature = "v4-hooks"))]
+        let result = ModifyResult {
+            principal_delta: quoted,
+            fee_delta: BalanceDelta {
+                amount0: predicted_fee0,
+                amount1: predicted_fee1,
+            },
+            liquidity: predicted_state.liquidity,
         };
 
         let pool_result = self.pool.modify_liquidity(ModifyLiquidityParams::new(
@@ -289,43 +324,41 @@ impl PositionManager {
             liquidity_delta,
         ))?;
 
-        let mut next_state = snapshot.state;
-        let (fees0, fees1) = next_state.update(
-            liquidity_delta,
-            pool_result.fee_growth_inside0_x128,
-            pool_result.fee_growth_inside1_x128,
-        )?;
-        let fee_delta = BalanceDelta {
-            amount0: u256_to_i128(fees0)?,
-            amount1: u256_to_i128(fees1)?,
-        };
-        #[allow(unused_mut)]
-        let mut result = ModifyResult {
+        // All fallible manager-side calculations, including hooks and hook
+        // delta overflow checks, completed before pool mutation. Committing the
+        // predicted position state is now infallible.
+        let result = ModifyResult {
             principal_delta: pool_result.delta,
-            fee_delta,
-            liquidity: next_state.liquidity,
+            ..result
         };
 
-        #[cfg(feature = "v4-hooks")]
-        {
-            result.fee_delta.amount0 = result
-                .fee_delta
-                .amount0
-                .checked_add(hook_delta.amount0)
-                .ok_or(Error::AmountOverflow)?;
-            result.fee_delta.amount1 = result
-                .fee_delta
-                .amount1
-                .checked_add(hook_delta.amount1)
-                .ok_or(Error::AmountOverflow)?;
-        }
-
-        let position = positions
-            .get_mut(&token_id)
-            .ok_or(Error::PositionNotFound)?;
-        position.state = next_state;
+        self.positions.write().insert(
+            token_id,
+            PositionInfo {
+                state: predicted_state,
+                ..snapshot
+            },
+        );
         Ok(result)
     }
+}
+
+#[cfg(feature = "v4-hooks")]
+fn apply_hook_delta(
+    mut result: ModifyResult,
+    hook_delta: BalanceDelta,
+) -> Result<ModifyResult, Error> {
+    result.fee_delta.amount0 = result
+        .fee_delta
+        .amount0
+        .checked_add(hook_delta.amount0)
+        .ok_or(Error::AmountOverflow)?;
+    result.fee_delta.amount1 = result
+        .fee_delta
+        .amount1
+        .checked_add(hook_delta.amount1)
+        .ok_or(Error::AmountOverflow)?;
+    Ok(result)
 }
 
 fn validate_slippage(

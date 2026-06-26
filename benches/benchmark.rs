@@ -24,7 +24,7 @@ use ruint::aliases::U256;
 
 fn build_test_pool() -> Pool {
     let path = Path::new("samples/pool1.json");
-    let file = std::fs::File::open(&path).unwrap();
+    let file = std::fs::File::open(path).unwrap();
     let pool: Pool = serde_json::from_reader(file).unwrap();
     pool
 }
@@ -404,8 +404,8 @@ fn bench_pool(c: &mut Criterion) {
     group.bench_function("modify_liquidity", |b| {
         b.iter(|| {
             pool.modify_liquidity(ModifyLiquidityParams {
-                tick_lower: tick_lower,
-                tick_upper: tick_upper,
+                tick_lower,
+                tick_upper,
                 liquidity_delta: 1_000_000_000_000_000_000i128,
             })
             .unwrap()
