@@ -6,6 +6,7 @@ use ruint::aliases::U256;
 use crate::{
     Error as SwapSimError,
     core::math::{
+        small_ratio::mul_div_u32_ceil,
         sqrt_price::{get_amount0_delta, get_amount1_delta},
         tick::get_sqrt_price_at_tick as compute_sqrt_price_at_tick,
     },
@@ -231,86 +232,4 @@ fn fee_on_exact_input_cached(amount_in: U256, fee_pips: u32) -> Result<U256, Swa
     }
 
     mul_div_u32_ceil(amount_in, fee_pips, MAX_SWAP_FEE - fee_pips)
-}
-
-#[inline(always)]
-fn mul_div_u32_ceil(a: U256, mul: u32, div: u32) -> Result<U256, SwapSimError> {
-    let (q, r) = mul_div_u32_div_rem(a, mul, div)?;
-
-    if r == 0 {
-        Ok(q)
-    } else {
-        q.checked_add(U256::ONE).ok_or(SwapSimError::AmountOverflow)
-    }
-}
-
-/// Exact U256 * u32 / u32 with remainder.
-/// Avoids overflowing `a * mul`.
-#[inline(always)]
-fn mul_div_u32_div_rem(a: U256, mul: u32, div: u32) -> Result<(U256, u32), SwapSimError> {
-    if div == 0 {
-        return Err(SwapSimError::AmountOverflow);
-    }
-
-    if a.is_zero() || mul == 0 {
-        return Ok((U256::ZERO, 0));
-    }
-
-    if mul == div {
-        return Ok((a, 0));
-    }
-
-    let mul = mul as u128;
-    let div = div as u128;
-    let [a0, a1, a2, a3] = a.into_limbs();
-
-    let mut product = [0u64; 5];
-    let mut carry = 0u128;
-
-    let t0 = (a0 as u128) * mul + carry;
-    product[0] = t0 as u64;
-    carry = t0 >> 64;
-
-    let t1 = (a1 as u128) * mul + carry;
-    product[1] = t1 as u64;
-    carry = t1 >> 64;
-
-    let t2 = (a2 as u128) * mul + carry;
-    product[2] = t2 as u64;
-    carry = t2 >> 64;
-
-    let t3 = (a3 as u128) * mul + carry;
-    product[3] = t3 as u64;
-    carry = t3 >> 64;
-
-    product[4] = carry as u64;
-
-    let mut q = [0u64; 5];
-    let mut rem = 0u128;
-
-    let cur4 = (rem << 64) | product[4] as u128;
-    q[4] = (cur4 / div) as u64;
-    rem = cur4 % div;
-
-    let cur3 = (rem << 64) | product[3] as u128;
-    q[3] = (cur3 / div) as u64;
-    rem = cur3 % div;
-
-    let cur2 = (rem << 64) | product[2] as u128;
-    q[2] = (cur2 / div) as u64;
-    rem = cur2 % div;
-
-    let cur1 = (rem << 64) | product[1] as u128;
-    q[1] = (cur1 / div) as u64;
-    rem = cur1 % div;
-
-    let cur0 = (rem << 64) | product[0] as u128;
-    q[0] = (cur0 / div) as u64;
-    rem = cur0 % div;
-
-    if q[4] != 0 {
-        return Err(SwapSimError::AmountOverflow);
-    }
-
-    Ok((U256::from_limbs([q[0], q[1], q[2], q[3]]), rem as u32))
 }
