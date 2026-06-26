@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run full V4 tests
+        run: cargo test --features full-v4
+
+      - name: Build docs
+        run: cargo doc --no-deps --features full-v4
+
+  forge:
+    name: Forge parity
+    runs-on: ubuntu-latest
+    environment:
+      name: forge CI/CD
+    env:
+      ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+      FOUNDRY_FORK_BLOCK_NUMBER: ${{ vars.FOUNDRY_FORK_BLOCK_NUMBER }}
+      POOL_MANAGER: ${{ vars.POOL_MANAGER }}
+      CURRENCY0: ${{ vars.CURRENCY0 }}
+      CURRENCY1: ${{ vars.CURRENCY1 }}
+      FEE: ${{ vars.FEE }}
+      TICK_SPACING: ${{ vars.TICK_SPACING }}
+      HOOKS: ${{ vars.HOOKS }}
+      OWNER: ${{ vars.OWNER }}
+      TOKEN0_WHALE: ${{ vars.TOKEN0_WHALE }}
+      TOKEN1_WHALE: ${{ vars.TOKEN1_WHALE }}
+      FUND0: ${{ vars.FUND0 }}
+      FUND1: ${{ vars.FUND1 }}
+      TICK_LOWER_OFFSET: ${{ vars.TICK_LOWER_OFFSET }}
+      TICK_UPPER_OFFSET: ${{ vars.TICK_UPPER_OFFSET }}
+      LIQUIDITY_DELTA: ${{ vars.LIQUIDITY_DELTA }}
+      ZERO_FOR_ONE: ${{ vars.ZERO_FOR_ONE }}
+      SWAP_AMOUNT_IN: ${{ vars.SWAP_AMOUNT_IN }}
+      FORGE_PARITY_OUT: ${{ vars.FORGE_PARITY_OUT }}
+      FORGE_PARITY_SCENARIO: ${{ vars.FORGE_PARITY_SCENARIO || 'all' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Forge dependencies
+        run: make forge-deps
+
+      - name: Compile Forge scripts
+        run: make forge-build
+
+      - name: Replay committed Forge parity fixture
+        run: make test-forge-parity
+
+      - name: Regenerate Forge parity fixture
+        run: |
+          required=(
+            ETH_RPC_URL
+            FOUNDRY_FORK_BLOCK_NUMBER
+            POOL_MANAGER
+            CURRENCY0
+            CURRENCY1
+            FEE
+            TICK_SPACING
+            OWNER
+            TOKEN0_WHALE
+            TOKEN1_WHALE
+            TICK_LOWER_OFFSET
+            TICK_UPPER_OFFSET
+            LIQUIDITY_DELTA
+          )
+
+          missing=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'Skipping Forge parity regeneration; missing CI env: %s\n' "${missing[*]}"
+            exit 0
+          fi
+
+          export FOUNDRY_FORK_BLOCK_NUMBER="${FOUNDRY_FORK_BLOCK_NUMBER:-0}"
+          export HOOKS="${HOOKS:-0x0000000000000000000000000000000000000000}"
+          export OWNER="${OWNER:-0x0000000000000000000000000000000000000000}"
+          export FUND0="${FUND0:-0}"
+          export FUND1="${FUND1:-0}"
+          export LIQUIDITY_DELTA="${LIQUIDITY_DELTA:-1000000}"
+          export FORGE_PARITY_SCENARIO="${FORGE_PARITY_SCENARIO:-all}"
+
+          make forge-parity-json
+          make test-forge-parity
+          git diff --exit-code -- forge/fixtures/parity.json

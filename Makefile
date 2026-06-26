@@ -40,10 +40,15 @@ test-positions:
 test-forge-parity:
 	cargo test --features $(FEATURES_FULL) --test forge_parity
 
-forge/lib/forge-std/src/Script.sol:
+forge-deps:
+	@if [ -f forge/lib/forge-std/src/Script.sol ]; then \
+		exit 0; \
+	fi; \
+	if [ -e forge/lib/forge-std ]; then \
+		echo "forge/lib/forge-std exists but Script.sol is missing; remove it and rerun make forge-deps"; \
+		exit 1; \
+	fi; \
 	cd forge && forge install foundry-rs/forge-std --no-git --shallow
-
-forge-deps: forge/lib/forge-std/src/Script.sol
 
 forge-build: forge-deps
 	cd forge && forge build
