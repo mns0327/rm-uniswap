@@ -26,12 +26,8 @@ const MAX_UINT160: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0xFFFF_FFFF, 0])
 /// Low 96-bit mask for U256.
 const Q96_MASK_U256: U256 = U256::from_limbs([u64::MAX, 0xFFFF_FFFF, 0, 0]);
 
-// ─── Error type ───────────────────────────────────────────────────────────────
-
 /// Backward-compatible name for the crate-wide compact error code.
 pub type SqrtPriceMathError = crate::Error;
-
-// ─── Basic helpers ────────────────────────────────────────────────────────────
 
 #[inline(always)]
 fn sort_sqrt_ratios(a: U256, b: U256) -> (U256, U256) {
@@ -136,8 +132,6 @@ fn liquidity_sqrt_q96_div_rounding_up(
     div_u512_by_u256_rounding_up(numerator, denominator)
 }
 
-// ─── Q96 multiply / shift helpers ─────────────────────────────────────────────
-
 #[inline(always)]
 fn mul_shift_right_96(a: U256, b: U256) -> Result<U256, MathError> {
     let (product_256, overflow) = a.overflowing_mul(b);
@@ -164,8 +158,6 @@ fn mul_shift_right_96_rounding_up(a: U256, b: U256) -> Result<U256, MathError> {
     let product_512: U512 = a.widening_mul(b);
     shr_u512_to_u256_rounding_up(product_512, Q96_SHIFT)
 }
-
-// ─── Core price-move functions ────────────────────────────────────────────────
 
 /// Compute the next sqrt price after adding or removing token0.
 ///
@@ -303,8 +295,6 @@ pub fn get_next_sqrt_price_from_amount1_rounding_down(
     }
 }
 
-// ─── Amount0 delta helpers ────────────────────────────────────────────────────
-
 #[inline(always)]
 fn amount0_delta_wide(
     sqrt_a: U256,
@@ -396,8 +386,6 @@ fn amount0_delta_fast_or_wide(
     amount0_delta_wide(sqrt_a, sqrt_b, liquidity, diff, round_up)
 }
 
-// ─── Delta functions ──────────────────────────────────────────────────────────
-
 /// Compute token0 delta.
 ///
 /// Formula:
@@ -461,8 +449,6 @@ pub fn get_amount1_delta(
     Ok(result)
 }
 
-// ─── High-level helpers ───────────────────────────────────────────────────────
-
 /// Given the input amount and direction, compute the next sqrt price.
 ///
 /// zero_for_one = true:
@@ -505,8 +491,6 @@ pub fn get_next_sqrt_price_from_output(
     }
 }
 
-// ─── Public internal arithmetic ───────────────────────────────────────────────
-
 #[inline]
 #[cfg(test)]
 pub(crate) fn div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathError> {
@@ -516,8 +500,6 @@ pub(crate) fn div_rounding_up(a: U256, b: U256) -> Result<U256, SqrtPriceMathErr
 
     div_rounding_up_u256_nonzero(a, b)
 }
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -546,8 +528,6 @@ mod tests {
                 .ok_or(SqrtPriceMathError::PriceOverflow)
         }
     }
-
-    // ─── Reference implementations ────────────────────────────────────────────
 
     /// Reference version of getAmount0Delta using the original two-step
     /// Uniswap-style formula.
@@ -732,8 +712,6 @@ mod tests {
         }
     }
 
-    // ─── Deterministic pseudo-random generator ────────────────────────────────
-
     #[derive(Clone)]
     struct XorShift64 {
         state: u64,
@@ -772,8 +750,6 @@ mod tests {
             U256::from(self.next_u64() % 1_000_000_000u64)
         }
     }
-
-    // ─── Amount0 delta tests ──────────────────────────────────────────────────
 
     #[test]
     fn amount0_delta_matches_reference_floor() {
@@ -903,8 +879,6 @@ mod tests {
         }
     }
 
-    // ─── Amount1 delta tests ──────────────────────────────────────────────────
-
     #[test]
     fn amount1_delta_matches_reference_floor_and_rounding_up() {
         let cases = [
@@ -994,8 +968,6 @@ mod tests {
             }
         }
     }
-
-    // ─── Next sqrt price: amount0 tests ───────────────────────────────────────
 
     #[test]
     fn next_sqrt_price_amount0_add_matches_reference() {
@@ -1111,8 +1083,6 @@ mod tests {
         }
     }
 
-    // ─── Next sqrt price: amount1 tests ───────────────────────────────────────
-
     #[test]
     fn next_sqrt_price_amount1_add_matches_reference() {
         let cases = [
@@ -1216,8 +1186,6 @@ mod tests {
         }
     }
 
-    // ─── High-level input/output dispatch tests ───────────────────────────────
-
     #[test]
     fn next_sqrt_price_from_input_dispatches_correctly() {
         let sqrt_p = q96();
@@ -1251,8 +1219,6 @@ mod tests {
             get_next_sqrt_price_from_amount0_rounding_up(sqrt_p, liquidity, amount_out, false)
         );
     }
-
-    // ─── Domain guard tests ───────────────────────────────────────────────────
 
     #[test]
     fn zero_price_errors() {
@@ -1359,8 +1325,6 @@ mod tests {
             Err(SqrtPriceMathError::PriceOverflow)
         );
     }
-
-    // ─── Public div helper tests ──────────────────────────────────────────────
 
     #[test]
     fn div_rounding_up_works() {

@@ -21,17 +21,11 @@ use super::sqrt_price::{
     get_next_sqrt_price_from_output,
 };
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
 /// Maximum swap fee: 100%, expressed in hundredths of a bip.
 pub const MAX_SWAP_FEE: u32 = 1_000_000;
 
-// ── Error type ────────────────────────────────────────────────────────────────
-
 /// Backward-compatible name for the crate-wide compact error code.
 pub type SwapMathError = crate::Error;
-
-// ── Output type ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapStep {
@@ -40,8 +34,6 @@ pub struct SwapStep {
     pub amount_out: U256,
     pub fee_amount: U256,
 }
-
-// ── Fee arithmetic ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 struct FeeParams {
@@ -100,8 +92,6 @@ fn fee_on_exact_input(amount_in: U256, fee: FeeParams) -> Result<U256, MathError
     mul_div_u32_ceil(amount_in, fee.pips, fee.complement)
 }
 
-// ── Price-target helper ───────────────────────────────────────────────────────
-
 #[inline(always)]
 pub fn get_sqrt_price_target(
     zero_for_one: bool,
@@ -114,8 +104,6 @@ pub fn get_sqrt_price_target(
         sqrt_price_next_x96.min(sqrt_price_limit_x96)
     }
 }
-
-// ── Public API ────────────────────────────────────────────────────────────────
 
 #[inline]
 #[must_use = "discarding a swap step result silently drops errors"]
@@ -168,8 +156,6 @@ pub fn compute_swap_step(
         )
     }
 }
-
-// ── Internal exact-input path ─────────────────────────────────────────────────
 
 #[inline]
 fn compute_exact_in(
@@ -247,8 +233,6 @@ fn compute_exact_in(
     })
 }
 
-// ── Internal exact-output path ────────────────────────────────────────────────
-
 #[inline]
 fn compute_exact_out(
     sqrt_ratio_current_x96: U256,
@@ -305,15 +289,11 @@ fn compute_exact_out(
     })
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use ruint::aliases::U256;
-
-    // ── Test helpers ──────────────────────────────────────────────────────────
 
     fn u256(s: &str) -> U256 {
         U256::from_str_radix(s, 10).unwrap()
@@ -326,8 +306,6 @@ mod tests {
     fn liq(n: u128) -> u128 {
         n
     }
-
-    // ── Price fixtures (from the Uniswap V3 TypeScript test suite) ────────────
 
     /// √(1/1) · 2^96
     fn sqrt_price_1_1() -> U256 {
@@ -354,8 +332,6 @@ mod tests {
         u256("39614081257132168796771975168")
     }
 
-    // ── Arbitrary-value strategies ────────────────────────────────────────────
-
     /// Non-zero U160 — valid range for Uniswap V4 sqrt prices.
     fn arb_sqrt_price() -> impl Strategy<Value = U256> {
         any::<[u64; 3]>()
@@ -370,8 +346,6 @@ mod tests {
         any::<[u64; 4]>().prop_map(U256::from_limbs)
     }
 
-    // ── get_sqrt_price_target ─────────────────────────────────────────────────
-
     proptest! {
         #[test]
         fn fuzz_get_sqrt_price_target(
@@ -384,8 +358,6 @@ mod tests {
             prop_assert_eq!(result, expected);
         }
     }
-
-    // ── Error cases ───────────────────────────────────────────────────────────
 
     #[test]
     fn fee_too_large_returns_error() {
@@ -428,8 +400,6 @@ mod tests {
         assert_eq!(step.fee_amount, ether(1));
     }
 
-    // ── Exact-input — price capped at target ──────────────────────────────────
-
     #[test]
     fn exact_in_one_for_zero_capped_at_price_target() {
         // Current price below target: one_for_zero (price moves up).
@@ -451,8 +421,6 @@ mod tests {
         assert_eq!(step.sqrt_ratio_next_x96, sqrt_price_101_100());
     }
 
-    // ── Exact-output — price capped at target ─────────────────────────────────
-
     #[test]
     fn exact_out_one_for_zero_capped_at_price_target() {
         // Large desired output; step is bounded by the tick target.
@@ -471,8 +439,6 @@ mod tests {
         assert!(step.amount_out < ether(1));
         assert_eq!(step.sqrt_ratio_next_x96, sqrt_price_101_100());
     }
-
-    // ── Exact-input — input fully spent before target ─────────────────────────
 
     #[test]
     fn exact_in_one_for_zero_fully_spent() {
@@ -494,8 +460,6 @@ mod tests {
         assert!(step.sqrt_ratio_next_x96 < sqrt_price_1000_100());
     }
 
-    // ── Exact-output — desired output fully received ──────────────────────────
-
     #[test]
     fn exact_out_one_for_zero_fully_received() {
         // Target is far; the desired output is fully deliverable.
@@ -513,8 +477,6 @@ mod tests {
         assert_eq!(step.amount_out, ether(1));
         assert!(step.sqrt_ratio_next_x96 < sqrt_price_10000_100());
     }
-
-    // ── Edge: output capped at desired ────────────────────────────────────────
 
     #[test]
     fn amount_out_capped_at_desired() {
@@ -536,8 +498,6 @@ mod tests {
         );
     }
 
-    // ── Edge: target price == 1, partial input consumed ──────────────────────
-
     #[test]
     fn target_price_one_partial_input() {
         // An extremely small target price of 1.
@@ -558,8 +518,6 @@ mod tests {
         assert_eq!(step.sqrt_ratio_next_x96, U256::ONE);
     }
 
-    // ── Edge: not entire input taken as fee ───────────────────────────────────
-
     #[test]
     fn not_entire_input_taken_as_fee() {
         let step = compute_swap_step(
@@ -576,8 +534,6 @@ mod tests {
         assert_eq!(step.amount_out, U256::ZERO);
         assert_eq!(step.sqrt_ratio_next_x96, U256::from(2413u64));
     }
-
-    // ── Edge: insufficient liquidity exact-out (zero_for_one) ─────────────────
 
     #[test]
     fn zero_for_one_insufficient_liquidity_exact_out() {
@@ -602,14 +558,11 @@ mod tests {
         assert!(step.amount_out > U256::ZERO);
     }
 
-    // ── Edge: insufficient liquidity exact-out (one_for_zero) ─────────────────
-
     #[test]
     fn one_for_zero_insufficient_liquidity_exact_out() {
         // one_for_zero: current < target (price moves UP).
         let sqrt_p = u256("20282409603651670423947251286016");
-        // FIX: previously used sqrt_p * 9/10 (BELOW current) which contradicts
-        // one_for_zero direction. Corrected to sqrt_p * 11/10 (ABOVE current).
+        // The target is above the current price for one_for_zero.
         let sqrt_p_target = sqrt_p * U256::from(11u64) / U256::from(10u64);
 
         let step = compute_swap_step(
@@ -625,8 +578,6 @@ mod tests {
         assert_eq!(step.sqrt_ratio_next_x96, sqrt_p_target);
         assert!(step.amount_out <= U256::from(263000u64));
     }
-
-    // ── Property-based fuzz tests ─────────────────────────────────────────────
 
     proptest! {
         /// For any valid exact-input swap step:

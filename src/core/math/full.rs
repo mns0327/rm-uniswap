@@ -33,8 +33,6 @@ use super::uint::{
     widen,
 };
 
-// ── Error type ────────────────────────────────────────────────────────────────
-
 /// Backward-compatible name for the crate-wide compact error code.
 pub type MathError = crate::Error;
 
@@ -49,8 +47,6 @@ fn full_product(a: U256, b: U256) -> (U256, U256, U512) {
 
     (prod0, prod1, product)
 }
-
-// ── Modular inverse ───────────────────────────────────────────────────────────
 
 /// Returns `d⁻¹ mod 2²⁵⁶` for an odd `d`.
 ///
@@ -78,8 +74,6 @@ fn mod_inv_u256(d: U256) -> U256 {
 
     inv
 }
-
-// ── Shared slow-path kernel ───────────────────────────────────────────────────
 
 /// Core computation for the slow path where `a * b` does not fit into 256 bits.
 ///
@@ -153,8 +147,6 @@ fn mul_div_core(
 
     Ok((quotient, has_remainder))
 }
-
-// ── Public API ────────────────────────────────────────────────────────────────
 
 /// Computes floor(a * b / denominator).
 ///
@@ -443,8 +435,6 @@ pub fn mul_q96_div_rounding_up(amount: U256, denominator: U256) -> Result<U256, 
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,8 +443,6 @@ mod tests {
     fn q128() -> U256 {
         U256::ONE << 128
     }
-
-    // ── mul_div ───────────────────────────────────────────────────────────────
 
     #[test]
     fn mul_div_phantom_overflow() {
@@ -524,8 +512,6 @@ mod tests {
         );
     }
 
-    // ── mul_div_rounding_up ───────────────────────────────────────────────────
-
     #[test]
     fn rounding_up_with_remainder() {
         // ⌈q128 / 3⌉ = ⌊q128 / 3⌋ + 1  (q128 is not divisible by 3).
@@ -577,7 +563,7 @@ mod tests {
             U256::MAX
         );
 
-        // Also confirm the previously-wrong case now returns its correct value.
+        // Exact division must not round up or overflow.
         assert_eq!(
             mul_div_rounding_up(U256::MAX, U256::from(2u64), U256::from(2u64)).unwrap(),
             U256::MAX // exact: remainder = 0, no increment needed
@@ -592,8 +578,6 @@ mod tests {
             U256::from(4u64)
         );
     }
-
-    // ── Modular inverse ───────────────────────────────────────────────────────
 
     #[test]
     fn mod_inv_correctness() {
@@ -616,8 +600,6 @@ mod tests {
         let inv = mod_inv_u256(d);
         assert_eq!(d.wrapping_mul(inv), U256::ONE);
     }
-
-    // ── Cross-function consistency ────────────────────────────────────────────
 
     #[test]
     fn slow_path_ceil_equals_floor_or_floor_plus_one() {

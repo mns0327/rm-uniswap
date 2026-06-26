@@ -331,6 +331,10 @@ impl PositionManager {
             principal_delta: pool_result.delta,
             ..result
         };
+        if snapshot.state.liquidity == 0 && liquidity_delta > 0 {
+            predicted_state.fee_growth_inside0_last_x128 = pool_result.fee_growth_inside0_x128;
+            predicted_state.fee_growth_inside1_last_x128 = pool_result.fee_growth_inside1_x128;
+        }
 
         self.positions.write().insert(
             token_id,
@@ -370,14 +374,14 @@ fn validate_slippage(
     amount1_min: u128,
 ) -> Result<(), Error> {
     if liquidity_delta >= 0 {
-        let amount0 = u128::try_from(delta.amount0).map_err(|_| Error::AmountOverflow)?;
-        let amount1 = u128::try_from(delta.amount1).map_err(|_| Error::AmountOverflow)?;
+        let amount0 = negative_amount(delta.amount0)?;
+        let amount1 = negative_amount(delta.amount1)?;
         if amount0 > amount0_max || amount1 > amount1_max {
             return Err(Error::SlippageExceeded);
         }
     } else {
-        let amount0 = negative_amount(delta.amount0)?;
-        let amount1 = negative_amount(delta.amount1)?;
+        let amount0 = u128::try_from(delta.amount0).map_err(|_| Error::AmountOverflow)?;
+        let amount1 = u128::try_from(delta.amount1).map_err(|_| Error::AmountOverflow)?;
         if amount0 < amount0_min || amount1 < amount1_min {
             return Err(Error::SlippageExceeded);
         }

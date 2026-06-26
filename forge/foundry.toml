@@ -1,0 +1,13 @@
+[profile.default]
+src = "contracts"
+script = "script"
+out = "foundry-out"
+cache_path = "foundry-cache"
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 20_000
+via_ir = true
+fs_permissions = [
+  { access = "read-write", path = "./fixtures" }
+]

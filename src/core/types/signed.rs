@@ -3,10 +3,7 @@ use std::fmt;
 use ruint::aliases::U256;
 
 use crate::Error;
-
-// ---------------------------------------------------------------------------
 // Core type
-// ---------------------------------------------------------------------------
 
 /// A 256-bit signed integer represented as a sign-magnitude pair.
 ///
@@ -22,10 +19,7 @@ pub struct I256 {
     negative: bool,
     value: U256,
 }
-
-// ---------------------------------------------------------------------------
 // Construction
-// ---------------------------------------------------------------------------
 
 impl I256 {
     /// The additive identity `0`.
@@ -72,10 +66,7 @@ impl I256 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
 // From / TryFrom conversions
-// ---------------------------------------------------------------------------
 
 impl From<i128> for I256 {
     fn from(v: i128) -> Self {
@@ -117,10 +108,7 @@ impl TryFrom<I256> for i128 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
 // Predicates & accessors
-// ---------------------------------------------------------------------------
 
 impl I256 {
     /// Returns `true` if the value is zero.
@@ -165,10 +153,7 @@ impl I256 {
         (self.negative, self.value)
     }
 }
-
-// ---------------------------------------------------------------------------
 // Checked arithmetic — returning `Option`
-// ---------------------------------------------------------------------------
 
 impl I256 {
     /// Negation.  Always succeeds (sign-magnitude has no asymmetric MIN).
@@ -264,10 +249,7 @@ impl I256 {
         self.checked_div_unsigned(rhs).unwrap_or(Self::zero())
     }
 }
-
-// ---------------------------------------------------------------------------
 // Mutating helpers (used in swap-step loops)
-// ---------------------------------------------------------------------------
 
 impl I256 {
     /// Add an unsigned `rhs` to this signed value, returning an error on
@@ -308,10 +290,7 @@ impl I256 {
         Ok(())
     }
 }
-
-// ---------------------------------------------------------------------------
 // Ordering
-// ---------------------------------------------------------------------------
 
 impl PartialOrd for I256 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -330,10 +309,7 @@ impl Ord for I256 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
 // Operator overloads
-// ---------------------------------------------------------------------------
 
 impl std::ops::Neg for I256 {
     type Output = Self;
@@ -374,10 +350,7 @@ impl std::ops::SubAssign for I256 {
         *self = *self - rhs;
     }
 }
-
-// ---------------------------------------------------------------------------
 // Formatting
-// ---------------------------------------------------------------------------
 
 impl fmt::Debug for I256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -406,10 +379,7 @@ impl From<alloy::primitives::Signed<256, 4>> for I256 {
         Self::from_raw(v.is_negative(), v.unsigned_abs())
     }
 }
-
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -425,8 +395,6 @@ mod tests {
         I256::negative(u(v))
     }
 
-    // --- invariant -----------------------------------------------------------
-
     #[test]
     fn negative_zero_is_canonical_zero() {
         let z = I256::negative(U256::ZERO);
@@ -439,8 +407,6 @@ mod tests {
         let z = I256::from_raw(true, U256::ZERO);
         assert_eq!(z, I256::zero());
     }
-
-    // --- predicates ----------------------------------------------------------
 
     #[test]
     fn signum_values() {
@@ -455,8 +421,6 @@ mod tests {
         assert!(pos(1).is_positive());
         assert!(!neg(1).is_positive());
     }
-
-    // --- checked_add ---------------------------------------------------------
 
     #[test]
     fn add_same_sign() {
@@ -488,15 +452,11 @@ mod tests {
         assert_eq!(big.checked_add(pos(1)), None);
     }
 
-    // --- checked_sub ---------------------------------------------------------
-
     #[test]
     fn sub_basic() {
         assert_eq!(pos(10).checked_sub(pos(3)), Some(pos(7)));
         assert_eq!(pos(3).checked_sub(pos(10)), Some(neg(7)));
     }
-
-    // --- neg -----------------------------------------------------------------
 
     #[test]
     fn neg_toggles_sign() {
@@ -505,8 +465,6 @@ mod tests {
         assert_eq!(-I256::zero(), I256::zero());
     }
 
-    // --- ordering ------------------------------------------------------------
-
     #[test]
     fn ordering_across_signs() {
         assert!(neg(1) < I256::zero());
@@ -514,8 +472,6 @@ mod tests {
         assert!(neg(100) < neg(1));
         assert!(pos(1) < pos(100));
     }
-
-    // --- mutating add_unsigned / sub_unsigned --------------------------------
 
     #[test]
     fn add_unsigned_exact_input_simulation() {
@@ -557,8 +513,6 @@ mod tests {
         assert_eq!(r, neg(5));
     }
 
-    // --- checked_mul/div/rem -------------------------------------------------
-
     #[test]
     fn mul_unsigned() {
         assert_eq!(pos(7).checked_mul_unsigned(u(3)), Some(pos(21)));
@@ -580,8 +534,6 @@ mod tests {
         assert_eq!(pos(10).checked_rem_unsigned(U256::ZERO), None);
     }
 
-    // --- i128 conversion -----------------------------------------------------
-
     #[test]
     fn to_i128_roundtrip() {
         for v in [0i128, 1, -1, i128::MAX, i128::MIN + 1] {
@@ -598,16 +550,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- From<i128> ----------------------------------------------------------
-
     #[test]
     fn from_i128_min() {
         let s = I256::from(i128::MIN);
         assert!(s.is_negative());
         assert_eq!(s.abs(), U256::from(i128::MIN.unsigned_abs()));
     }
-
-    // --- Display / Debug -----------------------------------------------------
 
     #[test]
     fn display_positive() {
@@ -629,8 +577,6 @@ mod tests {
         assert_eq!(format!("{:?}", pos(5)), "SignedAmount(+5)");
         assert_eq!(format!("{:?}", neg(5)), "SignedAmount(-5)");
     }
-
-    // --- From<alloy::primitives::Signed<256, 4>> -----------------------------
 
     #[test]
     fn from_alloy_signed_positive() {

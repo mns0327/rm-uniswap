@@ -1,48 +1,14 @@
-// =============================================================================
-// tick_math_optimized.rs
-//
-// Uniswap V3 TickMath — Optimized Rust Port
-//
-// Optimization summary
-// ─────────────────────────────────────────────────────────────────────────────
-// [O1] Remove OnceLock → compile-time const arrays (ruint::uint! macro)
-//      TICK_RATIOS, MIN_SQRT_PRICE, and MAX_SQRT_PRICE are now fully resolved
-//      at compile time. The previous OnceLock::get_or_init approach issued an
-//      atomic load and a branch on every hot-path call.
-//
-// [O2] get_sqrt_price_at_tick — early loop exit
-//      Skip table entries beyond the most significant set bit of abs_tick,
-//      reducing worst-case 20 iterations to ~13 on average.
-//      (tick ∈ [-887_272, 887_272] → at most 20 significant bits)
-//
-// [O3] get_tick_at_sqrt_price — u128-based accumulator
-//      After Q1.127 normalisation r ∈ [2^127, 2^128), which fits in u128.
-//      Only the squaring step r² briefly passes through U256; the result is
-//      shifted back to u128 immediately after. This replaces a full
-//      U256 × U256 (4 × u64 widening multiply) with a u128 × u128 widening
-//      multiply (~2 × u64), repeated 14 times per call.
-//
-// [O4] Propagate #[inline(always)] to all hot-path helpers
-//      Covers: sadd, ssub, ssar, smul_i128_u64.
-//
-// [O5] Add Uniswap V3 on-chain reference vectors
-//      16 test cases derived from hardhat fork calls to TickMathTest.sol,
-//      covering boundary values, common price ranges, and pool tick-spacing
-//      boundaries. These catch regressions whenever the algorithm is touched.
-//
-// Algorithm note: the core log₂ extraction (14-step iterative squaring) and
-// all magic constants are taken verbatim from the audited Uniswap V3
-// TickMath.sol. Do not change them without re-running the reference vectors.
-// =============================================================================
+//! Uniswap TickMath port.
+//!
+//! The ratio constants and logarithm coefficients match the audited Uniswap V3
+//! `TickMath.sol` implementation. The conversion routines are optimized for
+//! repeated quote paths while preserving the Solidity boundary behavior covered
+//! by the reference-vector tests in this module.
 
 use ruint::{aliases::U256, uint};
 
-// ── Error type ────────────────────────────────────────────────────────────────
-
 /// Backward-compatible name for the crate-wide compact error code.
 pub type TickMathError = crate::Error;
-
-// ── Public constants ──────────────────────────────────────────────────────────
 
 /// Minimum representable tick: floor(log_{1.0001}(2^{-128})).
 pub const MIN_TICK: i32 = -887_272;
@@ -53,8 +19,6 @@ pub const MAX_TICK: i32 = 887_272;
 /// Upper bound for tick spacing accepted by the helper functions.
 pub const MAX_TICK_SPACING: i32 = i16::MAX as i32;
 
-// [O1] Compile-time constants — eliminates OnceLock + from_str_radix overhead.
-//
 // Formula:
 //   MIN_SQRT_PRICE = sqrt(1.0001^MIN_TICK) * 2^96   (truncated to u160)
 //   MAX_SQRT_PRICE = sqrt(1.0001^MAX_TICK) * 2^96   (truncated to u160)
@@ -70,10 +34,6 @@ pub const MIN_SQRT_PRICE: U256 = uint!(4295128739_U256);
 /// The valid input range for get_tick_at_sqrt_price is [MIN_SQRT_PRICE, MAX_SQRT_PRICE).
 pub const MAX_SQRT_PRICE: U256 = uint!(1461446703485210103287273052203988822378723970342_U256);
 
-// ── Tick-ratio lookup table ───────────────────────────────────────────────────
-
-// [O1] Compile-time const array — the compiler can fully inline or unroll the loop.
-//
 // Source: Uniswap V3 TickMath.sol (Ethereum mainnet deployment)
 // https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/TickMath.sol
 //
@@ -105,8 +65,6 @@ const TICK_RATIOS: [(u32, U256); 20] = [
     (0x40000, uint!(0x2216e584f5fa1ea926041bedfe98_U256)),
     (0x80000, uint!(0x48a170391f7dc42444e8fa2_U256)),
 ];
-
-// ── Signed 256-bit helpers (sign-magnitude representation) ───────────────────
 
 /// A signed 256-bit integer stored as `(is_negative, magnitude)`.
 ///
@@ -158,8 +116,6 @@ fn ssar(val: S256, shift: u32) -> i32 {
         quotient as i32
     }
 }
-
-// =============================================================================
 // get_sqrt_price_at_tick
 //
 // Returns the Q64.96 sqrt price for a given tick:
@@ -178,7 +134,6 @@ fn ssar(val: S256, shift: u32) -> i32 {
 //      affect the result. abs_tick fits in at most 20 bits; leading_zeros()
 //      gives the exact count of useful entries, saving ~35% iterations on
 //      average across the full tick range.
-// =============================================================================
 
 /// Compute the Q64.96 sqrt price for a given tick.
 ///
@@ -218,9 +173,6 @@ pub fn get_sqrt_price_at_tick(tick: i32) -> Result<U256, TickMathError> {
     //   result = (ratio + (2^32 - 1)) >> 32
     Ok((ratio + ((U256::ONE << 32) - U256::ONE)) >> 32)
 }
-
-// =============================================================================
-// ── Helper: unsigned 128×128 → 256-bit widening multiply ─────────────────────
 //
 // Returns (hi, lo) such that  a * b  ==  hi * 2^128 + lo.
 //
@@ -248,8 +200,6 @@ const fn widening_mul_u128(a: u128, b: u128) -> (u128, u128) {
     let hi = hh + (lh >> 64) + (hl >> 64) + (mid >> 64);
     (hi, lo)
 }
-
-// ── Helper: signed i128 × unsigned u128 → (hi : i64, lo : u128) ──────────────
 //
 // Represents the 256-bit product as  hi * 2^128 + lo  (hi is signed).
 //
@@ -274,11 +224,8 @@ const fn smul_i128_u128(a: i128, b: u128) -> (i64, u128) {
         (hi as i64, lo)
     }
 }
-
-// ── Main function ─────────────────────────────────────────────────────────────
 //
 // Optimisation log vs. original implementation
-// ─────────────────────────────────────────────
 // [O1] Replace `most_significant_bit(ratio)?` (Result-returning helper) with
 //      `ratio.leading_zeros()` — one `lzcnt` instruction, no error path.
 //
@@ -305,8 +252,6 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
     if sqrt_price_x96 < MIN_SQRT_PRICE || sqrt_price_x96 >= MAX_SQRT_PRICE {
         return Err(TickMathError::InvalidSqrtPrice);
     }
-
-    // ── Step 1: lift to Q128 and locate the most-significant bit ─────────────
     //
     // ratio = sqrt_price_x96 << 32  moves the Q96 value into Q128 so the
     // leading bit sits above position 128.
@@ -317,13 +262,9 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
     // [O1]
     let ratio = sqrt_price_x96 << 32u32;
     let msb = (255u32 - ratio.leading_zeros() as u32) as i32;
-
-    // ── Step 2: integer part of log₂ in Q64.64 ───────────────────────────────
     //
     // |msb - 128| ≤ 128  =>  |(msb-128) << 64| ≤ 2^71  =>  within i128 range.
     let mut log2: i128 = ((msb as i128) - 128) << 64;
-
-    // ── Step 3: normalise r to [2^127, 2^128) — extract as u128 ──────────────
     //
     // After the shift, the 256-bit result has zeros in the two high limbs.
     // Read the value from limbs[1:0] (little-endian layout). [O2]
@@ -334,8 +275,6 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
     };
     let limbs = r_u256.as_limbs(); // [limb0, limb1, limb2, limb3], little-endian
     let mut r: u128 = (limbs[0] as u128) | ((limbs[1] as u128) << 64);
-
-    // ── Step 4: 14 fractional bits of log₂ via iterated squaring ─────────────
     //
     // Loop invariant: r ∈ [2^127, 2^128).
     //
@@ -355,8 +294,6 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
         log2 |= f << i;
         r = if f != 0 { hi } else { (hi << 1) | (lo >> 127) };
     }
-
-    // ── Step 5: scale log₂ (Q64.64) to log base √1.0001 (Q128.128) ──────────
     //
     // log_sqrt10001 = log2 × 255_738_958_999_603_826_347_141
     //
@@ -364,8 +301,6 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
     // S256 helper.  Result: log_hi × 2^128 + log_lo  with |log_hi| < 2^22. [O3]
     const LOG_MUL: u128 = 255_738_958_999_603_826_347_141;
     let (log_hi, log_lo) = smul_i128_u128(log2, LOG_MUL);
-
-    // ── Step 6: tick bounds — arithmetic right-shift by 128 ──────────────────
     //
     // For a signed value V = log_hi × 2^128 + log_lo  and an unsigned offset K:
     //
@@ -381,8 +316,6 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
 
     let (_, carry) = log_lo.overflowing_add(TICK_HIGH_OFFSET);
     let tick_high = (log_hi + carry as i64) as i32;
-
-    // ── Step 7: one-step precision correction ─────────────────────────────────
     //
     // If both bounds agree the result is exact.  Otherwise prefer tick_high only
     // when its corresponding sqrt price does not exceed the input — this is the
@@ -397,8 +330,6 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
 
     Ok(tick)
 }
-
-// ── Most-significant-bit helper ───────────────────────────────────────────────
 
 /// Return the 0-indexed position of the most significant set bit of `x`.
 ///
@@ -415,8 +346,6 @@ pub fn most_significant_bit(x: U256) -> Result<u32, TickMathError> {
     // leading_zeros() counts from bit 255 down; subtract to get the bit index.
     Ok(255 - x.leading_zeros() as u32)
 }
-
-// ── Tick-spacing helpers ──────────────────────────────────────────────────────
 
 /// Return the largest tick that is an exact multiple of `tick_spacing` and
 /// does not exceed [`MAX_TICK`].
@@ -443,15 +372,10 @@ pub fn min_usable_tick(tick_spacing: i32) -> Result<i32, TickMathError> {
     }
     Ok((MIN_TICK / tick_spacing) * tick_spacing)
 }
-
-// =============================================================================
 // Tests
-// =============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Boundary values ───────────────────────────────────────────────────────
 
     #[test]
     fn sqrt_price_at_min_tick_matches_uniswap() {
@@ -495,8 +419,6 @@ mod tests {
         let sqrt_price = get_sqrt_price_at_tick(0).unwrap();
         assert_eq!(get_tick_at_sqrt_price(sqrt_price).unwrap(), 0);
     }
-
-    // ── Round-trip correctness ────────────────────────────────────────────────
 
     /// tick -> sqrt_price -> tick round-trips for a representative sample
     /// spread across the full valid tick range.
@@ -583,8 +505,6 @@ mod tests {
         }
     }
 
-    // ── Invalid inputs ────────────────────────────────────────────────────────
-
     #[test]
     fn tick_at_invalid_low_sqrt_price_returns_error() {
         assert_eq!(
@@ -601,8 +521,6 @@ mod tests {
             Err(TickMathError::InvalidSqrtPrice)
         );
     }
-
-    // ── Uniswap V3 on-chain reference vectors ─────────────────────────────────
     //
     // Values were obtained by calling TickMathTest.getSqrtRatioAtTick() and
     // TickMathTest.getTickAtSqrtRatio() on a hardhat local fork of Ethereum
@@ -701,8 +619,6 @@ mod tests {
         }
     }
 
-    // ── Tick-spacing helpers ──────────────────────────────────────────────────
-
     #[test]
     fn max_usable_tick_with_spacing_60() {
         assert_eq!(max_usable_tick(60).unwrap(), 887_220);
@@ -737,8 +653,6 @@ mod tests {
         );
     }
 
-    // ── most_significant_bit ──────────────────────────────────────────────────
-
     #[test]
     fn most_significant_bit_basic_cases() {
         assert_eq!(most_significant_bit(U256::ONE).unwrap(), 0);
@@ -754,8 +668,6 @@ mod tests {
             Err(TickMathError::ZeroValue)
         );
     }
-
-    // ── S256 helper unit tests ────────────────────────────────────────────────
 
     #[test]
     fn ssar_positive_no_remainder() {
@@ -804,8 +716,6 @@ mod tests {
         assert_eq!(ssub(a, b), (true, U256::from(5u64)));
     }
 }
-
-// =============================================================================
 // Benchmarks  (requires criterion — run with `cargo bench`)
 //
 // Add to Cargo.toml:
@@ -851,4 +761,3 @@ mod tests {
 //
 // criterion_group!(benches, bench_sqrt_price_at_tick, bench_tick_at_sqrt_price);
 // criterion_main!(benches);
-// =============================================================================

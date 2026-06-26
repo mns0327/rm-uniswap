@@ -1,17 +1,11 @@
 //! Benchmark suite for Uniswap V4 AMM math and swap simulation.
 //!
-//! Run with: `cargo bench --package arb-dex --all-features`
+//! Run with: `cargo bench --package rm-uniswap --all-features`
 //!
 //! ## Structure
 //!
-//! Each group is a Criterion `criterion::Benchmark` that measures one logical
-//! unit of work. Input values are chosen to be:
-//!   - **Realistic**: derived from the V4 pool fixtures
-//!   - **Representative**: exercises the hot-path operations that appear in
-//!     actual arbitrage simulations
-//!
-//! Groups 1–2 (pure math) are the highest priority for optimisation — they
-//! contain no branching logic and are the leaf functions of every swap.
+//! Each group measures a hot path used by V4 math, quoting, or full pool
+//! simulation.
 
 use std::path::Path;
 
@@ -29,8 +23,6 @@ fn build_test_pool() -> Pool {
     pool
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
 fn sqrt_price_1_1() -> U256 {
     // √(1/1) · 2^96
     U256::ONE << 96
@@ -43,8 +35,6 @@ fn ether(n: u128) -> U256 {
 fn liq(n: u128) -> U256 {
     U256::from(n)
 }
-
-// ─── Group 2: FullMath — 512-bit multiply-divide ───────────────────────────────
 
 fn bench_full_math(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_math");
@@ -77,8 +67,6 @@ fn bench_full_math(c: &mut Criterion) {
 
     group.finish();
 }
-
-// ─── Group 3: SqrtPriceMath ────────────────────────────────────────────────────
 
 fn bench_sqrt_price_math(c: &mut Criterion) {
     let mut group = c.benchmark_group("sqrt_price_math");
@@ -150,8 +138,6 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Group 4: TickMath ─────────────────────────────────────────────────────────
-
 fn bench_tick_math(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_math");
 
@@ -201,8 +187,6 @@ fn bench_tick_math(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Group 5: SwapMath ─────────────────────────────────────────────────────────
-
 fn bench_swap_math(c: &mut Criterion) {
     let mut group = c.benchmark_group("swap_math");
 
@@ -248,8 +232,6 @@ fn bench_swap_math(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Group 6: SignedAmount arithmetic ─────────────────────────────────────────
-
 fn bench_signed_amount(c: &mut Criterion) {
     let mut group = c.benchmark_group("signed_amount");
 
@@ -284,8 +266,6 @@ fn bench_signed_amount(c: &mut Criterion) {
 
     group.finish();
 }
-
-// ─── Group 9: PoolTicks (tick management) ─────────────────────────────────────
 
 fn bench_pool_ticks(c: &mut Criterion) {
     let mut group = c.benchmark_group("pool_ticks");
@@ -351,8 +331,6 @@ fn bench_pool_ticks(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Group 10: Full Pool operations (tick-crossing loop) ───────────────────────
-
 fn bench_pool(c: &mut Criterion) {
     let mut group = c.benchmark_group("pool");
 
@@ -415,8 +393,6 @@ fn bench_pool(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── Group 11: Utility functions ──────────────────────────────────────────────
-
 fn bench_utils(c: &mut Criterion) {
     let mut group = c.benchmark_group("utils");
 
@@ -435,8 +411,6 @@ fn bench_utils(c: &mut Criterion) {
 
     group.finish();
 }
-
-// ─── Main ──────────────────────────────────────────────────────────────────────
 
 criterion_group!(
     all_benches,

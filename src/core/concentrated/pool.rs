@@ -1,84 +1,17 @@
-//! Uniswap V4-faithful full-swap simulator with tick-crossing loop.
+//! Uniswap V4 pool simulator with full tick-crossing support.
 //!
-//! This module is a direct Rust translation of Uniswap V4's
-//! [`Pool.sol`](https://github.com/Uniswap/v4-core/blob/main/src/libraries/Pool.sol).
-//! The loop structure, amount-accounting variables, tick-crossing logic, and
-//! final `BalanceDelta` assembly mirror the Solidity source exactly.
+//! The swap loop follows V4 `Pool.sol`: it advances through initialized ticks,
+//! updates liquidity on crossings, and returns deltas from the caller /
+//! PoolManager accounting perspective. Negative delta values mean the caller
+//! owes that token; positive values mean the caller receives it.
 //!
-//! Tick spacing is supplied explicitly from the V4 `PoolKey`.
+//! `SwapParams::amount` uses V4 `amountSpecified` semantics: negative for exact
+//! input and positive for exact output. Tick spacing is supplied from the
+//! `PoolKey` and validated together with pool snapshots and tick stores.
 //!
-//! # BalanceDelta sign convention
-//!
-//! `Pool.swap` in V4 returns a `BalanceDelta` from the **caller / PoolManager
-//! accounting perspective**, matching Solidity's final `toBalanceDelta` assembly.
-//!
-//! | Field value | Caller-perspective meaning                         |
-//! |-------------|----------------------------------------------------|
-//! | `< 0`       | Caller owes/sends this token to the PoolManager.   |
-//! | `> 0`       | Caller receives/is owed this token from the pool.  |
-//!
-//! Concretely, for a `zero_for_one` exact-input swap:
-//! - `delta.amount0 < 0` — caller paid token0 into the pool.
-//! - `delta.amount1 > 0` — caller receives token1 from the pool.
-//!
-//! Use the local `delta_amount_in` / `delta_amount_out` helpers below for
-//! direction-aware unsigned magnitudes.
-//!
-//! # Internal `amountCalculated` convention
-//!
-//! Mirrors V4 Solidity exactly:
-//! - **Exact-input**: `amountCalculated += step.amountOut` → accumulates positive output.
-//! - **Exact-output**: `amountCalculated -= step.amountIn + step.feeAmount` → accumulates negative input.
-//!
-//! # Changelog
-//!
-//! ### This revision — V4 fidelity rewrite
-//!
-//! * **Sign convention aligned with V4** — `BalanceDelta` now uses the caller /
-//!   PoolManager accounting perspective returned by `Pool.swap` exactly:
-//!   negative input token, positive output token.
-//!
-//! * **Direction-aware amount helpers corrected** — output checks `raw > 0`
-//!   and input checks `raw < 0`, consistent with v4 flash-accounting deltas.
-//!
-//! * **Comment bug fixed** — the exact-input branch in the swap loop was
-//!   labelled `// if exactOutput`; corrected to `// exact-input branch`.
-//!
-//! * **`liquidityNet` negation made explicit** — V4's `Pool.swap` explicitly
-//!   negates `liquidityNet` when `zeroForOne` before calling
-//!   `LiquidityMath.addDelta`. The previous revision hid this inside
-//!   `cross_tick`, making the V4 symmetry invisible at the call site.
-//!   The negation is now applied in the swap loop body with a clear comment.
-//!
-//! * **Protocol fee deduction ordering corrected** — V4 updates swap amount
-//!   accounting with the full `step.amountIn + step.feeAmount` first, then
-//!   deducts the protocol share only from the LP fee-growth amount.
-//!
-//! * **Fee validation moved before price-limit validation** — `validate_fee`
-//!   and `validate_swap_fee_for_exactness` now run before the price-limit
-//!   check, matching V4's revert ordering exactly.
-//!
-//! * **`MAX_SWAP_ITERATIONS` corrected** — constant and doc comment were
-//!   inconsistent (10 000 vs 1 024). The constant is now 10 000 with a note
-//!   that V4 has no library-level cap (EVM gas is the bound), and 10 000 is
-//!   the simulator's defensive ceiling for malformed local state.
-//!
-//! * **Tick boundary clamping kept V4-faithful** — V4 clamps `tickNext` to
-//!   `[MIN_TICK, MAX_TICK]` before calling `getSqrtPriceAtTick`, because the
-//!   bitmap itself is not aware of the min/max tick bounds.
-//!
-//! ### Preserved from previous revision
-//!
-//! * `signed_amount_to_i128` correctly handles `i128::MIN` (magnitude 2^127).
-//! * Direction-aware amount helpers return 0 on sign violation rather than
-//!   a spurious non-zero value.
-//! * `state.tick` and `TickEntry.tick_idx` are range-validated on entry.
-//! * Protocol-fee `mul_div` used instead of `saturating_mul` to prevent
-//!   silent precision loss.
-//! * `protocol_fee_amount` field present on `FullSwapResult` under
-//!   `#[cfg(feature = "protocol-fee")]`.
-//! * `validate_fee` called before any other work.
-//! * `tick_spacing` validated on entry.
+//! Read-only quote methods leave state unchanged. [`Pool::swap`] commits the
+//! resulting price, tick, liquidity, fee growth, and crossed tick fee state only
+//! after the full simulation succeeds.
 
 use std::sync::Arc;
 
@@ -111,8 +44,6 @@ use super::{
         TickInfo,
     },
 };
-
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Minimum valid tick spacing (1 = finest granularity).
 pub const MIN_TICK_SPACING: i32 = 1;
@@ -185,8 +116,6 @@ mod protocol_fee_consts {
     /// `ProtocolFeeLibrary.PIPS_DENOMINATOR` = 1 000 000.
     pub const PIPS_DENOMINATOR: u32 = 1_000_000;
 }
-
-// ─── Pool state ───────────────────────────────────────────────────────────────
 
 /// Complete V4 pool state required for a full tick-crossing simulation.
 ///
@@ -346,8 +275,6 @@ impl TryFrom<PoolSnapshot> for Pool {
     }
 }
 
-// ─── Swap parameters ──────────────────────────────────────────────────────────
-
 /// Parameters for a single simulated swap.
 ///
 /// Mirrors Uniswap V4's `IPoolManager.SwapParams` struct.
@@ -435,8 +362,6 @@ pub struct ModifyLiquidityResult {
     /// Fee growth inside the position range after the position update.
     pub fee_growth_inside1_x128: U256,
 }
-
-// ─── Result types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickCrossInfo {
@@ -535,8 +460,6 @@ struct PreparedSwap<'a> {
     effective_fee: u32,
     cache: &'a PoolCache,
 }
-
-// ─── Pool APIs ────────────────────────────────────────────────────────────────
 
 impl Pool {
     /// Construct a pool after validating every state invariant.
@@ -961,8 +884,6 @@ impl Pool {
     }
 }
 
-// ─── Swap loop state ──────────────────────────────────────────────────────────
-
 /// Mutable loop state shared by the light and full executors.
 #[derive(Debug, Clone, Copy)]
 struct SwapLoopState {
@@ -972,8 +893,6 @@ struct SwapLoopState {
     fee_growth_global0_x128: U256,
     fee_growth_global1_x128: U256,
 }
-
-// ─── Core swap executors ─────────────────────────────────────────────────────
 
 #[inline]
 fn execute_swap_light_from_state<G: TickCrossing>(
@@ -2235,8 +2154,6 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     Ok((light, crossings))
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
 /// Returns the loosest valid price limit for a given swap direction.
 ///
 /// Matches V4: zeroForOne must stay strictly above `MIN_SQRT_PRICE`;
@@ -2431,7 +2348,7 @@ fn get_amount0_delta_signed(
             liquidity_delta.unsigned_abs(),
             false,
         )?;
-        u256_magnitude_to_i128(amount, true)
+        u256_magnitude_to_i128(amount, false)
     } else {
         let amount = get_amount0_delta_unsigned(
             sqrt_price_a_x96,
@@ -2439,7 +2356,7 @@ fn get_amount0_delta_signed(
             liquidity_delta as u128,
             true,
         )?;
-        u256_magnitude_to_i128(amount, false)
+        u256_magnitude_to_i128(amount, true)
     }
 }
 
@@ -2455,7 +2372,7 @@ fn get_amount1_delta_signed(
             liquidity_delta.unsigned_abs(),
             false,
         )?;
-        u256_magnitude_to_i128(amount, true)
+        u256_magnitude_to_i128(amount, false)
     } else {
         let amount = get_amount1_delta_unsigned(
             sqrt_price_a_x96,
@@ -2463,7 +2380,7 @@ fn get_amount1_delta_signed(
             liquidity_delta as u128,
             true,
         )?;
-        u256_magnitude_to_i128(amount, false)
+        u256_magnitude_to_i128(amount, true)
     }
 }
 
@@ -2483,10 +2400,8 @@ fn add_liquidity_delta(liquidity: u128, delta: i128) -> Result<u128, SwapSimErro
 
 /// Convert a [`SignedAmount`] to `i128`, correctly handling `i128::MIN`.
 ///
-/// The old implementation used `abs > i128::MAX` (2^127 − 1) for *both* signs,
-/// incorrectly rejecting magnitude 2^127 for negative values even though
-/// `−2^127 = i128::MIN` is a valid `i128`. Negative amounts may have magnitude
-/// up to 2^127 inclusive.
+/// Positive values must fit within `i128::MAX`. Negative values may use
+/// magnitude `2^127`, which maps to `i128::MIN`.
 #[inline]
 #[cfg(test)]
 fn signed_amount_to_i128(amount: SignedAmount) -> Result<i128, SwapSimError> {
@@ -2537,8 +2452,6 @@ fn calculate_swap_fee(protocol_fee: Option<u32>, lp_fee: u32) -> Result<u32, Swa
 
     Ok(combined as u32)
 }
-
-// ─── Validation helpers ───────────────────────────────────────────────────────
 
 #[inline]
 fn validate_fee(fee: u32) -> Result<(), SwapSimError> {
@@ -2674,8 +2587,6 @@ fn validate_price_limit(
     Ok(())
 }
 
-// ─── Public utilities ─────────────────────────────────────────────────────────
-
 /// Maximum liquidity per tick for a given `tick_spacing`.
 ///
 /// Derived from `TickMath.MAX_TICK` / number of usable compressed ticks,
@@ -2696,8 +2607,6 @@ pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
     u128::MAX / num_ticks
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use crate::core::math::tick::get_sqrt_price_at_tick;
@@ -2705,8 +2614,6 @@ mod tests {
 
     use super::*;
     use proptest::prelude::*;
-
-    // ── Shared helpers ────────────────────────────────────────────────────────
 
     fn ether(n: u128) -> U256 {
         U256::from(n) * U256::from(1_000_000_000_000_000_000u128)
@@ -2795,8 +2702,6 @@ mod tests {
         }
     }
 
-    // ── Zero-amount short-circuit ─────────────────────────────────────────────
-
     #[test]
     fn swap_zero_amount_does_nothing() {
         let ticks = basic_ticks();
@@ -2816,8 +2721,6 @@ mod tests {
         assert_eq!(result.liquidity, before.liquidity);
         assert_eq!(result.delta, BalanceDelta::default());
     }
-
-    // ── State mutation ────────────────────────────────────────────────────────
 
     #[test]
     fn swap_commits_state() {
@@ -2907,8 +2810,6 @@ mod tests {
         assert_eq!(light.protocol_fee_amount, full.protocol_fee_amount);
     }
 
-    // ── V4 caller / PoolManager sign convention ───────────────────────────────
-
     #[test]
     fn zero_for_one_exact_in_delta_signs() {
         let ticks = basic_ticks();
@@ -2946,8 +2847,6 @@ mod tests {
         assert!(delta_amount_in(&result.delta, false) > 0);
         assert!(delta_amount_out(&result.delta, false) > 0);
     }
-    // ── Price movement direction ───────────────────────────────────────────────
-
     #[test]
     fn zero_for_one_price_moves_down() {
         let ticks = basic_ticks();
@@ -2978,8 +2877,6 @@ mod tests {
         assert!(result.sqrt_price_x96 <= limit, "price must not cross limit");
     }
 
-    // ── amount_in / amount_out accessor correctness ───────────────────────────
-
     #[test]
     fn amount_in_and_out_are_consistent_with_raw_delta() {
         let ticks = basic_ticks();
@@ -3000,8 +2897,6 @@ mod tests {
             result.delta.amount1.unsigned_abs()
         );
     }
-
-    // ── direction-aware delta helper sign guards ─────────────────────────────
 
     #[test]
     fn delta_amount_out_uses_positive_output_field() {
@@ -3045,8 +2940,6 @@ mod tests {
         assert_eq!(delta_amount_in(&delta, false), 20);
     }
 
-    // ── signed_amount_to_i128 boundary ───────────────────────────────────────
-
     #[test]
     fn signed_amount_to_i128_accepts_i128_min() {
         let min_magnitude = U256::from(1u128) << 127u32;
@@ -3069,8 +2962,6 @@ mod tests {
         let amount = SignedAmount::positive(U256::from(i128::MAX as u128));
         assert_eq!(signed_amount_to_i128(amount).unwrap(), i128::MAX);
     }
-
-    // ── Exact-output ──────────────────────────────────────────────────────────
 
     #[test]
     fn exact_out_never_exceeds_requested() {
@@ -3105,16 +2996,16 @@ mod tests {
             ))
             .unwrap();
 
-        // 틱 -120을 건넜으므로 crossings가 비어있으면 안 됨
+        // The swap crossed tick -120, so crossing metadata must be present.
         assert_eq!(result.crossings.len(), 1);
         assert_eq!(result.crossings[0].tick, -120);
 
-        // cumulative_input은 0보다 크고 전체 입력보다 작아야 함
+        // Cumulative input is bounded by total input.
         let total_input = U256::from(delta_amount_in(&result.delta, true));
         assert!(result.crossings[0].cumulative_input > U256::ZERO);
         assert!(result.crossings[0].cumulative_input <= total_input);
 
-        // 크로싱 후 유동성은 0이어야 함 (범위 아래)
+        // Liquidity is drained below the active range.
         assert_eq!(result.crossings[0].liquidity_after, 0);
     }
 
@@ -3123,7 +3014,7 @@ mod tests {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
 
-        // 틱을 건너지 않을 작은 스왑
+        // A small swap should stay inside the current range.
         let result = pool
             .simulate_swap_full(make_params(
                 true,
@@ -3148,13 +3039,11 @@ mod tests {
             ))
             .unwrap();
 
-        // exact-output에서 crossings의 cumulative_input은 모두 0
+        // Exact-output crossings do not accumulate input metadata.
         for c in &result.crossings {
             assert_eq!(c.cumulative_input, U256::ZERO);
         }
     }
-
-    // ── Tick crossing ─────────────────────────────────────────────────────────
 
     fn one_range_pool(liq: u128) -> Pool {
         make_pool(
@@ -3212,8 +3101,6 @@ mod tests {
         assert_eq!(result.liquidity, 0, "no liquidity above range");
     }
 
-    // ── modify_liquidity ──────────────────────────────────────────────────────
-
     #[test]
     fn add_liquidity_inside_range() {
         let pool = make_pool(sqrt_price_1_1(), 0, 0, 3_000, 60, []);
@@ -3224,9 +3111,9 @@ mod tests {
             .expect("add should succeed");
 
         assert_eq!(result.liquidity, liq);
-        // Liquidity delta is pool-balance perspective: pool receives tokens when LP adds.
-        assert!(result.delta.amount0 > 0, "pool receives token0");
-        assert!(result.delta.amount1 > 0, "pool receives token1");
+        // Liquidity delta is caller / PoolManager perspective: caller owes tokens when LP adds.
+        assert!(result.delta.amount0 < 0, "caller pays token0");
+        assert!(result.delta.amount1 < 0, "caller pays token1");
         assert!(result.flipped_lower && result.flipped_upper);
 
         let ticks = pool.ticks.read();
@@ -3251,8 +3138,8 @@ mod tests {
 
         assert_eq!(result.liquidity, 0, "out-of-range position");
 
-        // Price below range: adding liquidity requires only token0; pool receives it.
-        assert!(result.delta.amount0 > 0, "pool receives token0");
+        // Price below range: adding liquidity requires only token0 from the caller.
+        assert!(result.delta.amount0 < 0, "caller pays token0");
         assert_eq!(result.delta.amount1, 0);
     }
 
@@ -3269,17 +3156,15 @@ mod tests {
             .expect("remove should succeed");
 
         assert_eq!(result.liquidity, 0);
-        // Removing liquidity means the pool sends tokens back to the LP.
-        assert!(result.delta.amount0 < 0, "pool sends token0 back");
-        assert!(result.delta.amount1 < 0, "pool sends token1 back");
+        // Removing liquidity means the caller receives tokens back from the pool.
+        assert!(result.delta.amount0 > 0, "caller receives token0");
+        assert!(result.delta.amount1 > 0, "caller receives token1");
         assert!(result.flipped_lower && result.flipped_upper);
 
         let ticks = pool.ticks.read();
         assert!(ticks.get(-120).is_none());
         assert!(ticks.get(120).is_none());
     }
-
-    // ── Validation ────────────────────────────────────────────────────────────
 
     #[test]
     fn rejects_out_of_range_state_tick() {
@@ -3432,8 +3317,6 @@ mod tests {
         );
     }
 
-    // ── next_initialized_tick ─────────────────────────────────────────────────
-
     fn tick_pool_for_search() -> PoolTicks {
         PoolTicks::from_tick_entries(
             [
@@ -3498,8 +3381,6 @@ mod tests {
         assert!(!up.initialized);
     }
 
-    // ── tick_spacing_to_max_liquidity_per_tick ────────────────────────────────
-
     #[test]
     fn max_liquidity_matches_formula() {
         for &ts in &[1i32, 10, 60, 200, 32_767] {
@@ -3514,8 +3395,6 @@ mod tests {
             );
         }
     }
-
-    // ── Property-based tests ──────────────────────────────────────────────────
 
     proptest! {
         #[test]

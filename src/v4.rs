@@ -1,23 +1,11 @@
-/// Uniswap V4 facade.
+/// Uniswap V4-compatible facade.
 ///
-/// # Module structure
+/// The public API mirrors the Solidity library names while using Rust method
+/// names: [`FullMath`], [`SqrtPriceMath`], [`SwapMath`], and [`TickMath`].
 ///
-/// The public API mirrors the Solidity library names while using Rust naming
-/// for methods: [`FullMath`], [`SqrtPriceMath`], [`SwapMath`], and [`TickMath`].
-///
-/// # Simulator selection guide
-///
-/// ```text
-/// ┌──────────────────────────────────────────────────────────────┐
-/// │  Is the swap large enough to cross an initialized tick?      │
-/// │                                                              │
-/// │   No → Quoter (single step, O(1), no tick crossing)          │
-/// │  Yes → Pool (tick-crossing loop)                             │
-/// └──────────────────────────────────────────────────────────────┘
-/// ```
-///
-/// Use [`Quoter`] as a cheap pre-filter. When it reaches a tick boundary,
-/// re-price with [`Pool`].
+/// Use [`Quoter`] for single-range quotes that cannot cross an initialized
+/// tick. Use [`Pool`] when a swap may cross ticks or when committed pool state
+/// must be updated.
 pub use crate::Error;
 pub use crate::core::concentrated::pool::{
     FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot, PoolState,
@@ -204,10 +192,6 @@ impl TickMath {
     }
 }
 
-// ─── Tick ────────────────────────────────────────────────────────────────────
-
-// ─── Pool state ───────────────────────────────────────────────────────────────
-
 /// Lightweight V4 pool state used by the fast single-step simulator.
 ///
 /// For multi-tick simulation, use [`PoolState`] with [`Pool`].
@@ -229,8 +213,6 @@ pub struct QuoteState {
     pub fee: u32,
 }
 
-// ─── Tick-crossing result ─────────────────────────────────────────────────────
-
 /// Result of [`Quoter::step_until_tick`].
 ///
 /// Using a named struct instead of a raw tuple makes the `crossed` field
@@ -242,14 +224,8 @@ pub struct TickCrossResult {
     /// `true` if the price reached `next_initialized_tick_price_x96`,
     /// meaning the swap consumed all liquidity in this range and a tick
     /// crossing would occur.
-    ///
-    /// FIX (was a doc-comment bug): the previous version documented this
-    /// as "returns true if the step did NOT hit the boundary", which was
-    /// the opposite of the actual predicate.
     pub crossed: bool,
 }
-
-// ─── Fast simulator ───────────────────────────────────────────────────────────
 
 /// Single-step V4 swap simulator — **no tick crossings**.
 ///
@@ -333,7 +309,6 @@ impl Quoter {
         amount_in: U256,
         zero_for_one: bool,
     ) -> Result<SwapStep, Error> {
-        // FIX: compute_swap_step now returns Result — propagate with `?`.
         compute_swap_step(
             state.sqrt_price_x96,
             // Use the extreme price limit so this single step is never
@@ -357,7 +332,6 @@ impl Quoter {
         amount_out: U256,
         zero_for_one: bool,
     ) -> Result<SwapStep, Error> {
-        // FIX: propagate Result.
         compute_swap_step(
             state.sqrt_price_x96,
             extreme_price_target(zero_for_one),
@@ -403,7 +377,6 @@ impl Quoter {
         amount_in: U256,
         next_initialized_tick_price_x96: U256,
     ) -> Result<TickCrossResult, Error> {
-        // FIX: propagate Result.
         let step = compute_swap_step(
             state.sqrt_price_x96,
             next_initialized_tick_price_x96,
@@ -412,16 +385,11 @@ impl Quoter {
             state.fee,
         )?;
 
-        // FIX (doc-comment bug): `crossed` is TRUE when the price *reached*
-        // the boundary, i.e. when tick crossing is required.
-        // Previously the doc said "true if did NOT hit" — opposite of reality.
         let crossed = step.sqrt_ratio_next_x96 == next_initialized_tick_price_x96;
 
         Ok(TickCrossResult { step, crossed })
     }
 }
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Return the most extreme valid price target in the given swap direction.
 ///
@@ -439,8 +407,6 @@ fn extreme_price_target(zero_for_one: bool) -> U256 {
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use crate::core::math::tick::get_sqrt_price_at_tick;
@@ -448,8 +414,6 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use ruint::aliases::U256;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn ether(n: u128) -> U256 {
         U256::from(n) * U256::from(1_000_000_000_000_000_000u128)
@@ -467,8 +431,6 @@ mod tests {
             fee: 3000,
         }
     }
-
-    // ── Basic invariants ──────────────────────────────────────────────────────
 
     #[test]
     fn quote_exact_input_returns_positive_output() {
@@ -527,8 +489,6 @@ mod tests {
         assert_eq!(step.fee_amount, U256::ZERO);
     }
 
-    // ── Quote consistency ─────────────────────────────────────────────────────
-
     #[test]
     fn exact_output_quote_equals_step_in_plus_fee() {
         let pool = basic_pool();
@@ -549,12 +509,9 @@ mod tests {
         assert_eq!(quoted, step.amount_out);
     }
 
-    // ── step_until_tick ───────────────────────────────────────────────────────
-
     #[test]
     fn step_until_tick_detects_tick_crossing_for_large_swap() {
         let pool = basic_pool();
-        // FIX: get_sqrt_price_at_tick returns Result.
         let next_tick_price = get_sqrt_price_at_tick(-60).unwrap();
 
         let result = Quoter::step_until_tick(&pool, ether(1_000), next_tick_price)
@@ -585,8 +542,6 @@ mod tests {
         assert!(result.step.sqrt_ratio_next_x96 < pool.sqrt_price_x96);
     }
 
-    // ── Monotonicity ──────────────────────────────────────────────────────────
-
     #[test]
     fn larger_input_returns_at_least_as_much_output() {
         let pool = basic_pool();
@@ -596,8 +551,6 @@ mod tests {
             .expect("quote should succeed");
         assert!(large_out >= small_out);
     }
-
-    // ── Round-trip ────────────────────────────────────────────────────────────
 
     #[test]
     fn exact_input_round_trip_requires_positive_input() {
@@ -611,8 +564,6 @@ mod tests {
             assert!(input_required > U256::ZERO);
         }
     }
-
-    // ── Error cases ───────────────────────────────────────────────────────────
 
     #[test]
     fn exact_input_rejects_fee_of_100_percent_via_swap_math_error() {
@@ -634,14 +585,11 @@ mod tests {
         assert_eq!(err, Error::MaxFeeExactOut);
     }
 
-    // ── Property-based tests ──────────────────────────────────────────────────
-
     proptest! {
         #[test]
         fn fuzz_exact_input_basic_invariants(
             zero_for_one in any::<bool>(),
             amount      in 0u128..1_000_000_000_000_000_000u128,
-            // FIX: keep fee in range that compute_swap_step accepts (<= 1_000_000).
             // 100% fee is technically valid for exact-in, so we allow it and
             // filter non-Ok results rather than restricting the range.
             fee         in 0u32..=1_000_000u32,
@@ -694,7 +642,6 @@ mod tests {
                 fee,
             };
 
-            // FIX: handle Result.
             let step = Quoter::step_exact_output(
                 &pool,
                 U256::from(amount_out),

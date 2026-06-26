@@ -1,1 +1,4 @@
 /target
+/forge/foundry-cache
+/forge/foundry-out
+.env
