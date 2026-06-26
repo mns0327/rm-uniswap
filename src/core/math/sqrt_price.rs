@@ -8,6 +8,10 @@
 //!   truncating left shifts.
 
 use crate::core::math::full::{MathError, mul_q96_div, mul_q96_div_rounding_up};
+use crate::core::math::uint::{
+    add_one_if, div_rounding_up_u256_nonzero, div_u512_by_u256_rounding_up, div_u512_by_u512_floor,
+    div_u512_by_u512_rounding_up, shr_u512_to_u256, shr_u512_to_u256_rounding_up,
+};
 use ruint::aliases::{U256, U512};
 
 /// Q96 = 2^96.
@@ -22,32 +26,12 @@ const MAX_UINT160: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0xFFFF_FFFF, 0])
 /// Low 96-bit mask for U256.
 const Q96_MASK_U256: U256 = U256::from_limbs([u64::MAX, 0xFFFF_FFFF, 0, 0]);
 
-/// Low 96-bit mask for U512.
-const Q96_MASK_U512: U512 = U512::from_limbs([u64::MAX, 0xFFFF_FFFF, 0, 0, 0, 0, 0, 0]);
-
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 /// Backward-compatible name for the crate-wide compact error code.
 pub type SqrtPriceMathError = crate::Error;
 
 // ─── Basic helpers ────────────────────────────────────────────────────────────
-
-#[inline(always)]
-fn widen_u256(v: U256) -> U512 {
-    let [a, b, c, d] = v.into_limbs();
-    U512::from_limbs([a, b, c, d, 0, 0, 0, 0])
-}
-
-#[inline(always)]
-fn narrow_u512_to_u256(v: U512) -> Result<U256, MathError> {
-    let [a, b, c, d, e, f, g, h] = v.into_limbs();
-
-    if (e | f | g | h) != 0 {
-        return Err(MathError::Overflow);
-    }
-
-    Ok(U256::from_limbs([a, b, c, d]))
-}
 
 #[inline(always)]
 fn sort_sqrt_ratios(a: U256, b: U256) -> (U256, U256) {
@@ -124,57 +108,6 @@ fn liquidity_q96_unchecked(liquidity: U256) -> U256 {
     liquidity << Q96_SHIFT
 }
 
-// ─── Division helpers ─────────────────────────────────────────────────────────
-
-#[inline(always)]
-fn div_rounding_up_u256_nonzero(a: U256, b: U256) -> Result<U256, MathError> {
-    debug_assert!(!b.is_zero());
-
-    let (q, r) = a.div_rem(b);
-
-    if r.is_zero() {
-        Ok(q)
-    } else {
-        q.checked_add(U256::ONE).ok_or(MathError::Overflow)
-    }
-}
-
-#[inline(always)]
-fn div_u512_by_u256_rounding_up(numerator: U512, denominator: U256) -> Result<U256, MathError> {
-    debug_assert!(!denominator.is_zero());
-
-    let (q512, r512) = numerator.div_rem(widen_u256(denominator));
-    let q = narrow_u512_to_u256(q512)?;
-
-    if r512.is_zero() {
-        Ok(q)
-    } else {
-        q.checked_add(U256::ONE).ok_or(MathError::Overflow)
-    }
-}
-
-#[inline(always)]
-fn div_u512_by_u512_floor(numerator: U512, denominator: U512) -> Result<U256, MathError> {
-    debug_assert!(!denominator.is_zero());
-
-    let q512 = numerator / denominator;
-    narrow_u512_to_u256(q512)
-}
-
-#[inline(always)]
-fn div_u512_by_u512_rounding_up(numerator: U512, denominator: U512) -> Result<U256, MathError> {
-    debug_assert!(!denominator.is_zero());
-
-    let (q512, r512) = numerator.div_rem(denominator);
-    let q = narrow_u512_to_u256(q512)?;
-
-    if r512.is_zero() {
-        Ok(q)
-    } else {
-        q.checked_add(U256::ONE).ok_or(MathError::Overflow)
-    }
-}
-
 /// Computes ceil((liquidity * sqrt_p_x96 * Q96) / denominator).
 ///
 /// This replaces:
@@ -214,7 +147,7 @@ fn mul_shift_right_96(a: U256, b: U256) -> Result<U256, MathError> {
     }
 
     let product_512: U512 = a.widening_mul(b);
-    narrow_u512_to_u256(product_512 >> Q96_SHIFT)
+    shr_u512_to_u256(product_512, Q96_SHIFT)
 }
 
 #[inline(always)]
@@ -225,23 +158,11 @@ fn mul_shift_right_96_rounding_up(a: U256, b: U256) -> Result<U256, MathError> {
         let quotient = product_256 >> Q96_SHIFT;
         let has_remainder = !(product_256 & Q96_MASK_U256).is_zero();
 
-        return if has_remainder {
-            quotient.checked_add(U256::ONE).ok_or(MathError::Overflow)
-        } else {
-            Ok(quotient)
-        };
+        return add_one_if(quotient, has_remainder);
     }
 
     let product_512: U512 = a.widening_mul(b);
-
-    let quotient = narrow_u512_to_u256(product_512 >> Q96_SHIFT)?;
-    let has_remainder = !(product_512 & Q96_MASK_U512).is_zero();
-
-    if has_remainder {
-        quotient.checked_add(U256::ONE).ok_or(MathError::Overflow)
-    } else {
-        Ok(quotient)
-    }
+    shr_u512_to_u256_rounding_up(product_512, Q96_SHIFT)
 }
 
 // ─── Core price-move functions ────────────────────────────────────────────────

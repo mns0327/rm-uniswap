@@ -28,51 +28,15 @@
 
 use ruint::aliases::{U256, U512};
 
+use super::uint::{
+    add_one_if, is_power_of_two, narrow, shr_u512_to_u256, shr_u512_to_u256_rounding_up, split,
+    widen,
+};
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Backward-compatible name for the crate-wide compact error code.
 pub type MathError = crate::Error;
-
-/// Returns true when `x` is a power of two.
-///
-/// This is useful because division by a power-of-two denominator can be handled
-/// with a shift instead of the full mulmod + modular inverse slow path.
-#[inline(always)]
-fn is_power_of_two(x: U256) -> bool {
-    !x.is_zero() && (x & (x - U256::ONE)).is_zero()
-}
-
-/// Zero-extends a [`U256`] into the low half of a [`U512`].
-#[inline(always)]
-fn widen(v: U256) -> U512 {
-    let [a, b, c, d] = v.into_limbs();
-    U512::from_limbs([a, b, c, d, 0, 0, 0, 0])
-}
-
-/// Splits a [`U512`] into `(low: U256, high: U256)`.
-#[inline(always)]
-fn split(v: U512) -> (U256, U256) {
-    let [a, b, c, d, e, f, g, h] = v.into_limbs();
-
-    (
-        U256::from_limbs([a, b, c, d]),
-        U256::from_limbs([e, f, g, h]),
-    )
-}
-
-/// Narrows a [`U512`] into [`U256`].
-///
-/// Returns [`MathError::Overflow`] if the high 256 bits are non-zero.
-#[inline(always)]
-fn narrow(v: U512) -> Result<U256, MathError> {
-    let [a, b, c, d, e, f, g, h] = v.into_limbs();
-
-    if (e | f | g | h) != 0 {
-        return Err(MathError::Overflow);
-    }
-
-    Ok(U256::from_limbs([a, b, c, d]))
-}
 
 /// Computes the full 512-bit product of `a * b`.
 ///
@@ -264,11 +228,7 @@ pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> Result<U256, 
     if !overflow {
         let (q, r) = prod0.div_rem(denominator);
 
-        return if r.is_zero() {
-            Ok(q)
-        } else {
-            q.checked_add(U256::ONE).ok_or(MathError::Overflow)
-        };
+        return add_one_if(q, !r.is_zero());
     }
 
     // Only build the full 512-bit product when necessary.
@@ -276,11 +236,7 @@ pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> Result<U256, 
 
     let (quotient, has_remainder) = mul_div_core(prod0, prod1, denominator, product)?;
 
-    if has_remainder {
-        quotient.checked_add(U256::ONE).ok_or(MathError::Overflow)
-    } else {
-        Ok(quotient)
-    }
+    add_one_if(quotient, has_remainder)
 }
 
 #[inline(always)]
@@ -288,26 +244,7 @@ pub fn mul_shift_right(a: U256, b: U256, shift: u32) -> Result<U256, MathError> 
     debug_assert!(shift < 256);
 
     let product: U512 = a.widening_mul(b);
-    let [l0, l1, l2, l3, h0, h1, h2, h3] = product.into_limbs();
-
-    let low = U256::from_limbs([l0, l1, l2, l3]);
-    let high = U256::from_limbs([h0, h1, h2, h3]);
-
-    // If high >> shift is non-zero, the shifted result still exceeds U256.
-    if shift > 0 && (high >> shift) != U256::ZERO {
-        return Err(MathError::Overflow);
-    }
-
-    let result = if shift == 0 {
-        if !high.is_zero() {
-            return Err(MathError::Overflow);
-        }
-        low
-    } else {
-        (low >> shift) | (high << (256 - shift))
-    };
-
-    Ok(result)
+    shr_u512_to_u256(product, shift)
 }
 
 #[inline(always)]
@@ -315,32 +252,7 @@ pub fn mul_shift_right_rounding_up(a: U256, b: U256, shift: u32) -> Result<U256,
     debug_assert!(shift < 256);
 
     let product: U512 = a.widening_mul(b);
-    let [l0, l1, l2, l3, h0, h1, h2, h3] = product.into_limbs();
-
-    let low = U256::from_limbs([l0, l1, l2, l3]);
-    let high = U256::from_limbs([h0, h1, h2, h3]);
-
-    if shift > 0 && (high >> shift) != U256::ZERO {
-        return Err(MathError::Overflow);
-    }
-
-    let result = if shift == 0 {
-        if !high.is_zero() {
-            return Err(MathError::Overflow);
-        }
-        low
-    } else {
-        (low >> shift) | (high << (256 - shift))
-    };
-
-    let mask = (U256::ONE << shift) - U256::ONE;
-    let has_remainder = !(low & mask).is_zero();
-
-    if has_remainder {
-        result.checked_add(U256::ONE).ok_or(MathError::Overflow)
-    } else {
-        Ok(result)
-    }
+    shr_u512_to_u256_rounding_up(product, shift)
 }
 
 /// Computes floor((amount * Q96) / denominator).
@@ -498,11 +410,7 @@ pub fn mul_q96_div_rounding_up(amount: U256, denominator: U256) -> Result<U256, 
         let mask = (U256::ONE << right_shift) - U256::ONE;
         let has_remainder = !(amount & mask).is_zero();
 
-        if has_remainder {
-            quotient.checked_add(U256::ONE).ok_or(MathError::Overflow)
-        } else {
-            Ok(quotient)
-        }
+        add_one_if(quotient, has_remainder)
     } else {
         // Fast path:
         // amount << 96 fits into U256.
@@ -510,11 +418,7 @@ pub fn mul_q96_div_rounding_up(amount: U256, denominator: U256) -> Result<U256, 
             let shifted: U256 = amount << 96;
             let (q, r) = shifted.div_rem(denominator);
 
-            return if r.is_zero() {
-                Ok(q)
-            } else {
-                q.checked_add(U256::ONE).ok_or(MathError::Overflow)
-            };
+            return add_one_if(q, !r.is_zero());
         }
 
         // Slow path:
@@ -535,11 +439,7 @@ pub fn mul_q96_div_rounding_up(amount: U256, denominator: U256) -> Result<U256, 
 
         let quotient = narrow(quotient_512)?;
 
-        if !remainder_512.is_zero() {
-            quotient.checked_add(U256::ONE).ok_or(MathError::Overflow)
-        } else {
-            Ok(quotient)
-        }
+        add_one_if(quotient, !remainder_512.is_zero())
     }
 }
 
