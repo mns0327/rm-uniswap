@@ -11,7 +11,6 @@ full-v4 = ["positions", "protocol-fee", "v4-hooks"]
 
 [dependencies]
 alloy = "2.1.0"
-# arb-types = { path = "../types" }
 dashmap = "6.2.1"
 parking_lot = "0.12.5"
 ruint = "1.18.0"

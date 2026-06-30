@@ -12,11 +12,11 @@ pub use crate::core::concentrated::pool::{
     SwapParams, SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in,
     delta_amount_out, tick_spacing_to_max_liquidity_per_tick,
 };
-pub use crate::core::concentrated::ticks::{PoolTicks, PoolTicksSnapshot, TickInfo};
+pub use crate::core::concentrated::ticks::PoolTicks;
 pub use crate::core::math::swap::SwapStep;
-pub use crate::core::types::TickEntry;
 pub use crate::core::types::delta::BalanceDelta;
 pub use crate::core::types::signed::I256 as SignedAmount;
+pub use crate::core::types::{PoolTicksSnapshot, TickEntry, TickInfo};
 
 use ruint::aliases::U256;
 

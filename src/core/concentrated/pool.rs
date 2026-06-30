@@ -33,16 +33,16 @@ use crate::core::{
             get_tick_at_sqrt_price,
         },
     },
-    types::{delta::BalanceDelta, signed::I256 as SignedAmount},
+    types::{
+        NextInitializedTick, PoolTicksSnapshot, TickInfo, delta::BalanceDelta,
+        signed::I256 as SignedAmount,
+    },
 };
 
 use super::{
     cache::PoolCache,
     price::{PriceCache, sqrt_price_x96_to_price},
-    ticks::{
-        NextInitializedTick, PoolTicks, PoolTicksReadGuard, PoolTicksSnapshot, PoolTicksWriteGuard,
-        TickInfo,
-    },
+    ticks::{PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard},
 };
 
 /// Minimum valid tick spacing (1 = finest granularity).
