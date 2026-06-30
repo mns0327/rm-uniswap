@@ -12,7 +12,7 @@ use crate::{
     Error as SwapSimError,
     core::{
         math::tick::{MAX_TICK, MAX_TICK_SPACING, MIN_TICK},
-        types::{NextInitializedTick, PoolTicksSnapshot, TickEntry, TickInfo, TickUpdate},
+        types::{NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate},
     },
 };
 
@@ -59,32 +59,11 @@ impl PoolTicks {
         })
     }
 
-    /// Build a validated tick store from existing [`TickEntry`] values.
-    ///
-    /// Entries with `liquidity_gross == 0` are rejected because this store should
-    /// contain initialized ticks only. If a tick becomes uninitialized, remove it.
-    pub fn from_tick_entries(
-        entries: impl IntoIterator<Item = TickEntry>,
-        tick_spacing: i32,
-    ) -> Result<Self, SwapSimError> {
-        let ticks = Self::new(tick_spacing)?;
-        for entry in entries {
-            ticks.insert_entry(entry)?;
-        }
-        Ok(ticks)
-    }
-
     /// Return the pool tick spacing this tick store was validated against.
     #[inline]
     #[must_use]
     pub fn tick_spacing(&self) -> i32 {
         self.tick_spacing
-    }
-
-    /// Insert or replace one initialized tick from an external compatibility type.
-    #[inline]
-    pub fn insert_entry(&self, entry: TickEntry) -> Result<(), SwapSimError> {
-        self.set(entry.tick_idx, TickInfo::from(entry))
     }
 
     /// Returns a serializable snapshot of all tick data as a map.

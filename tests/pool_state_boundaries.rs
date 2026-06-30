@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use rm_uniswap::{
     Error,
-    v4::{Pool, PoolTicks, SignedAmount, SwapParams, TickEntry, TickInfo, TickMath},
+    v4::{Pool, PoolTicks, SignedAmount, SwapParams, TickInfo, TickMath},
 };
 use ruint::aliases::U256;
 
@@ -9,20 +11,26 @@ const FEE: u32 = 3_000;
 const TICK_SPACING: i32 = 60;
 
 fn valid_pool() -> Pool {
-    let ticks = PoolTicks::from_tick_entries(
-        [
-            TickEntry {
-                tick_idx: -60,
-                liquidity_net: LIQUIDITY as i128,
-                liquidity_gross: LIQUIDITY,
-            },
-            TickEntry {
-                tick_idx: 60,
-                liquidity_net: -(LIQUIDITY as i128),
-                liquidity_gross: LIQUIDITY,
-            },
-        ],
+    let ticks = PoolTicks::from_snapshot(
         TICK_SPACING,
+        BTreeMap::from([
+            (
+                -60,
+                TickInfo {
+                    liquidity_net: LIQUIDITY as i128,
+                    liquidity_gross: LIQUIDITY,
+                    ..TickInfo::default()
+                },
+            ),
+            (
+                60,
+                TickInfo {
+                    liquidity_net: -(LIQUIDITY as i128),
+                    liquidity_gross: LIQUIDITY,
+                    ..TickInfo::default()
+                },
+            ),
+        ]),
     )
     .unwrap();
 

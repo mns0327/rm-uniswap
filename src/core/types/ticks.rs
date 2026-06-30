@@ -3,14 +3,6 @@ use std::collections::BTreeMap;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
-/// Shared initialized-tick representation used by concentrated-liquidity pools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TickEntry {
-    pub tick_idx: i32,
-    pub liquidity_net: i128,
-    pub liquidity_gross: u128,
-}
-
 /// Tick data stored at an initialized tick boundary.
 ///
 /// This intentionally mirrors Solidity's `mapping(int24 => Tick.Info)` shape:
@@ -30,18 +22,6 @@ pub struct TickInfo {
     /// Fee growth on the opposite side of this tick from the current price.
     #[serde(default)]
     pub fee_growth_outside1_x128: U256,
-}
-
-impl From<TickEntry> for TickInfo {
-    #[inline]
-    fn from(entry: TickEntry) -> Self {
-        Self {
-            liquidity_gross: entry.liquidity_gross,
-            liquidity_net: entry.liquidity_net,
-            fee_growth_outside0_x128: U256::ZERO,
-            fee_growth_outside1_x128: U256::ZERO,
-        }
-    }
 }
 
 /// Result of locating the next initialized tick in the swap direction.

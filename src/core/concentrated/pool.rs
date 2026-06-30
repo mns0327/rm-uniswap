@@ -2609,8 +2609,9 @@ pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::core::math::tick::get_sqrt_price_at_tick;
-    use crate::core::types::TickEntry;
 
     use super::*;
     use proptest::prelude::*;
@@ -2627,18 +2628,30 @@ mod tests {
         U256::from(4_295_128_739u64)
     }
 
-    fn basic_ticks() -> [TickEntry; 2] {
+    fn tick_info(tick_idx: i32, liquidity_net: i128, liquidity_gross: u128) -> (i32, TickInfo) {
+        (
+            tick_idx,
+            TickInfo {
+                liquidity_gross,
+                liquidity_net,
+                fee_growth_outside0_x128: U256::ZERO,
+                fee_growth_outside1_x128: U256::ZERO,
+            },
+        )
+    }
+
+    fn basic_ticks() -> [(i32, TickInfo); 2] {
         [
-            TickEntry {
-                tick_idx: -120,
-                liquidity_net: 1_000_000_000_000_000_000i128,
-                liquidity_gross: 1_000_000_000_000_000_000u128,
-            },
-            TickEntry {
-                tick_idx: 120,
-                liquidity_net: -1_000_000_000_000_000_000i128,
-                liquidity_gross: 1_000_000_000_000_000_000u128,
-            },
+            tick_info(
+                -120,
+                1_000_000_000_000_000_000i128,
+                1_000_000_000_000_000_000u128,
+            ),
+            tick_info(
+                120,
+                -1_000_000_000_000_000_000i128,
+                1_000_000_000_000_000_000u128,
+            ),
         ]
     }
 
@@ -2648,9 +2661,11 @@ mod tests {
         liquidity: u128,
         fee: u32,
         tick_spacing: i32,
-        ticks: impl IntoIterator<Item = TickEntry>,
+        ticks: impl IntoIterator<Item = (i32, TickInfo)>,
     ) -> Pool {
-        let tick_map = PoolTicks::from_tick_entries(ticks, tick_spacing).expect("valid ticks");
+        let tick_map =
+            PoolTicks::from_snapshot(tick_spacing, ticks.into_iter().collect::<BTreeMap<_, _>>())
+                .expect("valid ticks");
 
         let cache = Arc::new(PoolCache::default());
 
@@ -2677,14 +2692,14 @@ mod tests {
         *pool.state.read()
     }
 
-    fn basic_pool(ticks: &[TickEntry]) -> Pool {
+    fn basic_pool(ticks: &[(i32, TickInfo)]) -> Pool {
         make_pool(
             sqrt_price_1_1(),
             0,
             1_000_000_000_000_000_000u128,
             3_000,
             60,
-            ticks.iter().cloned(),
+            ticks.iter().copied(),
         )
     }
 
@@ -3053,16 +3068,8 @@ mod tests {
             3_000,
             60,
             [
-                TickEntry {
-                    tick_idx: -120,
-                    liquidity_net: liq as i128,
-                    liquidity_gross: liq,
-                },
-                TickEntry {
-                    tick_idx: 120,
-                    liquidity_net: -(liq as i128),
-                    liquidity_gross: liq,
-                },
+                tick_info(-120, liq as i128, liq),
+                tick_info(120, -(liq as i128), liq),
             ],
         )
     }
@@ -3186,15 +3193,7 @@ mod tests {
     #[test]
     fn rejects_out_of_range_tick_entry() {
         assert_eq!(
-            PoolTicks::from_tick_entries(
-                [TickEntry {
-                    tick_idx: MIN_TICK - 1,
-                    liquidity_net: 0,
-                    liquidity_gross: 1
-                }],
-                60,
-            )
-            .unwrap_err(),
+            PoolTicks::from_snapshot(60, [tick_info(MIN_TICK - 1, 0, 1)].into()).unwrap_err(),
             SwapSimError::InvalidTick
         );
     }
@@ -3318,25 +3317,14 @@ mod tests {
     }
 
     fn tick_pool_for_search() -> PoolTicks {
-        PoolTicks::from_tick_entries(
-            [
-                TickEntry {
-                    tick_idx: -240,
-                    liquidity_net: 0,
-                    liquidity_gross: 1,
-                },
-                TickEntry {
-                    tick_idx: 0,
-                    liquidity_net: 0,
-                    liquidity_gross: 1,
-                },
-                TickEntry {
-                    tick_idx: 240,
-                    liquidity_net: 0,
-                    liquidity_gross: 1,
-                },
-            ],
+        PoolTicks::from_snapshot(
             60,
+            [
+                tick_info(-240, 0, 1),
+                tick_info(0, 0, 1),
+                tick_info(240, 0, 1),
+            ]
+            .into(),
         )
         .expect("valid ticks")
     }
@@ -3361,15 +3349,7 @@ mod tests {
 
     #[test]
     fn next_tick_returns_sentinel_when_empty() {
-        let ticks = PoolTicks::from_tick_entries(
-            [TickEntry {
-                tick_idx: 120,
-                liquidity_net: 0,
-                liquidity_gross: 1,
-            }],
-            60,
-        )
-        .unwrap();
+        let ticks = PoolTicks::from_snapshot(60, [tick_info(120, 0, 1)].into()).unwrap();
         let guard = ticks.read();
 
         let down = guard.next_initialized_tick(50, true);
@@ -3407,8 +3387,8 @@ mod tests {
         ) {
             let liq = 1_000_000_000_000_000_000u128;
             let ticks = [
-                TickEntry { tick_idx: -600, liquidity_net:  liq as i128, liquidity_gross: liq },
-                TickEntry { tick_idx:  600, liquidity_net: -(liq as i128), liquidity_gross: liq },
+                tick_info(-600, liq as i128, liq),
+                tick_info(600, -(liq as i128), liq),
             ];
             let pool = make_pool(get_sqrt_price_at_tick(0).unwrap(), 0, liq, fee, 60, ticks);
 
@@ -3441,8 +3421,8 @@ mod tests {
         ) {
             let liq = 1_000_000_000_000_000_000u128;
             let ticks = [
-                TickEntry { tick_idx: -600, liquidity_net:  liq as i128, liquidity_gross: liq },
-                TickEntry { tick_idx:  600, liquidity_net: -(liq as i128), liquidity_gross: liq },
+                tick_info(-600, liq as i128, liq),
+                tick_info(600, -(liq as i128), liq),
             ];
             let pool = make_pool(get_sqrt_price_at_tick(0).unwrap(), 0, liq, 3_000, 60, ticks);
 
@@ -3478,8 +3458,8 @@ mod tests {
         ) {
             let liq = 1_000_000_000_000_000_000u128;
             let ticks = [
-                TickEntry { tick_idx: -600, liquidity_net:  liq as i128, liquidity_gross: liq },
-                TickEntry { tick_idx:  600, liquidity_net: -(liq as i128), liquidity_gross: liq },
+                tick_info(-600, liq as i128, liq),
+                tick_info(600, -(liq as i128), liq),
             ];
             let pool = make_pool(get_sqrt_price_at_tick(0).unwrap(), 0, liq, 3_000, 60, ticks);
 

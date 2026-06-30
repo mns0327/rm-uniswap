@@ -16,7 +16,7 @@ pub use crate::core::concentrated::ticks::PoolTicks;
 pub use crate::core::math::swap::SwapStep;
 pub use crate::core::types::delta::BalanceDelta;
 pub use crate::core::types::signed::I256 as SignedAmount;
-pub use crate::core::types::{PoolTicksSnapshot, TickEntry, TickInfo};
+pub use crate::core::types::{PoolTicksSnapshot, TickInfo};
 
 use ruint::aliases::U256;
 

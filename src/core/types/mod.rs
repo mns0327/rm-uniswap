@@ -3,4 +3,4 @@ pub(crate) mod delta;
 pub(crate) mod signed;
 pub(crate) mod ticks;
 
-pub use ticks::{NextInitializedTick, PoolTicksSnapshot, TickEntry, TickInfo, TickUpdate};
+pub use ticks::{NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate};
