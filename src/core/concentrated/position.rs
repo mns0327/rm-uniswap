@@ -2,12 +2,14 @@ use ruint::aliases::U256;
 
 use crate::{Error, core::math::full};
 
+pub type FeeGrowthX128 = U256;
+
 /// Version-neutral fee accounting stored for one concentrated-liquidity position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PositionState {
     pub liquidity: u128,
-    pub fee_growth_inside0_last_x128: U256,
-    pub fee_growth_inside1_last_x128: U256,
+    pub fee_growth_inside0_last_x128: FeeGrowthX128,
+    pub fee_growth_inside1_last_x128: FeeGrowthX128,
 }
 
 impl PositionState {
@@ -52,18 +54,4 @@ fn add_delta(liquidity: u128, delta: i128) -> Result<u128, Error> {
             .checked_add(delta as u128)
             .ok_or(Error::LiquidityOverflow)
     }
-}
-
-pub fn u256_to_i128(value: U256) -> Result<i128, Error> {
-    if value > U256::from(i128::MAX as u128) {
-        return Err(Error::AmountOverflow);
-    }
-    Ok(value.to::<u128>() as i128)
-}
-
-pub fn negative_amount(value: i128) -> Result<u128, Error> {
-    if value > 0 {
-        return Err(Error::AmountOverflow);
-    }
-    Ok(value.unsigned_abs())
 }

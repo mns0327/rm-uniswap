@@ -11,17 +11,17 @@ use std::{
 use crate::{
     Error,
     core::{
-        concentrated::{
-            pool::{ModifyLiquidityParams, Pool as ConcentratedPool},
-            position::{negative_amount, u256_to_i128},
-        },
+        concentrated::pool::{ModifyLiquidityParams, Pool as ConcentratedPool},
         types::delta::BalanceDelta,
     },
 };
 use alloy::primitives::{Address, B256};
 use parking_lot::{Mutex, RwLock};
+use ruint::aliases::U256;
 
 pub use super::position::PositionState;
+
+const I128_POSITIVE_MASK: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionInfo {
@@ -34,7 +34,10 @@ pub struct PositionInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifyResult {
-    /// Principal delta. Positive means currencies owed to the pool.
+    /// Principal delta in caller / LP perspective.
+    ///
+    /// Negative means currencies owed to the pool; positive means currencies
+    /// owed to the LP.
     pub principal_delta: BalanceDelta,
     /// Fees earned by the position. Positive means currencies owed to the LP.
     pub fee_delta: BalanceDelta,
@@ -287,8 +290,8 @@ impl PositionManager {
         let mut predicted_state = snapshot.state;
         let (predicted_fees0, predicted_fees1) =
             predicted_state.update(liquidity_delta, growth0, growth1)?;
-        let predicted_fee0 = u256_to_i128(predicted_fees0)?;
-        let predicted_fee1 = u256_to_i128(predicted_fees1)?;
+        let predicted_fee0 = u256_amount_to_i128(predicted_fees0)?;
+        let predicted_fee1 = u256_amount_to_i128(predicted_fees1)?;
         #[cfg(feature = "v4-hooks")]
         let predicted = ModifyResult {
             principal_delta: quoted,
@@ -374,8 +377,8 @@ fn validate_slippage(
     amount1_min: u128,
 ) -> Result<(), Error> {
     if liquidity_delta >= 0 {
-        let amount0 = negative_amount(delta.amount0)?;
-        let amount1 = negative_amount(delta.amount1)?;
+        let amount0 = negative_delta_to_u128(delta.amount0)?;
+        let amount1 = negative_delta_to_u128(delta.amount1)?;
         if amount0 > amount0_max || amount1 > amount1_max {
             return Err(Error::SlippageExceeded);
         }
@@ -401,4 +404,18 @@ fn token_id_salt(token_id: u64) -> B256 {
     let mut bytes = [0u8; 32];
     bytes[24..].copy_from_slice(&token_id.to_be_bytes());
     B256::from(bytes)
+}
+
+pub fn u256_amount_to_i128(value: U256) -> Result<i128, Error> {
+    if value & !I128_POSITIVE_MASK != U256::ZERO {
+        return Err(Error::AmountOverflow);
+    }
+    Ok(value.to::<u128>() as i128)
+}
+
+pub fn negative_delta_to_u128(value: i128) -> Result<u128, Error> {
+    if value > 0 {
+        return Err(Error::AmountOverflow);
+    }
+    Ok(value.unsigned_abs())
 }
