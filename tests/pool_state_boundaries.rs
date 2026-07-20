@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rm_uniswap::{
     Error,
-    v4::{Pool, PoolTicks, SignedAmount, SwapParams, TickInfo, TickMath},
+    v4::{Pool, PoolTicks, SignedAmount, SwapParams, TickInfo, tick_math},
 };
 use ruint::aliases::U256;
 
@@ -126,7 +126,7 @@ fn sample_pool_snapshot_is_still_accepted() {
     let json = include_str!("../samples/pool1.json");
     let pool: Pool = serde_json::from_str(json).unwrap();
 
-    let derived_tick = TickMath::get_tick_at_sqrt_price(pool.state.read().sqrt_price_x96).unwrap();
+    let derived_tick = tick_math::get_tick_at_sqrt_price(pool.state.read().sqrt_price_x96).unwrap();
     assert_eq!(derived_tick, pool.state.read().tick);
 }
 

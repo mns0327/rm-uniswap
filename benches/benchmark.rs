@@ -11,8 +11,8 @@ use std::path::Path;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rm_uniswap::v4::{
-    FullMath, ModifyLiquidityParams, Pool, SignedAmount, SqrtPriceMath, SwapMath, SwapParams,
-    TickMath,
+    ModifyLiquidityParams, Pool, SignedAmount, SwapParams, full_math, sqrt_price_math, swap_math,
+    tick_math,
 };
 use ruint::aliases::U256;
 
@@ -46,18 +46,18 @@ fn bench_full_math(c: &mut Criterion) {
     );
 
     group.bench_function("FullMath::mul_div", |b| {
-        b.iter(|| black_box(FullMath::mul_div(inputs.0, inputs.1, inputs.2)))
+        b.iter(|| black_box(full_math::mul_div(inputs.0, inputs.1, inputs.2)))
     });
 
     group.bench_function("FullMath::mul_div_rounding_up", |b| {
-        b.iter(|| black_box(FullMath::mul_div_rounding_up(inputs.0, inputs.1, inputs.2)))
+        b.iter(|| black_box(full_math::mul_div_rounding_up(inputs.0, inputs.1, inputs.2)))
     });
 
     // Phantom-overflow edge case: a*b exceeds U256::MAX but quotient fits
     let q128 = U256::ONE << 128;
     group.bench_function("mul_div_phantom_overflow", |b| {
         b.iter(|| {
-            black_box(FullMath::mul_div(
+            black_box(full_math::mul_div(
                 q128,
                 U256::from(35) * q128,
                 U256::from(8) * q128,
@@ -76,22 +76,11 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
     let amount = ether(1);
 
     group.bench_function(
-        "SqrtPriceMath::get_next_sqrt_price_from_amount0_rounding_up",
-        |b| {
-            b.iter(|| {
-                black_box(SqrtPriceMath::get_next_sqrt_price_from_amount0_rounding_up(
-                    sqrt_p, liquidity, amount, true,
-                ))
-            })
-        },
-    );
-
-    group.bench_function(
-        "SqrtPriceMath::get_next_sqrt_price_from_amount1_rounding_down",
+        "sqrt_price_math::get_next_sqrt_price_from_amount0_rounding_up",
         |b| {
             b.iter(|| {
                 black_box(
-                    SqrtPriceMath::get_next_sqrt_price_from_amount1_rounding_down(
+                    sqrt_price_math::get_next_sqrt_price_from_amount0_rounding_up(
                         sqrt_p, liquidity, amount, true,
                     ),
                 )
@@ -99,37 +88,50 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
         },
     );
 
-    group.bench_function("SqrtPriceMath::get_amount0_delta", |b| {
+    group.bench_function(
+        "sqrt_price_math::get_next_sqrt_price_from_amount1_rounding_down",
+        |b| {
+            b.iter(|| {
+                black_box(
+                    sqrt_price_math::get_next_sqrt_price_from_amount1_rounding_down(
+                        sqrt_p, liquidity, amount, true,
+                    ),
+                )
+            })
+        },
+    );
+
+    group.bench_function("sqrt_price_math::get_amount0_delta", |b| {
         let sqrt_a = sqrt_price_1_1();
-        let sqrt_b = TickMath::get_sqrt_price_at_tick(60).unwrap();
+        let sqrt_b = tick_math::get_sqrt_price_at_tick(60).unwrap();
         b.iter(|| {
-            black_box(SqrtPriceMath::get_amount0_delta(
+            black_box(sqrt_price_math::get_amount0_delta(
                 sqrt_a, sqrt_b, liquidity, true,
             ))
         })
     });
 
-    group.bench_function("SqrtPriceMath::get_amount1_delta", |b| {
+    group.bench_function("sqrt_price_math::get_amount1_delta", |b| {
         let sqrt_a = sqrt_price_1_1();
-        let sqrt_b = TickMath::get_sqrt_price_at_tick(60).unwrap();
+        let sqrt_b = tick_math::get_sqrt_price_at_tick(60).unwrap();
         b.iter(|| {
-            black_box(SqrtPriceMath::get_amount1_delta(
+            black_box(sqrt_price_math::get_amount1_delta(
                 sqrt_a, sqrt_b, liquidity, true,
             ))
         })
     });
 
-    group.bench_function("SqrtPriceMath::get_next_sqrt_price_from_input", |b| {
+    group.bench_function("sqrt_price_math::get_next_sqrt_price_from_input", |b| {
         b.iter(|| {
-            black_box(SqrtPriceMath::get_next_sqrt_price_from_input(
+            black_box(sqrt_price_math::get_next_sqrt_price_from_input(
                 sqrt_p, liquidity, amount, true,
             ))
         })
     });
 
-    group.bench_function("SqrtPriceMath::get_next_sqrt_price_from_output", |b| {
+    group.bench_function("sqrt_price_math::get_next_sqrt_price_from_output", |b| {
         b.iter(|| {
-            black_box(SqrtPriceMath::get_next_sqrt_price_from_output(
+            black_box(sqrt_price_math::get_next_sqrt_price_from_output(
                 sqrt_p, liquidity, amount, true,
             ))
         })
@@ -141,47 +143,47 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
 fn bench_tick_math(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_math");
 
-    group.bench_function("TickMath::get_sqrt_price_at_tick", |b| {
-        b.iter(|| black_box(TickMath::get_sqrt_price_at_tick(60)).unwrap())
+    group.bench_function("tick_math::get_sqrt_price_at_tick", |b| {
+        b.iter(|| black_box(tick_math::get_sqrt_price_at_tick(60)).unwrap())
     });
 
     group.bench_function("get_sqrt_price_at_tick_min", |b| {
-        b.iter(|| black_box(TickMath::get_sqrt_price_at_tick(TickMath::MIN_TICK)).unwrap())
+        b.iter(|| black_box(tick_math::get_sqrt_price_at_tick(tick_math::MIN_TICK)).unwrap())
     });
 
     group.bench_function("get_sqrt_price_at_tick_max", |b| {
-        b.iter(|| black_box(TickMath::get_sqrt_price_at_tick(TickMath::MAX_TICK)).unwrap())
+        b.iter(|| black_box(tick_math::get_sqrt_price_at_tick(tick_math::MAX_TICK)).unwrap())
     });
 
-    let sqrt_p = TickMath::get_sqrt_price_at_tick(60).unwrap();
-    group.bench_function("TickMath::get_tick_at_sqrt_price", |b| {
-        b.iter(|| black_box(TickMath::get_tick_at_sqrt_price(sqrt_p)).unwrap())
+    let sqrt_p = tick_math::get_sqrt_price_at_tick(60).unwrap();
+    group.bench_function("tick_math::get_tick_at_sqrt_price", |b| {
+        b.iter(|| black_box(tick_math::get_tick_at_sqrt_price(sqrt_p)).unwrap())
     });
 
     group.bench_function("get_tick_at_sqrt_price_min", |b| {
-        b.iter(|| black_box(TickMath::get_tick_at_sqrt_price(TickMath::MIN_SQRT_PRICE)).unwrap())
+        b.iter(|| black_box(tick_math::get_tick_at_sqrt_price(tick_math::MIN_SQRT_PRICE)).unwrap())
     });
 
     group.bench_function("get_tick_at_sqrt_price_max", |b| {
         // Just below max to stay in valid range
-        let almost_max = TickMath::MAX_SQRT_PRICE - U256::ONE;
-        b.iter(|| black_box(TickMath::get_tick_at_sqrt_price(almost_max)).unwrap())
+        let almost_max = tick_math::MAX_SQRT_PRICE - U256::ONE;
+        b.iter(|| black_box(tick_math::get_tick_at_sqrt_price(almost_max)).unwrap())
     });
 
-    group.bench_function("TickMath::most_significant_bit", |b| {
-        b.iter(|| black_box(TickMath::most_significant_bit(U256::from(1u64) << 200)).unwrap())
+    group.bench_function("tick_math::most_significant_bit", |b| {
+        b.iter(|| black_box(tick_math::most_significant_bit(U256::from(1u64) << 200)).unwrap())
     });
 
     group.bench_function("most_significant_bit_max", |b| {
-        b.iter(|| black_box(TickMath::most_significant_bit(U256::MAX)).unwrap())
+        b.iter(|| black_box(tick_math::most_significant_bit(U256::MAX)).unwrap())
     });
 
-    group.bench_function("TickMath::max_usable_tick", |b| {
-        b.iter(|| black_box(TickMath::max_usable_tick(60)).unwrap())
+    group.bench_function("tick_math::max_usable_tick", |b| {
+        b.iter(|| black_box(tick_math::max_usable_tick(60)).unwrap())
     });
 
-    group.bench_function("TickMath::min_usable_tick", |b| {
-        b.iter(|| black_box(TickMath::min_usable_tick(60)).unwrap())
+    group.bench_function("tick_math::min_usable_tick", |b| {
+        b.iter(|| black_box(tick_math::min_usable_tick(60)).unwrap())
     });
 
     group.finish();
@@ -191,13 +193,13 @@ fn bench_swap_math(c: &mut Criterion) {
     let mut group = c.benchmark_group("swap_math");
 
     let sqrt_current = sqrt_price_1_1();
-    let sqrt_target = TickMath::get_sqrt_price_at_tick(60).unwrap();
+    let sqrt_target = tick_math::get_sqrt_price_at_tick(60).unwrap();
     let liquidity = 1_000_000_000_000_000_000u128;
     let fee = 3000u32;
 
     group.bench_function("compute_swap_step_exact_in", |b| {
         b.iter(|| {
-            SwapMath::compute_swap_step(
+            swap_math::compute_swap_step(
                 black_box(sqrt_current),
                 black_box(sqrt_target),
                 black_box(liquidity),
@@ -209,7 +211,7 @@ fn bench_swap_math(c: &mut Criterion) {
 
     group.bench_function("compute_swap_step_exact_out", |b| {
         b.iter(|| {
-            SwapMath::compute_swap_step(
+            swap_math::compute_swap_step(
                 black_box(sqrt_current),
                 black_box(sqrt_target),
                 black_box(liquidity),
@@ -219,9 +221,9 @@ fn bench_swap_math(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("SwapMath::get_sqrt_price_target", |b| {
+    group.bench_function("swap_math::get_sqrt_price_target", |b| {
         b.iter(|| {
-            SwapMath::get_sqrt_price_target(
+            swap_math::get_sqrt_price_target(
                 black_box(true),
                 black_box(sqrt_target),
                 black_box(sqrt_current),
