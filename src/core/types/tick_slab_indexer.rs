@@ -4,53 +4,47 @@ use crate::core::types::tick::TickIndex;
 /// the tick slab storage.
 ///
 /// The signed tick value is remapped to an unsigned `u32` via zigzag
-/// encoding so that small-magnitude ticks (the common case, close to the
-/// current price) map to small unsigned values. This keeps related ticks
-/// physically close together in the slab, improving cache locality and
-/// allowing the encoded value to be split into a `cache_index` (which
-/// slab page/bucket) and a `slot_index` (which slot within that bucket).
+/// encoding, so that ticks with small absolute magnitude (the common case,
+/// close to the current price) map to small unsigned values. This keeps
+/// related ticks physically close together in the slab, which improves
+/// cache locality and lets the encoded value be split into a `cache_index`
+/// (which slab page/bucket) and a `slot_index` (which slot within that
+/// bucket).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TickSlabIndexer(u32);
 
 impl TickSlabIndexer {
     /// Encodes a `TickIndex` into its zigzag `u32` representation.
     ///
-    /// Zigzag encoding maps signed integers to unsigned integers so that
-    /// values with small absolute magnitude (positive or negative) end up
-    /// with small unsigned values, e.g. `0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...`.
-    pub(crate) const fn from_tick(tick_idx: TickIndex) -> Self {
-        let value = tick_idx.value();
+    /// The tick is first normalized by `tick_spacing` (via `div_euclid`,
+    /// so it rounds toward negative infinity rather than toward zero),
+    /// then zigzag-encoded so that values with small absolute magnitude —
+    /// positive or negative — map to small unsigned values, e.g.
+    /// `0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...`.
+    pub(crate) const fn from_tick(tick_idx: TickIndex, tick_spacing: u32) -> Self {
+        let value = tick_idx.value().div_euclid(tick_spacing as i32);
         let zigzag = ((value << 1) ^ (value >> 31)) as u32;
         Self(zigzag)
     }
 
-    /// Returns the raw encoded `u32` value.
+    /// Returns the raw zigzag-encoded `u32` value.
     #[inline(always)]
     pub(crate) fn value(&self) -> u32 {
         self.0
     }
 
-    /// Returns the low 5 bits (0..32) of the encoded value, identifying
+    /// Returns bits `0..5` of the encoded value (range `0..32`), identifying
     /// the slot within a slab bucket.
     #[inline(always)]
     pub(crate) fn slot_index(&self) -> u8 {
         (self.0 & 0x1F) as u8
     }
 
-    /// Returns bits 5..21 of the encoded value, identifying which slab
-    /// bucket/page this tick belongs to.
+    /// Returns bits `5..21` of the encoded value (range `0..65536`),
+    /// identifying which slab bucket/page this tick belongs to.
     #[inline(always)]
     pub(crate) fn cache_index(&self) -> u16 {
         ((self.0 >> 5) & 0xFFFF) as u16
-    }
-}
-
-/// Convenience conversion so a `TickIndex` can be encoded into a
-/// `TickSlabIndexer` via `.into()` wherever a `From`/`Into` bound is more
-/// idiomatic than calling `from_tick` directly.
-impl From<TickIndex> for TickSlabIndexer {
-    fn from(tick_idx: TickIndex) -> Self {
-        Self::from_tick(tick_idx)
     }
 }
 
@@ -58,9 +52,15 @@ impl From<TickIndex> for TickSlabIndexer {
 mod tests {
     use super::*;
 
+    const TICK_SPACING: u32 = 1;
+
     /// Helper to build a `TickIndex` from a raw `i32`.
     fn tick(value: i32) -> TickIndex {
         TickIndex::new(value).unwrap()
+    }
+
+    fn make_indexer(value: i32) -> TickSlabIndexer {
+        TickSlabIndexer::from_tick(tick(value), TICK_SPACING)
     }
 
     // ---------------------------------------------------------------
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn zigzag_zero_maps_to_zero() {
-        assert_eq!(TickSlabIndexer::from_tick(tick(0)).value(), 0);
+        assert_eq!(make_indexer(0).value(), 0);
     }
 
     #[test]
@@ -88,9 +88,31 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(
-                TickSlabIndexer::from_tick(tick(input)).value(),
+                make_indexer(input).value(),
                 expected,
                 "mismatch for input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn tick_spacing_normalizes_before_zigzag_encoding() {
+        let cases = [
+            (0, 10, 0u32), // 0 / 10 = 0, zigzag(0) = 0
+            (9, 10, 0),    // 9 / 10 = 0, zigzag(0) = 0
+            (10, 10, 2),   // 10 / 10 = 1, zigzag(1) = 2
+            (20, 10, 4),   // 20 / 10 = 2, zigzag(2) = 4
+            (-1, 10, 1),   // -1 div_euclid 10 = -1, zigzag(-1) = 1
+            (-10, 10, 1),  // -10 / 10 = -1, zigzag(-1) = 1
+            (-11, 10, 3),  // -11 div_euclid 10 = -2, zigzag(-2) = 3
+            (-20, 10, 3),  // -20 / 10 = -2, zigzag(-2) = 3
+        ];
+
+        for (input, tick_spacing, expected) in cases {
+            assert_eq!(
+                TickSlabIndexer::from_tick(tick(input), tick_spacing).value(),
+                expected,
+                "mismatch for input {input} with tick_spacing {tick_spacing}"
             );
         }
     }
@@ -101,15 +123,15 @@ mod tests {
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         for v in -1000..=1000 {
-            let encoded = TickSlabIndexer::from_tick(tick(v)).value();
+            let encoded = make_indexer(v).value();
             assert!(seen.insert(encoded), "collision detected for input {v}");
         }
     }
 
     #[test]
     fn zigzag_protocol_extremes_match_known_values() {
-        let min_encoded = TickSlabIndexer::from_tick(TickIndex::MIN).value();
-        let max_encoded = TickSlabIndexer::from_tick(TickIndex::MAX).value();
+        let min_encoded = TickSlabIndexer::from_tick(TickIndex::MIN, TICK_SPACING).value();
+        let max_encoded = TickSlabIndexer::from_tick(TickIndex::MAX, TICK_SPACING).value();
 
         // TickIndex is bounded by the Uniswap tick range, not by i32::MIN/MAX.
         assert_eq!(max_encoded, 1_774_544);
@@ -120,7 +142,7 @@ mod tests {
     fn zigzag_preserves_sign_alternation_pattern() {
         // For any n >= 0: encode(n) is even, encode(-n-1) is odd.
         for n in 0..500i32 {
-            let pos = TickSlabIndexer::from_tick(tick(n)).value();
+            let pos = make_indexer(n).value();
             assert_eq!(
                 pos % 2,
                 0,
@@ -128,7 +150,7 @@ mod tests {
             );
 
             if n < i32::MAX {
-                let neg = TickSlabIndexer::from_tick(tick(-(n + 1))).value();
+                let neg = make_indexer(-(n + 1)).value();
                 assert_eq!(
                     neg % 2,
                     1,
@@ -157,7 +179,7 @@ mod tests {
         ];
 
         for (input, expected_slot) in cases {
-            let indexer = TickSlabIndexer::from_tick(tick(input));
+            let indexer = make_indexer(input);
             assert_eq!(
                 indexer.slot_index(),
                 expected_slot,
@@ -182,7 +204,7 @@ mod tests {
         ];
 
         for (input, expected_cache) in cases {
-            let indexer = TickSlabIndexer::from_tick(tick(input));
+            let indexer = make_indexer(input);
             assert_eq!(
                 indexer.cache_index(),
                 expected_cache,
@@ -194,7 +216,7 @@ mod tests {
     #[test]
     fn slot_and_cache_index_reconstruct_low_21_bits_of_value() {
         for n in [-70000, -1, 0, 1, 12345, *TickIndex::MAX, *TickIndex::MIN] {
-            let indexer = TickSlabIndexer::from_tick(tick(n));
+            let indexer = make_indexer(n);
             let reconstructed =
                 (indexer.slot_index() as u32) | ((indexer.cache_index() as u32) << 5);
             let low_21_bits = indexer.value() & 0x1F_FFFF; // bits 0..=20
@@ -209,19 +231,19 @@ mod tests {
         // (private field), so instead pick tick inputs whose zigzag
         // encoding lands on known boundary values.
         // zigzag(15) = 30 (0b11110) -> slot 30
-        let indexer = TickSlabIndexer::from_tick(tick(15));
+        let indexer = make_indexer(15);
         assert_eq!(indexer.value(), 30);
         assert_eq!(indexer.slot_index(), 30);
         assert_eq!(indexer.cache_index(), 0);
 
         // zigzag(-16) = 31 (0b11111) -> slot 31
-        let indexer = TickSlabIndexer::from_tick(tick(-16));
+        let indexer = make_indexer(-16);
         assert_eq!(indexer.value(), 31);
         assert_eq!(indexer.slot_index(), 31);
         assert_eq!(indexer.cache_index(), 0);
 
         // zigzag(16) = 32 (0b100000) -> slot 0, cache_index 1
-        let indexer = TickSlabIndexer::from_tick(tick(16));
+        let indexer = make_indexer(16);
         assert_eq!(indexer.value(), 32);
         assert_eq!(indexer.slot_index(), 0);
         assert_eq!(indexer.cache_index(), 1);
@@ -238,7 +260,7 @@ mod tests {
             100_000,
             *TickIndex::MAX,
         ] {
-            let indexer = TickSlabIndexer::from_tick(tick(n));
+            let indexer = make_indexer(n);
             assert!(indexer.slot_index() < 32, "slot_index must be in 0..32");
         }
     }
@@ -248,33 +270,32 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn from_trait_matches_from_tick() {
-        for n in [-999, -1, 0, 1, 999] {
-            let via_from_tick = TickSlabIndexer::from_tick(tick(n));
-            let via_into: TickSlabIndexer = tick(n).into();
-            assert_eq!(via_from_tick, via_into);
-        }
+    fn equal_compressed_ticks_produce_equal_indexers_for_same_spacing() {
+        assert_eq!(
+            TickSlabIndexer::from_tick(tick(10), 10),
+            TickSlabIndexer::from_tick(tick(19), 10)
+        );
     }
 
     #[test]
     fn equal_ticks_produce_equal_indexers() {
         assert_eq!(
-            TickSlabIndexer::from_tick(tick(42)),
-            TickSlabIndexer::from_tick(tick(42))
+            TickSlabIndexer::from_tick(tick(42), TICK_SPACING),
+            TickSlabIndexer::from_tick(tick(42), TICK_SPACING)
         );
     }
 
     #[test]
     fn different_ticks_produce_different_indexers() {
         assert_ne!(
-            TickSlabIndexer::from_tick(tick(42)),
-            TickSlabIndexer::from_tick(tick(43))
+            TickSlabIndexer::from_tick(tick(42), TICK_SPACING),
+            TickSlabIndexer::from_tick(tick(43), TICK_SPACING)
         );
     }
 
     #[test]
     fn indexer_is_copy_and_clone() {
-        let original = TickSlabIndexer::from_tick(tick(7));
+        let original = TickSlabIndexer::from_tick(tick(7), TICK_SPACING);
         let copied = original;
         let cloned = original.clone();
         assert_eq!(original, copied);
