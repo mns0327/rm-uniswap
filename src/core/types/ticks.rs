@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 /// the tick index is the `BTreeMap` key, not a duplicated field inside the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TickInfo {
+    /// TODO: Add Sqrt price
     /// Gross liquidity attached to this initialized tick.
     pub liquidity_gross: u128,
 
@@ -22,6 +23,23 @@ pub struct TickInfo {
     /// Fee growth on the opposite side of this tick from the current price.
     #[serde(default)]
     pub fee_growth_outside1_x128: U256,
+}
+
+impl TickInfo {
+    pub const DEFAULT: Self = Self {
+        liquidity_gross: 0,
+        liquidity_net: 0,
+        fee_growth_outside0_x128: U256::ZERO,
+        fee_growth_outside1_x128: U256::ZERO,
+    };
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::DEFAULT
+    }
+
+    pub fn is_liquidity_empty(&self) -> bool {
+        self.liquidity_gross == 0
+    }
 }
 
 /// Result of locating the next initialized tick in the swap direction.
