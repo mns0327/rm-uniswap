@@ -12,6 +12,9 @@ use std::ops::Deref;
 pub struct TickIndex(i32);
 
 impl TickIndex {
+    pub const MAX: Self = Self(MAX_TICK);
+    pub const MIN: Self = Self(MIN_TICK);
+
     /// Attempts to construct a `TickIndex` from a raw `i32`.
     ///
     /// Returns `None` if `index` falls outside the inclusive
