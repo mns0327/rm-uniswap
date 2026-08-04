@@ -12,7 +12,7 @@ pub use crate::core::concentrated::pool::{
     SwapParams, SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in,
     delta_amount_out, tick_spacing_to_max_liquidity_per_tick,
 };
-pub use crate::core::concentrated::ticks::PoolTicks;
+pub use crate::core::concentrated::ticks::ticks::PoolTicks;
 pub use crate::core::math::{
     full as full_math, sqrt_price as sqrt_price_math, swap as swap_math, swap::SwapStep,
     tick as tick_math,

@@ -42,7 +42,7 @@ use crate::core::{
 use super::{
     cache::PoolCache,
     price::{PriceCache, sqrt_price_x96_to_price},
-    ticks::{PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard},
+    ticks::ticks::{PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard},
 };
 
 /// Minimum valid tick spacing (1 = finest granularity).
