@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ruint::aliases::U256;
+use ruint::aliases::{U160, U256};
 use serde::{Deserialize, Serialize};
 
 /// Tick data stored at an initialized tick boundary.
@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 /// the tick index is the `BTreeMap` key, not a duplicated field inside the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TickInfo {
-    /// TODO: Add Sqrt price
+    /// The square root of the price at this tick, scaled by 96 bits.
+    pub sqrt_price_x96: U160,
+
     /// Gross liquidity attached to this initialized tick.
     pub liquidity_gross: u128,
 
@@ -27,11 +29,36 @@ pub struct TickInfo {
 
 impl TickInfo {
     pub const DEFAULT: Self = Self {
+        sqrt_price_x96: U160::ZERO,
         liquidity_gross: 0,
         liquidity_net: 0,
         fee_growth_outside0_x128: U256::ZERO,
         fee_growth_outside1_x128: U256::ZERO,
     };
+
+    pub fn new(
+        sqrt_price_x96: U160,
+        liquidity_gross: u128,
+        liquidity_net: i128,
+        fee_growth_outside0_x128: U256,
+        fee_growth_outside1_x128: U256,
+    ) -> Self {
+        Self {
+            sqrt_price_x96,
+            liquidity_gross,
+            liquidity_net,
+            fee_growth_outside0_x128,
+            fee_growth_outside1_x128,
+        }
+    }
+
+    pub fn set_sqrt_price_x96(&mut self, sqrt_price_x96: U160) {
+        self.sqrt_price_x96 = sqrt_price_x96;
+    }
+
+    pub fn sqrt_price_x96(&self) -> U160 {
+        self.sqrt_price_x96
+    }
 
     pub fn is_default(&self) -> bool {
         self == &Self::DEFAULT

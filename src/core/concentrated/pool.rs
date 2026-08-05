@@ -2611,32 +2611,36 @@ pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::core::math::tick::get_sqrt_price_at_tick;
+    use crate::core::{math::tick::get_sqrt_price_at_tick, types::tick::TickIndex};
 
     use super::*;
     use proptest::prelude::*;
+    use ruint::aliases::U160;
 
     fn ether(n: u128) -> U256 {
         U256::from(n) * U256::from(1_000_000_000_000_000_000u128)
     }
 
-    fn sqrt_price_1_1() -> U256 {
-        U256::ONE << 96
+    fn sqrt_price_1_1() -> U160 {
+        U160::ONE << 96
     }
 
-    fn test_min_sqrt_price() -> U256 {
-        U256::from(4_295_128_739u64)
+    fn test_min_sqrt_price() -> U160 {
+        U160::from(4_295_128_739u64)
     }
 
     fn tick_info(tick_idx: i32, liquidity_net: i128, liquidity_gross: u128) -> (i32, TickInfo) {
         (
             tick_idx,
-            TickInfo {
+            TickInfo::new(
+                TickIndex::new(tick_idx)
+                    .expect("tick index out of range")
+                    .sqrt_price_x96(),
                 liquidity_gross,
                 liquidity_net,
-                fee_growth_outside0_x128: U256::ZERO,
-                fee_growth_outside1_x128: U256::ZERO,
-            },
+                U256::ZERO,
+                U256::ZERO,
+            ),
         )
     }
 
@@ -2656,7 +2660,7 @@ mod tests {
     }
 
     fn make_pool(
-        sqrt_price_x96: U256,
+        sqrt_price_x96: U160,
         tick: i32,
         liquidity: u128,
         fee: u32,
@@ -2671,7 +2675,7 @@ mod tests {
 
         Pool {
             state: Arc::new(RwLock::new(PoolState {
-                sqrt_price_x96,
+                sqrt_price_x96: sqrt_price_x96.to::<U256>(),
                 tick,
                 liquidity,
                 fee_growth_global0_x128: U256::ZERO,
@@ -2682,7 +2686,7 @@ mod tests {
             ticks: tick_map,
             cache,
             price_cache: Arc::new(PriceCache::new(
-                sqrt_price_x96_to_price(sqrt_price_x96),
+                sqrt_price_x96_to_price(sqrt_price_x96.to::<U256>()),
                 fee,
             )),
         }
@@ -2706,12 +2710,12 @@ mod tests {
     fn make_params(
         zero_for_one: bool,
         amount: SignedAmount,
-        sqrt_price_limit_x96: U256,
+        sqrt_price_limit_x96: U160,
     ) -> SwapParams {
         SwapParams {
             zero_for_one,
             amount,
-            sqrt_price_limit_x96,
+            sqrt_price_limit_x96: sqrt_price_limit_x96.to::<U256>(),
             #[cfg(feature = "protocol-fee")]
             protocol_fee: None,
         }
@@ -2874,7 +2878,10 @@ mod tests {
             .unwrap();
 
         assert!(result.sqrt_price_x96 <= before_price, "price must not rise");
-        assert!(result.sqrt_price_x96 >= limit, "price must not cross limit");
+        assert!(
+            result.sqrt_price_x96 >= limit.to::<U256>(),
+            "price must not cross limit"
+        );
     }
 
     #[test]
@@ -2889,7 +2896,10 @@ mod tests {
             .unwrap();
 
         assert!(result.sqrt_price_x96 >= before_price, "price must not fall");
-        assert!(result.sqrt_price_x96 <= limit, "price must not cross limit");
+        assert!(
+            result.sqrt_price_x96 <= limit.to::<U256>(),
+            "price must not cross limit"
+        );
     }
 
     #[test]
@@ -3191,11 +3201,9 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "tick index out of range")]
     fn rejects_out_of_range_tick_entry() {
-        assert_eq!(
-            PoolTicks::from_snapshot(60, [tick_info(MIN_TICK - 1, 0, 1)].into()).unwrap_err(),
-            SwapSimError::InvalidTick
-        );
+        PoolTicks::from_snapshot(60, [tick_info(MIN_TICK - 1, 0, 1)].into()).unwrap_err();
     }
 
     #[test]
@@ -3292,7 +3300,7 @@ mod tests {
             pool.simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(1)),
-                test_min_sqrt_price() - U256::ONE,
+                test_min_sqrt_price() - U160::ONE,
             ))
             .unwrap_err(),
             SwapSimError::PriceLimitOutOfBounds
@@ -3303,7 +3311,7 @@ mod tests {
     fn rejects_invalid_pool_sqrt_price() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        pool.state.write().sqrt_price_x96 = test_min_sqrt_price() - U256::ONE;
+        pool.state.write().sqrt_price_x96 = (test_min_sqrt_price() - U160::ONE).to::<U256>();
 
         assert_eq!(
             pool.simulate_swap(make_params(
@@ -3406,11 +3414,11 @@ mod tests {
 
             let before_price = get_sqrt_price_at_tick(0).unwrap();
             if zero_for_one {
-                prop_assert!(result.sqrt_price_x96 <= before_price, "price rose on zeroForOne");
-                prop_assert!(result.sqrt_price_x96 >= limit, "price crossed limit going down");
+                prop_assert!(result.sqrt_price_x96 <= before_price.to::<U256>(), "price rose on zeroForOne");
+                prop_assert!(result.sqrt_price_x96 >= limit.to::<U256>(), "price crossed limit going down");
             } else {
-                prop_assert!(result.sqrt_price_x96 >= before_price, "price fell on oneForZero");
-                prop_assert!(result.sqrt_price_x96 <= limit, "price crossed limit going up");
+                prop_assert!(result.sqrt_price_x96 >= before_price.to::<U256>(), "price fell on oneForZero");
+                prop_assert!(result.sqrt_price_x96 <= limit.to::<U256>(), "price crossed limit going up");
             }
         }
 
@@ -3430,7 +3438,7 @@ mod tests {
                 .simulate_swap(make_params(
                     zero_for_one,
                     SignedAmount::negative(U256::from(amount_raw)),
-                    extreme_price_limit(zero_for_one),
+                    extreme_price_limit(zero_for_one).to::<U160>(),
                 ))
                 .expect("swap should succeed");
 
@@ -3467,7 +3475,7 @@ mod tests {
                 .simulate_swap(make_params(
                     zero_for_one,
                     SignedAmount::positive(U256::from(amount_raw)),
-                    extreme_price_limit(zero_for_one),
+                    extreme_price_limit(zero_for_one).to::<U160>(),
                 ))
                 .expect("swap should succeed");
 

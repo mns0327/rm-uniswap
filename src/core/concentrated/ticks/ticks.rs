@@ -251,16 +251,6 @@ pub struct PoolTicksWriteGuard<'a> {
 
 impl<'a> PoolTicksWriteGuard<'a> {
     #[inline]
-    fn empty_tick() -> TickInfo {
-        TickInfo {
-            liquidity_gross: 0,
-            liquidity_net: 0,
-            fee_growth_outside0_x128: U256::ZERO,
-            fee_growth_outside1_x128: U256::ZERO,
-        }
-    }
-
-    #[inline]
     pub fn next_initialized_tick(
         &self,
         current_tick: i32,
@@ -329,12 +319,13 @@ impl<'a> PoolTicksWriteGuard<'a> {
         let after = if liquidity_gross_after == 0 {
             None
         } else {
-            Some(TickInfo {
-                liquidity_gross: liquidity_gross_after,
+            Some(TickInfo::new(
+                before.sqrt_price_x96,
+                liquidity_gross_after,
                 liquidity_net,
-                fee_growth_outside0_x128: before.fee_growth_outside0_x128,
-                fee_growth_outside1_x128: before.fee_growth_outside1_x128,
-            })
+                before.fee_growth_outside0_x128,
+                before.fee_growth_outside1_x128,
+            ))
         };
 
         Ok((update, after))
@@ -366,7 +357,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
             .inner
             .get(&tick_idx)
             .copied()
-            .unwrap_or_else(Self::empty_tick);
+            .unwrap_or_else(TickInfo::default);
         let (update, after) = Self::compute_tick_update(before, liquidity_delta, upper)?;
         self.apply_tick_update(tick_idx, after);
         Ok(update)
@@ -390,12 +381,12 @@ impl<'a> PoolTicksWriteGuard<'a> {
             .inner
             .get(&tick_lower)
             .copied()
-            .unwrap_or_else(Self::empty_tick);
+            .unwrap_or_else(|| TickInfo::DEFAULT);
         let upper_before = self
             .inner
             .get(&tick_upper)
             .copied()
-            .unwrap_or_else(Self::empty_tick);
+            .unwrap_or_else(|| TickInfo::DEFAULT);
 
         let (lower_update, lower_after) =
             Self::compute_tick_update(lower_before, liquidity_delta, false)?;

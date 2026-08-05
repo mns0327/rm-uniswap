@@ -1,4 +1,6 @@
-use crate::v4::tick_math::{MAX_TICK, MIN_TICK};
+use ruint::aliases::U160;
+
+use crate::v4::tick_math::{MAX_TICK, MIN_TICK, get_sqrt_price_at_tick};
 use std::ops::Deref;
 
 /// A validated tick index within the Uniswap v4 valid tick range
@@ -29,6 +31,11 @@ impl TickIndex {
     /// Returns the underlying raw tick value as `i32`.
     pub const fn value(&self) -> i32 {
         self.0
+    }
+
+    /// Returns the square root of the price at this tick, scaled by 2^96.
+    pub fn sqrt_price_x96(&self) -> U160 {
+        get_sqrt_price_at_tick(self.value()).unwrap()
     }
 }
 
