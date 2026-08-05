@@ -5,7 +5,10 @@
 //! repeated quote paths while preserving the Solidity boundary behavior covered
 //! by the reference-vector tests in this module.
 
-use ruint::{aliases::U256, uint};
+use ruint::{
+    aliases::{U160, U256},
+    uint,
+};
 
 /// Backward-compatible name for the crate-wide compact error code.
 pub type TickMathError = crate::Error;
@@ -142,7 +145,8 @@ fn ssar(val: S256, shift: u32) -> i32 {
 /// # Errors
 /// Returns [`TickMathError::InvalidTick`] if `tick` is outside `[MIN_TICK, MAX_TICK]`.
 #[inline]
-pub fn get_sqrt_price_at_tick(tick: i32) -> Result<U256, TickMathError> {
+pub fn get_sqrt_price_at_tick(tick: i32) -> Result<U160, TickMathError> {
+    // TODO: change input to `TickIndex`
     if !(MIN_TICK..=MAX_TICK).contains(&tick) {
         return Err(TickMathError::InvalidTick);
     }
@@ -171,9 +175,11 @@ pub fn get_sqrt_price_at_tick(tick: i32) -> Result<U256, TickMathError> {
 
     // Convert Q128 → Q64.96 with ceiling rounding:
     //   result = (ratio + (2^32 - 1)) >> 32
-    Ok((ratio + ((U256::ONE << 32) - U256::ONE)) >> 32)
+    let result: U256 = (ratio + ((U256::ONE << 32) - U256::ONE)) >> 32;
+
+    Ok(result.to::<U160>())
 }
-//
+
 // Returns (hi, lo) such that  a * b  ==  hi * 2^128 + lo.
 //
 // Why it works without overflow:
@@ -322,7 +328,7 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: U256) -> Result<i32, TickMathError
     // same correction as Uniswap V3 TickMath.sol.
     let tick = if tick_low == tick_high {
         tick_low
-    } else if get_sqrt_price_at_tick(tick_high)? <= sqrt_price_x96 {
+    } else if get_sqrt_price_at_tick(tick_high)?.to::<U256>() <= sqrt_price_x96 {
         tick_high
     } else {
         tick_low
@@ -379,18 +385,27 @@ mod tests {
 
     #[test]
     fn sqrt_price_at_min_tick_matches_uniswap() {
-        assert_eq!(get_sqrt_price_at_tick(MIN_TICK).unwrap(), MIN_SQRT_PRICE);
+        assert_eq!(
+            get_sqrt_price_at_tick(MIN_TICK).unwrap().to::<U256>(),
+            MIN_SQRT_PRICE
+        );
     }
 
     #[test]
     fn sqrt_price_at_max_tick_matches_uniswap() {
-        assert_eq!(get_sqrt_price_at_tick(MAX_TICK).unwrap(), MAX_SQRT_PRICE);
+        assert_eq!(
+            get_sqrt_price_at_tick(MAX_TICK).unwrap().to::<U256>(),
+            MAX_SQRT_PRICE
+        );
     }
 
     #[test]
     fn sqrt_price_at_tick_zero_is_2_pow_96() {
         // sqrt(1.0001^0) * 2^96 = 1 * 2^96
-        assert_eq!(get_sqrt_price_at_tick(0).unwrap(), U256::ONE << 96);
+        assert_eq!(
+            get_sqrt_price_at_tick(0).unwrap().to::<U256>(),
+            U256::ONE << 96
+        );
     }
 
     #[test]
@@ -416,7 +431,7 @@ mod tests {
 
     #[test]
     fn tick_at_sqrt_price_of_tick_zero_round_trips() {
-        let sqrt_price = get_sqrt_price_at_tick(0).unwrap();
+        let sqrt_price = get_sqrt_price_at_tick(0).unwrap().to::<U256>();
         assert_eq!(get_tick_at_sqrt_price(sqrt_price).unwrap(), 0);
     }
 
@@ -436,7 +451,7 @@ mod tests {
             MAX_TICK - 1,
         ];
         for tick in ticks {
-            let sqrt_price = get_sqrt_price_at_tick(tick).unwrap();
+            let sqrt_price = get_sqrt_price_at_tick(tick).unwrap().to::<U256>();
             let recovered = get_tick_at_sqrt_price(sqrt_price).unwrap();
             assert_eq!(recovered, tick, "round-trip failed for tick={tick}");
         }
@@ -477,7 +492,7 @@ mod tests {
     #[test]
     fn round_trip_spot_checks() {
         for &tick in &[-887272i32, -100_000, -1, 0, 1, 100_000, 887271] {
-            let sqrt_price = get_sqrt_price_at_tick(tick).unwrap();
+            let sqrt_price = get_sqrt_price_at_tick(tick).unwrap().to::<U256>();
             let recovered = get_tick_at_sqrt_price(sqrt_price).unwrap();
             // The recovered tick is either equal or one below (floor semantics).
             assert!(
@@ -498,7 +513,7 @@ mod tests {
         ];
         for &(lo, hi) in regions {
             for tick in lo..=hi {
-                let sqrt_price = get_sqrt_price_at_tick(tick).unwrap();
+                let sqrt_price = get_sqrt_price_at_tick(tick).unwrap().to::<U256>();
                 let recovered = get_tick_at_sqrt_price(sqrt_price).unwrap();
                 assert_eq!(recovered, tick, "dense round-trip failed for tick={tick}");
             }
@@ -559,7 +574,7 @@ mod tests {
 
         for &(tick, expected_str) in cases {
             let expected = U256::from_str_radix(expected_str, 10).unwrap();
-            let got = get_sqrt_price_at_tick(tick).unwrap();
+            let got = get_sqrt_price_at_tick(tick).unwrap().to::<U256>();
             assert_eq!(
                 got, expected,
                 "getSqrtPriceAtTick({tick}): got {got}, expected {expected}"
@@ -610,7 +625,7 @@ mod tests {
     #[test]
     fn early_exit_correctness_small_ticks() {
         for tick in [-255i32, -128, -64, -1, 1, 64, 128, 255] {
-            let sqrt_price = get_sqrt_price_at_tick(tick).unwrap();
+            let sqrt_price = get_sqrt_price_at_tick(tick).unwrap().to::<U256>();
             let recovered = get_tick_at_sqrt_price(sqrt_price).unwrap();
             assert_eq!(
                 recovered, tick,

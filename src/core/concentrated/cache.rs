@@ -88,7 +88,7 @@ impl PoolCache {
             return Ok(*cached.value());
         }
 
-        let sqrt_price = compute_sqrt_price_at_tick(tick_idx)?;
+        let sqrt_price = compute_sqrt_price_at_tick(tick_idx)?.to::<U256>();
         self.sqrt_tick_cache.insert(tick_idx, sqrt_price);
 
         Ok(sqrt_price)
