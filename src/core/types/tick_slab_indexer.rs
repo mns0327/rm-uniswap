@@ -28,6 +28,12 @@ impl TickSlabIndexer {
         Self(zigzag)
     }
 
+    /// Builds an indexer from its slab page and page-local slot components.
+    #[inline(always)]
+    pub(crate) const fn from_parts(cache_index: u16, slot_index: u8) -> Self {
+        Self(((cache_index as u32) << 5) | ((slot_index as u32) & 0x1F))
+    }
+
     /// Returns the raw zigzag-encoded `u32` value.
     #[inline(always)]
     pub(crate) fn value(&self) -> u32 {

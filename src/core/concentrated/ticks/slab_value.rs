@@ -98,6 +98,11 @@ impl TickSlabValue {
     /// directly to the least-significant remaining bit. That count is exactly
     /// the next initialized slot, with no per-slot scan.
     pub fn next(&self, tick_indexer: &TickSlabIndexer) -> Option<&TickInfo> {
+        self.next_slot(tick_indexer).map(|(_, tick_info)| tick_info)
+    }
+
+    /// Returns the next initialized page-local slot and tick after `tick_indexer`.
+    pub(crate) fn next_slot(&self, tick_indexer: &TickSlabIndexer) -> Option<(u8, &TickInfo)> {
         let slot = tick_indexer.slot_index();
 
         if slot == 31 {
@@ -110,7 +115,8 @@ impl TickSlabValue {
             return None;
         }
 
-        Some(&self.slots[candidates.trailing_zeros() as usize])
+        let next_slot = candidates.trailing_zeros() as u8;
+        Some((next_slot, &self.slots[next_slot as usize]))
     }
 
     /// Returns the previous initialized tick in this page before `tick_indexer`.
@@ -120,6 +126,11 @@ impl TickSlabValue {
     /// remaining bit. Subtracting the zero count from the word width gives the
     /// previous initialized slot in constant time.
     pub fn prev(&self, tick_indexer: &TickSlabIndexer) -> Option<&TickInfo> {
+        self.prev_slot(tick_indexer).map(|(_, tick_info)| tick_info)
+    }
+
+    /// Returns the previous initialized page-local slot and tick before `tick_indexer`.
+    pub(crate) fn prev_slot(&self, tick_indexer: &TickSlabIndexer) -> Option<(u8, &TickInfo)> {
         let slot = tick_indexer.slot_index();
 
         if slot == 0 {
@@ -132,7 +143,8 @@ impl TickSlabValue {
             return None;
         }
 
-        Some(&self.slots[(u32::BITS - 1 - candidates.leading_zeros()) as usize])
+        let prev_slot = (u32::BITS - 1 - candidates.leading_zeros()) as u8;
+        Some((prev_slot, &self.slots[prev_slot as usize]))
     }
 
     /// Returns the first initialized tick in this page.
@@ -140,11 +152,17 @@ impl TickSlabValue {
     /// `trailing_zeros()` points at the lowest set bit, which is the first
     /// initialized slot in page-local order.
     pub fn first(&self) -> Option<&TickInfo> {
+        self.first_slot().map(|(_, tick_info)| tick_info)
+    }
+
+    /// Returns the first initialized page-local slot and tick in this page.
+    pub(crate) fn first_slot(&self) -> Option<(u8, &TickInfo)> {
         if self.initialized_map == 0 {
             return None;
         }
 
-        Some(&self.slots[self.initialized_map.trailing_zeros() as usize])
+        let first_slot = self.initialized_map.trailing_zeros() as u8;
+        Some((first_slot, &self.slots[first_slot as usize]))
     }
 
     /// Returns the last initialized tick in this page.
@@ -153,11 +171,17 @@ impl TickSlabValue {
     /// converting that count back into a bit index gives the last initialized
     /// slot in page-local order.
     pub fn last(&self) -> Option<&TickInfo> {
+        self.last_slot().map(|(_, tick_info)| tick_info)
+    }
+
+    /// Returns the last initialized page-local slot and tick in this page.
+    pub(crate) fn last_slot(&self) -> Option<(u8, &TickInfo)> {
         if self.initialized_map == 0 {
             return None;
         }
 
-        Some(&self.slots[(u32::BITS - 1 - self.initialized_map.leading_zeros()) as usize])
+        let last_slot = (u32::BITS - 1 - self.initialized_map.leading_zeros()) as u8;
+        Some((last_slot, &self.slots[last_slot as usize]))
     }
 
     /// Returns whether the selected slot is logically present.
