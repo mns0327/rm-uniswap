@@ -30,3 +30,7 @@ harness = false
 [[bench]]
 name = "bitmap"
 harness = false
+
+[[bench]]
+name = "slab"
+harness = false
