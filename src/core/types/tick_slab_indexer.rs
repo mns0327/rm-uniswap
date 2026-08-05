@@ -22,8 +22,9 @@ impl TickSlabIndexer {
     /// positive or negative — map to small unsigned values, e.g.
     /// `0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...`.
     pub(crate) const fn from_tick(tick_idx: TickIndex, tick_spacing: u32) -> Self {
-        let value = tick_idx.value().div_euclid(tick_spacing as i32);
-        let zigzag = ((value << 1) ^ (value >> 31)) as u32;
+        let compressed = tick_idx.value().div_euclid(tick_spacing as i32);
+
+        let zigzag = ((compressed << 1) ^ (compressed >> 31)) as u32;
         Self(zigzag)
     }
 

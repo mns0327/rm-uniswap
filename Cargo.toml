@@ -15,6 +15,7 @@ dashmap = "6.2.1"
 parking_lot = "0.12.5"
 ruint = "1.18.0"
 serde = "1.0.228"
+slab = "0.4.12"
 tracing = "0.1.44"
 
 [dev-dependencies]
