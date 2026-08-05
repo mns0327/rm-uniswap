@@ -91,6 +91,75 @@ impl TickSlabValue {
         self.initialized_map &= !(1 << tick_indexer.slot_index());
     }
 
+    /// Returns the next initialized tick in this page after `tick_indexer`.
+    ///
+    /// The occupancy map is already a compact 32-bit index, so traversal keeps
+    /// only bits above the current slot and uses `trailing_zeros()` to jump
+    /// directly to the least-significant remaining bit. That count is exactly
+    /// the next initialized slot, with no per-slot scan.
+    pub fn next(&self, tick_indexer: &TickSlabIndexer) -> Option<&TickInfo> {
+        let slot = tick_indexer.slot_index();
+
+        if slot == 31 {
+            return None;
+        }
+
+        let candidates = self.initialized_map & (u32::MAX << (slot + 1));
+
+        if candidates == 0 {
+            return None;
+        }
+
+        Some(&self.slots[candidates.trailing_zeros() as usize])
+    }
+
+    /// Returns the previous initialized tick in this page before `tick_indexer`.
+    ///
+    /// This mirrors [`next`](Self::next): keep only bits below the current
+    /// slot, then use `leading_zeros()` to locate the most-significant
+    /// remaining bit. Subtracting the zero count from the word width gives the
+    /// previous initialized slot in constant time.
+    pub fn prev(&self, tick_indexer: &TickSlabIndexer) -> Option<&TickInfo> {
+        let slot = tick_indexer.slot_index();
+
+        if slot == 0 {
+            return None;
+        }
+
+        let candidates = self.initialized_map & ((1 << slot) - 1);
+
+        if candidates == 0 {
+            return None;
+        }
+
+        Some(&self.slots[(u32::BITS - 1 - candidates.leading_zeros()) as usize])
+    }
+
+    /// Returns the first initialized tick in this page.
+    ///
+    /// `trailing_zeros()` points at the lowest set bit, which is the first
+    /// initialized slot in page-local order.
+    pub fn first(&self) -> Option<&TickInfo> {
+        if self.initialized_map == 0 {
+            return None;
+        }
+
+        Some(&self.slots[self.initialized_map.trailing_zeros() as usize])
+    }
+
+    /// Returns the last initialized tick in this page.
+    ///
+    /// `leading_zeros()` counts the empty high bits before the highest set bit;
+    /// converting that count back into a bit index gives the last initialized
+    /// slot in page-local order.
+    pub fn last(&self) -> Option<&TickInfo> {
+        if self.initialized_map == 0 {
+            return None;
+        }
+
+        Some(&self.slots[(u32::BITS - 1 - self.initialized_map.leading_zeros()) as usize])
+    }
+
     /// Returns whether the selected slot is logically present.
     ///
     /// This is intentionally bitmap-based rather than value-based so a default
@@ -201,6 +270,42 @@ mod tests {
 
         assert_eq!(page.initialized(), 0);
         assert_eq!(page.get(&slot), None);
+    }
+
+    #[test]
+    fn next_and_prev_use_initialized_bits_inside_one_page() {
+        let mut page = TickSlabValue::new(None, None);
+
+        let slot_0 = indexer(0);
+        let slot_1 = indexer(-1);
+        let slot_4 = indexer(2);
+        let slot_31 = indexer(-16);
+
+        page.insert(&slot_0, info(10));
+        page.insert(&slot_1, info(20));
+        page.insert(&slot_4, info(40));
+        page.insert(&slot_31, info(310));
+
+        assert_eq!(page.next(&slot_0).copied(), Some(info(20)));
+        assert_eq!(page.next(&slot_1).copied(), Some(info(40)));
+        assert_eq!(page.next(&slot_4).copied(), Some(info(310)));
+        assert_eq!(page.next(&slot_31), None);
+
+        assert_eq!(page.prev(&slot_31).copied(), Some(info(40)));
+        assert_eq!(page.prev(&slot_4).copied(), Some(info(20)));
+        assert_eq!(page.prev(&slot_1).copied(), Some(info(10)));
+        assert_eq!(page.prev(&slot_0), None);
+    }
+
+    #[test]
+    fn first_and_last_return_page_extremes() {
+        let mut page = TickSlabValue::new(None, None);
+
+        page.insert(&indexer(-1), info(20));
+        page.insert(&indexer(15), info(300));
+
+        assert_eq!(page.first().copied(), Some(info(20)));
+        assert_eq!(page.last().copied(), Some(info(300)));
     }
 
     #[test]

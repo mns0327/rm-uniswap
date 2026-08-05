@@ -85,6 +85,51 @@ impl TickSlab {
             .and_then(|(_, tick_slab)| tick_slab.get(&tick_indexer))
     }
 
+    /// Returns the next initialized tick after `tick_indexer`.
+    ///
+    /// Within a page, [`TickSlabValue::next`] uses zero-count instructions on
+    /// the page occupancy map to jump to the next set bit. If the current page
+    /// has no later initialized slot, this follows the already-maintained page
+    /// link and returns the first initialized slot in that next page.
+    pub fn next(&self, tick_indexer: TickSlabIndexer) -> Option<&TickInfo> {
+        let cache_index = tick_indexer.cache_index();
+
+        if let Some((_, current_slab)) = self.get_slab(cache_index) {
+            return current_slab.next(&tick_indexer).or_else(|| {
+                let next_idx = current_slab.next_idx()?;
+                self.get_slab(next_idx)
+                    .and_then(|(_, next_slab)| next_slab.first())
+            });
+        }
+
+        self.bitmap
+            .next_or_eq(cache_index)
+            .and_then(|next_idx| self.get_slab(next_idx))
+            .and_then(|(_, next_slab)| next_slab.first())
+    }
+
+    /// Returns the previous initialized tick before `tick_indexer`.
+    ///
+    /// This mirrors [`next`](Self::next): page-local lookup uses zero counts on
+    /// the occupancy bitmap, then the slab falls back to the previous page link
+    /// and returns that page's last initialized slot.
+    pub fn prev(&self, tick_indexer: TickSlabIndexer) -> Option<&TickInfo> {
+        let cache_index = tick_indexer.cache_index();
+
+        if let Some((_, current_slab)) = self.get_slab(cache_index) {
+            return current_slab.prev(&tick_indexer).or_else(|| {
+                let prev_idx = current_slab.prev_idx()?;
+                self.get_slab(prev_idx)
+                    .and_then(|(_, prev_slab)| prev_slab.last())
+            });
+        }
+
+        self.bitmap
+            .prev_or_eq(cache_index)
+            .and_then(|prev_idx| self.get_slab(prev_idx))
+            .and_then(|(_, prev_slab)| prev_slab.last())
+    }
+
     /// Removes a tick and frees its page when the page no longer has initialized ticks.
     ///
     /// Empty-page removal keeps long-running pools from accumulating dead pages after
@@ -514,6 +559,60 @@ mod tests {
         slab.remove(slab.indexer(cache_tick(5)));
         assert_page_absent(&slab, 5);
         assert_page_links(&slab, 3, None, None);
+    }
+
+    #[test]
+    fn next_and_prev_find_neighbors_inside_the_same_page() {
+        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+
+        let slot_0 = slab.indexer(tick(0));
+        let slot_1 = slab.indexer(tick(-1));
+        let slot_4 = slab.indexer(tick(2));
+
+        slab.insert(slot_0, info(10));
+        slab.insert(slot_1, info(20));
+        slab.insert(slot_4, info(40));
+
+        assert_eq!(slab.next(slot_0).copied(), Some(info(20)));
+        assert_eq!(slab.next(slot_1).copied(), Some(info(40)));
+        assert_eq!(slab.prev(slot_4).copied(), Some(info(20)));
+        assert_eq!(slab.prev(slot_1).copied(), Some(info(10)));
+    }
+
+    #[test]
+    fn next_and_prev_cross_page_links() {
+        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+
+        let page_0_last = slab.indexer(tick(-16));
+        let page_1_first = slab.indexer(tick(16));
+        let page_3_first = slab.indexer(tick(48));
+
+        slab.insert(page_0_last, info(31));
+        slab.insert(page_1_first, info(100));
+        slab.insert(page_3_first, info(300));
+
+        assert_eq!(slab.next(page_0_last).copied(), Some(info(100)));
+        assert_eq!(slab.next(page_1_first).copied(), Some(info(300)));
+        assert_eq!(slab.next(page_3_first), None);
+
+        assert_eq!(slab.prev(page_3_first).copied(), Some(info(100)));
+        assert_eq!(slab.prev(page_1_first).copied(), Some(info(31)));
+        assert_eq!(slab.prev(page_0_last), None);
+    }
+
+    #[test]
+    fn next_and_prev_skip_from_absent_pages() {
+        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+
+        let page_1_first = slab.indexer(tick(16));
+        let absent_page_2_first = slab.indexer(tick(32));
+        let page_3_first = slab.indexer(tick(48));
+
+        slab.insert(page_1_first, info(100));
+        slab.insert(page_3_first, info(300));
+
+        assert_eq!(slab.next(absent_page_2_first).copied(), Some(info(300)));
+        assert_eq!(slab.prev(absent_page_2_first).copied(), Some(info(100)));
     }
 
     #[test]
