@@ -25,3 +25,7 @@ serde_json = "1.0.150"
 [[bench]]
 name = "benchmark"
 harness = false
+
+[[bench]]
+name = "bitmap"
+harness = false
