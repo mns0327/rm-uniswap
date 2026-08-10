@@ -19,6 +19,7 @@ pub use crate::core::math::{
 };
 pub use crate::core::types::delta::BalanceDelta;
 pub use crate::core::types::signed::I256 as SignedAmount;
+pub use crate::core::types::sqrt_price::SqrtPriceX96;
 pub use crate::core::types::{PoolTicksSnapshot, TickInfo};
 
 #[cfg(feature = "positions")]
