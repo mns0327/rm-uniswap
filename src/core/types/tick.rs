@@ -1,28 +1,31 @@
-use ruint::aliases::U160;
+use serde::{Deserialize, Serialize};
 
-use crate::v4::tick_math::{MAX_TICK, MIN_TICK, get_sqrt_price_at_tick};
+use crate::{core::types::sqrt_price::SqrtPriceX96, v4::tick_math::get_sqrt_price_at_tick};
 use std::ops::Deref;
 
 /// A validated tick index within the Uniswap v4 valid tick range
-/// (`MIN_TICK..=MAX_TICK`).
+/// (`TickIndex::MIN..=TickIndex::MAX`).
 ///
 /// Wrapping a raw `i32` in this type guarantees, at the type level, that
 /// any `TickIndex` in circulation has already been range-checked. This
 /// avoids re-validating tick bounds at every call site and prevents
 /// out-of-range ticks from silently propagating into pool math.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TickIndex(i32);
 
 impl TickIndex {
-    pub const MAX: Self = Self(MAX_TICK);
-    pub const MIN: Self = Self(MIN_TICK);
+    /// Highest tick accepted by the Uniswap v4 tick math bounds.
+    pub const MAX: Self = Self(887_272);
+    /// Lowest tick accepted by the Uniswap v4 tick math bounds.
+    pub const MIN: Self = Self(-887_272);
 
     /// Attempts to construct a `TickIndex` from a raw `i32`.
     ///
     /// Returns `None` if `index` falls outside the inclusive
-    /// `[MIN_TICK, MAX_TICK]` range defined by the protocol.
+    /// `[TickIndex::MIN, TickIndex::MAX]` range defined by the protocol.
     pub const fn new(index: i32) -> Option<Self> {
-        if index < MIN_TICK || index > MAX_TICK {
+        if index < Self::MIN.value() || index > Self::MAX.value() {
             return None;
         }
         Some(Self(index))
@@ -34,8 +37,18 @@ impl TickIndex {
     }
 
     /// Returns the square root of the price at this tick, scaled by 2^96.
-    pub fn sqrt_price_x96(&self) -> U160 {
-        get_sqrt_price_at_tick(self.value()).unwrap()
+    pub fn sqrt_price_x96(&self) -> SqrtPriceX96 {
+        get_sqrt_price_at_tick(*self)
+    }
+
+    /// Returns whether this tick can be used as an initialized boundary for
+    /// the given pool tick spacing.
+    ///
+    /// Uniswap pools only allow positions to start and end on ticks that are
+    /// exact multiples of their configured spacing. Callers must pass a valid
+    /// non-zero pool tick spacing.
+    pub fn for_spacing(&self, tick_spacing: u32) -> bool {
+        self.value() % tick_spacing as i32 == 0
     }
 }
 
@@ -64,10 +77,20 @@ impl Deref for TickIndex {
     }
 }
 
+impl std::fmt::Display for TickIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep Display explicit so logs distinguish validated ticks from raw integers.
+        write!(f, "TickIndex({})", self.0)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v4::tick_math::{MAX_TICK, MIN_TICK};
+
+    const MIN_TICK: i32 = TickIndex::MIN.value();
+    const MAX_TICK: i32 = TickIndex::MAX.value();
 
     // ---------- TickIndex::new ----------
 
