@@ -13,6 +13,8 @@ pub(crate) mod sqrt_price;
 pub(crate) mod tick;
 #[allow(dead_code)]
 pub(crate) mod tick_slab_indexer;
+#[allow(dead_code)]
+pub(crate) mod tick_spacing;
 pub(crate) mod ticks;
 
 pub use ticks::{NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate};
