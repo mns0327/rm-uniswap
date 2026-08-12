@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use ruint::aliases::{U160, U256};
 use serde::{Deserialize, Serialize};
 
+use crate::core::types::tick::TickIndex;
+
 /// Tick data stored at an initialized tick boundary.
 ///
 /// This intentionally mirrors Solidity's `mapping(int24 => Tick.Info)` shape:
@@ -10,6 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TickInfo {
     /// The square root of the price at this tick, scaled by 96 bits.
+    #[serde(default)]
     pub sqrt_price_x96: U160,
 
     /// Gross liquidity attached to this initialized tick.
@@ -72,7 +75,7 @@ impl TickInfo {
 /// Result of locating the next initialized tick in the swap direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NextInitializedTick {
-    pub tick_next: i32,
+    pub tick_next: TickIndex,
     pub initialized: bool,
 }
 
@@ -92,6 +95,6 @@ pub struct TickUpdate {
 /// through `PoolTicks::from_snapshot`, which validates every entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolTicksSnapshot {
-    pub tick_spacing: i32,
-    pub inner: BTreeMap<i32, TickInfo>,
+    pub tick_spacing: u32,
+    pub inner: BTreeMap<TickIndex, TickInfo>,
 }

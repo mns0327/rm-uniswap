@@ -1,6 +1,6 @@
-use alloy::primitives::U256;
+use ruint::aliases::U256;
 
-use crate::core::types::atomic_f64::AtomicF64;
+use crate::core::types::{atomic_f64::AtomicF64, sqrt_price::SqrtPriceX96};
 
 /// Fee denominator used by Uniswap-style fee pips.
 ///
@@ -138,8 +138,8 @@ fn u256_to_f64(v: U256) -> f64 {
 }
 
 #[inline]
-pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> f64 {
-    let sqrt_price = u256_to_f64(sqrt_price_x96) / Q96_F64;
+pub fn sqrt_price_x96_to_price(sqrt_price_x96: SqrtPriceX96) -> f64 {
+    let sqrt_price = u256_to_f64(sqrt_price_x96.as_u256()) / Q96_F64;
 
     sqrt_price * sqrt_price
 }

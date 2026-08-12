@@ -1,6 +1,8 @@
 pub(crate) mod atomic_f64;
 pub(crate) mod delta;
 #[allow(dead_code)]
+pub(crate) mod fee;
+#[allow(dead_code)]
 pub(crate) mod liquidity;
 #[allow(dead_code)]
 pub(crate) mod nonzero;

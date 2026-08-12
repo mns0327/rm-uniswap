@@ -26,12 +26,14 @@ impl Liquidity {
     ///
     /// This constructor is infallible because `u128` exactly matches the
     /// protocol's liquidity width.
+    #[inline(always)]
     #[must_use]
     pub const fn new(liquidity: u128) -> Self {
         Self(liquidity)
     }
 
     /// Returns the underlying raw liquidity value as `u128`.
+    #[inline(always)]
     #[must_use]
     pub const fn value(&self) -> u128 {
         self.0
@@ -41,12 +43,14 @@ impl Liquidity {
     ///
     /// The numeric value is unchanged; only the integer width changes so it can
     /// be used by fixed-point math without overflowing intermediate products.
+    #[inline(always)]
     #[must_use]
     pub fn as_u256(&self) -> U256 {
         U256::from(self.0)
     }
 
     /// Returns `true` when the liquidity amount is zero.
+    #[inline(always)]
     #[must_use]
     pub const fn is_zero(&self) -> bool {
         self.0 == 0
@@ -56,6 +60,7 @@ impl Liquidity {
     ///
     /// `Liquidity::ZERO.bit_len()` returns `0`; otherwise the result is in
     /// `1..=128`.
+    #[inline(always)]
     #[must_use]
     pub const fn bit_len(&self) -> u32 {
         128 - self.leading_zeros()
@@ -72,6 +77,7 @@ impl Liquidity {
     /// Several Uniswap price formulas use `liquidity << 96` as a numerator.
     /// The result always fits in `U256` because the largest `uint128` value
     /// shifted left by 96 occupies 224 bits.
+    #[inline(always)]
     #[must_use]
     pub fn q96(&self) -> U256 {
         U256::from(self.0) << 96
@@ -104,8 +110,7 @@ impl Deref for Liquidity {
 
 impl Display for Liquidity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Liquidity({})", self.0)?;
-        Ok(())
+        write!(f, "Liquidity({})", self.0)
     }
 }
 

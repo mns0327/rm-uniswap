@@ -2,20 +2,31 @@ use std::collections::BTreeMap;
 
 use rm_uniswap::{
     Error,
-    v4::{Pool, PoolTicks, SignedAmount, SwapParams, TickInfo, tick_math},
+    v4::{
+        Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex, TickInfo,
+        tick_math,
+    },
 };
 use ruint::aliases::U256;
 
 const LIQUIDITY: u128 = 1_000_000_000_000;
 const FEE: u32 = 3_000;
-const TICK_SPACING: i32 = 60;
+const TICK_SPACING: u32 = 60;
+
+fn tick(index: i32) -> TickIndex {
+    TickIndex::new(index).unwrap()
+}
+
+fn sqrt_price_1_1() -> SqrtPriceX96 {
+    SqrtPriceX96::from_u256(U256::ONE << 96).unwrap()
+}
 
 fn valid_pool() -> Pool {
     let ticks = PoolTicks::from_snapshot(
         TICK_SPACING,
         BTreeMap::from([
             (
-                -60,
+                tick(-60),
                 TickInfo {
                     liquidity_net: LIQUIDITY as i128,
                     liquidity_gross: LIQUIDITY,
@@ -23,7 +34,7 @@ fn valid_pool() -> Pool {
                 },
             ),
             (
-                60,
+                tick(60),
                 TickInfo {
                     liquidity_net: -(LIQUIDITY as i128),
                     liquidity_gross: LIQUIDITY,
@@ -34,7 +45,15 @@ fn valid_pool() -> Pool {
     )
     .unwrap();
 
-    Pool::try_new(U256::ONE << 96, 0, LIQUIDITY, FEE, TICK_SPACING, ticks).unwrap()
+    Pool::try_new(
+        sqrt_price_1_1(),
+        tick(0),
+        Liquidity::new(LIQUIDITY),
+        FEE,
+        TICK_SPACING,
+        ticks,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -51,7 +70,7 @@ fn snapshot_rejects_tick_spacing_mismatch() {
 #[test]
 fn snapshot_rejects_tick_and_price_mismatch() {
     let mut snapshot = valid_pool().snapshot();
-    snapshot.state.tick = 1;
+    snapshot.state.tick = tick(1);
 
     assert_eq!(Pool::try_from(snapshot).unwrap_err(), Error::InvalidTick);
 }
@@ -59,7 +78,7 @@ fn snapshot_rejects_tick_and_price_mismatch() {
 #[test]
 fn snapshot_rejects_zero_gross_initialized_tick() {
     let mut snapshot = valid_pool().snapshot();
-    snapshot.ticks.inner.insert(-120, TickInfo::default());
+    snapshot.ticks.inner.insert(tick(-120), TickInfo::default());
 
     assert_eq!(Pool::try_from(snapshot).unwrap_err(), Error::InvalidTick);
 }
@@ -67,7 +86,7 @@ fn snapshot_rejects_zero_gross_initialized_tick() {
 #[test]
 fn snapshot_rejects_inconsistent_active_liquidity() {
     let mut snapshot = valid_pool().snapshot();
-    snapshot.state.liquidity += 1;
+    snapshot.state.liquidity = Liquidity::new(snapshot.state.liquidity.value() + 1);
 
     assert_eq!(Pool::try_from(snapshot).unwrap_err(), Error::InvalidTick);
 }
@@ -112,7 +131,7 @@ fn mutating_swap_refreshes_scoring_price_cache() {
 
     let after = pool.spot_price_with_fee(false);
     let expected_raw = {
-        let sqrt = result.sqrt_price_x96.to::<u128>() as f64 / 2f64.powi(96);
+        let sqrt = result.sqrt_price_x96.value().to::<u128>() as f64 / 2f64.powi(96);
         1.0 / (sqrt * sqrt)
     };
     let expected_with_fee = expected_raw * (1.0 - FEE as f64 / 1_000_000.0);
@@ -126,7 +145,7 @@ fn sample_pool_snapshot_is_still_accepted() {
     let json = include_str!("../samples/pool1.json");
     let pool: Pool = serde_json::from_str(json).unwrap();
 
-    let derived_tick = tick_math::get_tick_at_sqrt_price(pool.state.read().sqrt_price_x96).unwrap();
+    let derived_tick = tick_math::get_tick_at_sqrt_price(&pool.state.read().sqrt_price_x96);
     assert_eq!(derived_tick, pool.state.read().tick);
 }
 

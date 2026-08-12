@@ -80,8 +80,7 @@ impl Deref for TickIndex {
 impl std::fmt::Display for TickIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Keep Display explicit so logs distinguish validated ticks from raw integers.
-        write!(f, "TickIndex({})", self.0)?;
-        Ok(())
+        write!(f, "TickIndex({})", self.0)
     }
 }
 

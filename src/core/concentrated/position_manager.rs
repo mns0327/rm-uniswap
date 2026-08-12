@@ -3,17 +3,17 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
 use crate::{
-    Error,
     core::{
         concentrated::pool::{ModifyLiquidityParams, Pool as ConcentratedPool},
-        types::delta::BalanceDelta,
+        types::{delta::BalanceDelta, tick::TickIndex},
     },
+    Error,
 };
 use alloy::primitives::{Address, B256};
 use parking_lot::{Mutex, RwLock};
@@ -26,8 +26,8 @@ const I128_POSITIVE_MASK: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionInfo {
     pub owner: Address,
-    pub tick_lower: i32,
-    pub tick_upper: i32,
+    pub tick_lower: TickIndex,
+    pub tick_upper: TickIndex,
     pub salt: B256,
     pub state: PositionState,
 }
@@ -131,8 +131,8 @@ impl PositionManager {
     pub fn mint(
         &self,
         owner: Address,
-        tick_lower: i32,
-        tick_upper: i32,
+        tick_lower: TickIndex,
+        tick_upper: TickIndex,
         liquidity: u128,
         amount0_max: u128,
         amount1_max: u128,
@@ -259,8 +259,8 @@ impl PositionManager {
         let request = ModifyRequest {
             token_id,
             owner: snapshot.owner,
-            tick_lower: snapshot.tick_lower,
-            tick_upper: snapshot.tick_upper,
+            tick_lower: snapshot.tick_lower.value(),
+            tick_upper: snapshot.tick_upper.value(),
             liquidity_delta,
         };
         #[cfg(feature = "v4-hooks")]

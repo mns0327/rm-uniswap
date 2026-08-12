@@ -4,11 +4,11 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 
 use alloy::primitives::Address;
 use rm_uniswap::v4::{
-    BalanceDelta, Pool, PoolSnapshot, SignedAmount, SwapParams,
     positions::{MintResult, ModifyResult, PositionManager},
+    BalanceDelta, Pool, PoolSnapshot, SignedAmount, SqrtPriceX96, SwapParams, TickIndex,
 };
 use ruint::aliases::U256;
-use serde::{Deserialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer};
 use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +280,14 @@ fn parse_i128_lossless(value: &str) -> Result<i128, String> {
     }
 }
 
+fn tick(index: i32) -> TickIndex {
+    TickIndex::new(index).unwrap()
+}
+
+fn sqrt_price(value: U256) -> SqrtPriceX96 {
+    SqrtPriceX96::from_u256(value).unwrap()
+}
+
 #[test]
 fn committed_forge_fixtures_match_rust() {
     run_fixture_file("committed", include_str!("../forge/fixtures/parity.json"));
@@ -363,8 +371,8 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 let result = manager
                     .mint(
                         owner,
-                        tick_lower,
-                        tick_upper,
+                        tick(tick_lower),
+                        tick(tick_upper),
                         liquidity,
                         amount0_max,
                         amount1_max,
@@ -384,7 +392,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result.result,
                         &expect.result,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
                 minted_tokens.insert(result.token_id, result);
@@ -407,7 +415,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
             }
@@ -426,7 +434,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 };
                 let mut params = SwapParams::new(zero_for_one, signed_amount);
                 if let Some(limit) = sqrt_price_limit_x96 {
-                    params.sqrt_price_limit_x96 = limit;
+                    params.sqrt_price_limit_x96 = sqrt_price(limit);
                 }
                 #[cfg(feature = "protocol-fee")]
                 {
@@ -443,15 +451,18 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         "fixture {name} operation {idx} delta"
                     );
                     assert_eq!(
-                        result.sqrt_price_x96, expect.sqrt_price_x96,
+                        result.sqrt_price_x96,
+                        sqrt_price(expect.sqrt_price_x96),
                         "fixture {name} operation {idx} sqrt_price_x96"
                     );
                     assert_eq!(
-                        result.tick, expect.tick,
+                        result.tick,
+                        tick(expect.tick),
                         "fixture {name} operation {idx} tick"
                     );
                     assert_eq!(
-                        result.liquidity, expect.liquidity,
+                        result.liquidity.value(),
+                        expect.liquidity,
                         "fixture {name} operation {idx} liquidity"
                     );
                     assert_eq!(
@@ -483,7 +494,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
             }
@@ -505,7 +516,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
             }

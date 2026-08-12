@@ -31,6 +31,7 @@ impl SqrtPriceX96 {
     ///
     /// Returns `None` if `sqrt_price_x96` falls outside the inclusive
     /// [`Self::MIN`]..=[`Self::MAX`] protocol price range.
+    #[inline(always)]
     pub fn new(sqrt_price_x96: U160) -> Option<Self> {
         let sqrt_price = unsafe { Self::new_unchecked(sqrt_price_x96) };
         if sqrt_price.is_valid() {
@@ -44,6 +45,7 @@ impl SqrtPriceX96 {
     ///
     /// Values that do not fit in `uint160`, or that fit but fall outside the
     /// protocol sqrt-price range, are rejected.
+    #[inline(always)]
     pub fn from_u256(sqrt_price_x96: U256) -> Option<Self> {
         if sqrt_price_x96.bit_len() > 160 {
             return None;
@@ -55,6 +57,7 @@ impl SqrtPriceX96 {
     ///
     /// The outer `Result` reports malformed or overflowing decimal text; the
     /// inner `Option` reports a well-formed value outside [`Self::MIN`]..=[`Self::MAX`].
+    #[inline(always)]
     pub fn from_decimal_str(sqrt_price_x96: &str) -> Result<Option<Self>, ParseError> {
         U160::from_str_radix(sqrt_price_x96, 10).map(Self::new)
     }
@@ -77,16 +80,19 @@ impl SqrtPriceX96 {
     }
 
     /// Returns the underlying raw Q64.96 sqrt price as `U160`.
+    #[inline(always)]
     pub const fn value(&self) -> U160 {
         self.0
     }
 
     /// Returns this Q64.96 sqrt price widened to `U256`.
+    #[inline(always)]
     pub fn as_u256(&self) -> U256 {
         self.0.to::<U256>()
     }
 
     /// Returns `true` if this Q64.96 sqrt price is equal to the maximum value.
+    #[inline(always)]
     pub fn is_max(&self) -> bool {
         self.0 == Self::MAX.0
     }
@@ -94,6 +100,7 @@ impl SqrtPriceX96 {
     /// Returns the greatest tick whose sqrt price is less than or equal to this value.
     ///
     /// This follows the same floor semantics as Uniswap `getTickAtSqrtRatio`.
+    #[inline(always)]
     pub fn tick_index(&self) -> TickIndex {
         get_tick_at_sqrt_price(self)
     }
@@ -174,8 +181,7 @@ impl Deref for SqrtPriceX96 {
 
 impl Display for SqrtPriceX96 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SqrtPriceX96({})", self.value())?;
-        Ok(())
+        write!(f, "SqrtPriceX96({})", self.value())
     }
 }
 

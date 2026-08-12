@@ -1,14 +1,17 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use dashmap::DashMap;
 use ruint::aliases::U256;
 
 use crate::{
     Error as SwapSimError,
-    core::math::{
-        small_ratio::mul_div_u32_ceil,
-        sqrt_price::{get_amount0_delta, get_amount1_delta},
-        tick::get_sqrt_price_at_tick as compute_sqrt_price_at_tick,
+    core::{
+        math::{
+            small_ratio::mul_div_u32_ceil,
+            sqrt_price::{get_amount0_delta, get_amount1_delta},
+            tick::get_sqrt_price_at_tick as compute_sqrt_price_at_tick,
+        },
+        types::{nonzero::NonZeroLiquidity, sqrt_price::SqrtPriceX96, tick::TickIndex},
     },
 };
 
@@ -20,9 +23,9 @@ const MAX_SWAP_FEE: u32 = 1_000_000;
 /// validating the state-dependent fields stored inside this value before reuse.
 #[derive(Debug, Clone)]
 pub struct TickCrossCacheEntry {
-    pub sqrt_start_x96: U256,
-    pub sqrt_boundary_x96: U256,
-    pub liquidity: u128,
+    pub sqrt_start_x96: SqrtPriceX96,
+    pub sqrt_boundary_x96: SqrtPriceX96,
+    pub liquidity: NonZeroLiquidity,
     pub fee_pips: u32,
 
     /// Fee-excluded input needed to reach the boundary.
@@ -43,14 +46,14 @@ impl TickCrossCacheEntry {
     #[inline(always)]
     pub fn matches_state(
         &self,
-        sqrt_start_x96: U256,
-        sqrt_boundary_x96: U256,
-        liquidity: u128,
+        sqrt_start_x96: SqrtPriceX96,
+        sqrt_boundary_x96: SqrtPriceX96,
+        liquidity: NonZeroLiquidity,
         fee_pips: u32,
     ) -> bool {
         self.sqrt_start_x96 == sqrt_start_x96
             && self.sqrt_boundary_x96 == sqrt_boundary_x96
-            && self.liquidity == liquidity
+            && self.liquidity.deref() == liquidity.deref()
             && self.fee_pips == fee_pips
     }
 
@@ -71,10 +74,10 @@ impl TickCrossCacheEntry {
 /// `*_cross` entries are state-dependent and must be validated before reuse.
 #[derive(Debug, Default)]
 pub struct PoolCache {
-    sqrt_tick_cache: DashMap<i32, U256>,
+    sqrt_tick_cache: DashMap<TickIndex, SqrtPriceX96>,
 
-    zero_for_one_cross: DashMap<i32, Arc<TickCrossCacheEntry>>,
-    one_for_zero_cross: DashMap<i32, Arc<TickCrossCacheEntry>>,
+    zero_for_one_cross: DashMap<TickIndex, Arc<TickCrossCacheEntry>>,
+    one_for_zero_cross: DashMap<TickIndex, Arc<TickCrossCacheEntry>>,
 }
 
 impl PoolCache {
@@ -83,19 +86,22 @@ impl PoolCache {
     }
 
     #[inline]
-    pub fn get_sqrt_price_at_tick(&self, tick_idx: i32) -> Result<U256, SwapSimError> {
+    pub fn get_sqrt_price_at_tick(
+        &self,
+        tick_idx: TickIndex,
+    ) -> Result<SqrtPriceX96, SwapSimError> {
         if let Some(cached) = self.sqrt_tick_cache.get(&tick_idx) {
             return Ok(*cached.value());
         }
 
-        let sqrt_price = compute_sqrt_price_at_tick(tick_idx)?.to::<U256>();
+        let sqrt_price = compute_sqrt_price_at_tick(tick_idx);
         self.sqrt_tick_cache.insert(tick_idx, sqrt_price);
 
         Ok(sqrt_price)
     }
 
     #[inline(always)]
-    fn cross_map(&self, zero_for_one: bool) -> &DashMap<i32, Arc<TickCrossCacheEntry>> {
+    fn cross_map(&self, zero_for_one: bool) -> &DashMap<TickIndex, Arc<TickCrossCacheEntry>> {
         if zero_for_one {
             &self.zero_for_one_cross
         } else {
@@ -111,14 +117,14 @@ impl PoolCache {
     #[inline]
     pub fn get_or_compute_boundary_cross(
         &self,
-        tick_idx: i32,
+        tick_idx: TickIndex,
         zero_for_one: bool,
-        sqrt_start_x96: U256,
-        sqrt_boundary_x96: U256,
-        liquidity: u128,
+        sqrt_start_x96: SqrtPriceX96,
+        sqrt_boundary_x96: SqrtPriceX96,
+        liquidity: NonZeroLiquidity,
         fee_pips: u32,
     ) -> Result<Option<Arc<TickCrossCacheEntry>>, SwapSimError> {
-        if liquidity == 0 {
+        if liquidity.is_zero() {
             return Ok(None);
         }
 
@@ -165,26 +171,24 @@ impl PoolCache {
     #[inline]
     fn compute_boundary_cross_entry(
         zero_for_one: bool,
-        sqrt_start_x96: U256,
-        sqrt_boundary_x96: U256,
-        liquidity: u128,
+        sqrt_start_x96: SqrtPriceX96,
+        sqrt_boundary_x96: SqrtPriceX96,
+        liquidity: NonZeroLiquidity,
         fee_pips: u32,
     ) -> Result<TickCrossCacheEntry, SwapSimError> {
-        let liquidity_u = U256::from(liquidity);
-
-        let amount_in_to_cross = if zero_for_one {
-            get_amount0_delta(sqrt_boundary_x96, sqrt_start_x96, liquidity_u, true)
+        let (amount_in_to_cross, _) = if zero_for_one {
+            get_amount0_delta(sqrt_boundary_x96, sqrt_start_x96, liquidity, true)
                 .map_err(|_| SwapSimError::AmountOverflow)?
         } else {
-            get_amount1_delta(sqrt_start_x96, sqrt_boundary_x96, liquidity_u, true)
+            get_amount1_delta(sqrt_start_x96, sqrt_boundary_x96, liquidity, true)
                 .map_err(|_| SwapSimError::AmountOverflow)?
         };
 
-        let amount_out_to_cross = if zero_for_one {
-            get_amount1_delta(sqrt_boundary_x96, sqrt_start_x96, liquidity_u, false)
+        let (amount_out_to_cross, _) = if zero_for_one {
+            get_amount1_delta(sqrt_boundary_x96, sqrt_start_x96, liquidity, false)
                 .map_err(|_| SwapSimError::AmountOverflow)?
         } else {
-            get_amount0_delta(sqrt_start_x96, sqrt_boundary_x96, liquidity_u, false)
+            get_amount0_delta(sqrt_start_x96, sqrt_boundary_x96, liquidity, false)
                 .map_err(|_| SwapSimError::AmountOverflow)?
         };
 

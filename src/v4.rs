@@ -18,8 +18,11 @@ pub use crate::core::math::{
     tick as tick_math,
 };
 pub use crate::core::types::delta::BalanceDelta;
+pub use crate::core::types::liquidity::Liquidity;
+pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::signed::I256 as SignedAmount;
 pub use crate::core::types::sqrt_price::SqrtPriceX96;
+pub use crate::core::types::tick::TickIndex;
 pub use crate::core::types::{PoolTicksSnapshot, TickInfo};
 
 #[cfg(feature = "positions")]

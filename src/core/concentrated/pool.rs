@@ -20,6 +20,10 @@ use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Error as SwapSimError;
+use crate::core::types::liquidity::Liquidity;
+use crate::core::types::nonzero::NonZeroLiquidity;
+use crate::core::types::sqrt_price::SqrtPriceX96;
+use crate::core::types::tick::TickIndex;
 use crate::core::{
     math::{
         small_ratio::{mul_div_u32_ceil, mul_div_u32_floor},
@@ -28,10 +32,7 @@ use crate::core::{
             get_next_sqrt_price_from_output,
         },
         swap::{SwapMathError, get_sqrt_price_target},
-        tick::{
-            MAX_SQRT_PRICE, MAX_TICK, MAX_TICK_SPACING, MIN_SQRT_PRICE, MIN_TICK,
-            get_tick_at_sqrt_price,
-        },
+        tick::{MAX_TICK_SPACING, get_tick_at_sqrt_price},
     },
     types::{
         NextInitializedTick, PoolTicksSnapshot, TickInfo, delta::BalanceDelta,
@@ -46,7 +47,7 @@ use super::{
 };
 
 /// Minimum valid tick spacing (1 = finest granularity).
-pub const MIN_TICK_SPACING: i32 = 1;
+pub const MIN_TICK_SPACING: u32 = 1;
 
 /// Maximum number of swap-loop iterations per simulation.
 ///
@@ -58,6 +59,8 @@ pub const MAX_SWAP_ITERATIONS: usize = 10_000;
 
 /// Maximum swap fee in pips (100 % = 1 000 000).
 const MAX_SWAP_FEE: u32 = 1_000_000;
+const MIN_TICK: i32 = TickIndex::MIN.value();
+const MAX_TICK: i32 = TickIndex::MAX.value();
 
 /// Trait for tick-crossing guards used in swap simulations.
 ///
@@ -66,14 +69,18 @@ const MAX_SWAP_FEE: u32 = 1_000_000;
 /// override only that method and immediately speed up the swap loop without
 /// changing the executor.
 pub trait TickCrossing {
-    fn next_initialized_tick(&self, current_tick: i32, zero_for_one: bool) -> NextInitializedTick;
-    fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError>;
+    fn next_initialized_tick(
+        &self,
+        current_tick: TickIndex,
+        zero_for_one: bool,
+    ) -> NextInitializedTick;
+    fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError>;
 
     #[inline(always)]
     fn next_initialized_tick_within_one_word(
         &self,
-        current_tick: i32,
-        tick_spacing: i32,
+        current_tick: TickIndex,
+        tick_spacing: u32,
         zero_for_one: bool,
     ) -> NextInitializedTick {
         next_initialized_tick_within_one_word_fallback(
@@ -87,24 +94,32 @@ pub trait TickCrossing {
 
 impl TickCrossing for PoolTicksReadGuard<'_> {
     #[inline]
-    fn next_initialized_tick(&self, current_tick: i32, zero_for_one: bool) -> NextInitializedTick {
+    fn next_initialized_tick(
+        &self,
+        current_tick: TickIndex,
+        zero_for_one: bool,
+    ) -> NextInitializedTick {
         PoolTicksReadGuard::next_initialized_tick(self, current_tick, zero_for_one)
     }
 
     #[inline]
-    fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError> {
+    fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError> {
         PoolTicksReadGuard::cross_tick(self, tick_next)
     }
 }
 
 impl TickCrossing for PoolTicksWriteGuard<'_> {
     #[inline]
-    fn next_initialized_tick(&self, current_tick: i32, zero_for_one: bool) -> NextInitializedTick {
+    fn next_initialized_tick(
+        &self,
+        current_tick: TickIndex,
+        zero_for_one: bool,
+    ) -> NextInitializedTick {
         PoolTicksWriteGuard::next_initialized_tick(self, current_tick, zero_for_one)
     }
 
     #[inline]
-    fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError> {
+    fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError> {
         PoolTicksWriteGuard::cross_tick(self, tick_next)
     }
 }
@@ -136,7 +151,7 @@ pub struct Pool {
 
     /// Tick spacing from `PoolKey.tickSpacing`.
     /// Must lie in `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
-    pub tick_spacing: i32,
+    pub tick_spacing: u32,
 
     /// Initialized ticks keyed by `tick_idx` in an ordered map behind a lock.
     pub ticks: PoolTicks,
@@ -168,13 +183,13 @@ impl<'de> Deserialize<'de> for Pool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolState {
     /// Current pool sqrt price in Q64.96 fixed-point.
-    pub sqrt_price_x96: U256,
+    pub sqrt_price_x96: SqrtPriceX96,
 
     /// Current tick — must equal `floor(log_√1.0001(sqrt_price_x96))`.
-    pub tick: i32,
+    pub tick: TickIndex,
 
     /// Active liquidity for the current tick range (`uint128` in V4).
-    pub liquidity: u128,
+    pub liquidity: Liquidity,
 
     /// All-time LP fee growth per unit of active liquidity in token0, Q128.
     #[serde(default)]
@@ -194,7 +209,7 @@ pub struct PoolState {
 pub struct PoolSnapshot {
     pub state: PoolState,
     pub fee: u32,
-    pub tick_spacing: i32,
+    pub tick_spacing: u32,
     pub ticks: PoolTicksSnapshot,
 }
 
@@ -208,14 +223,13 @@ impl PoolSnapshot {
             return Err(SwapSimError::InvalidTickSpacing);
         }
 
-        validate_tick_range(self.state.tick)?;
-
-        if self.state.sqrt_price_x96 < MIN_SQRT_PRICE || self.state.sqrt_price_x96 >= MAX_SQRT_PRICE
+        if self.state.sqrt_price_x96 < SqrtPriceX96::MIN
+            || self.state.sqrt_price_x96 >= SqrtPriceX96::MAX
         {
             return Err(SwapSimError::InvalidPoolSqrtPrice);
         }
 
-        if get_tick_at_sqrt_price(self.state.sqrt_price_x96)? != self.state.tick {
+        if get_tick_at_sqrt_price(&self.state.sqrt_price_x96) != self.state.tick {
             return Err(SwapSimError::InvalidTick);
         }
 
@@ -242,7 +256,7 @@ impl PoolSnapshot {
         }
 
         if active_liquidity.is_negative()
-            || active_liquidity.abs() != U256::from(self.state.liquidity)
+            || active_liquidity.abs() != self.state.liquidity.as_u256()
         {
             return Err(SwapSimError::InvalidTick);
         }
@@ -294,7 +308,7 @@ pub struct SwapParams {
     ///
     /// * `zero_for_one = true`  → must be in `(MIN_SQRT_PRICE, current_sqrt_price)`.
     /// * `zero_for_one = false` → must be in `(current_sqrt_price, MAX_SQRT_PRICE)`.
-    pub sqrt_price_limit_x96: U256,
+    pub sqrt_price_limit_x96: SqrtPriceX96,
 
     /// Per-swap protocol fee in pips. Only meaningful with `feature = "protocol-fee"`.
     #[cfg(feature = "protocol-fee")]
@@ -321,15 +335,15 @@ impl SwapParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifyLiquidityParams {
     /// Lower tick of the position range.
-    pub tick_lower: i32,
+    pub tick_lower: TickIndex,
     /// Upper tick of the position range.
-    pub tick_upper: i32,
+    pub tick_upper: TickIndex,
     /// Signed liquidity delta. Positive adds liquidity, negative removes it.
     pub liquidity_delta: i128,
 }
 
 impl ModifyLiquidityParams {
-    pub fn new(tick_lower: i32, tick_upper: i32, liquidity_delta: i128) -> Self {
+    pub fn new(tick_lower: TickIndex, tick_upper: TickIndex, liquidity_delta: i128) -> Self {
         Self {
             tick_lower,
             tick_upper,
@@ -348,7 +362,7 @@ pub struct ModifyLiquidityResult {
     pub delta: BalanceDelta,
 
     /// Active pool liquidity after the update.
-    pub liquidity: u128,
+    pub liquidity: Liquidity,
 
     /// Whether the lower tick flipped initialized/uninitialized state.
     pub flipped_lower: bool,
@@ -366,8 +380,8 @@ pub struct ModifyLiquidityResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickCrossInfo {
     pub cumulative_input: U256,
-    pub tick: i32,
-    pub liquidity_after: u128,
+    pub tick: TickIndex,
+    pub liquidity_after: Liquidity,
     pub fee_growth_global0_x128: U256,
     pub fee_growth_global1_x128: U256,
 }
@@ -376,14 +390,14 @@ pub struct TickCrossInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FullSwapResult {
     /// Pool sqrt price after the swap, in Q64.96.
-    pub sqrt_price_x96: U256,
+    pub sqrt_price_x96: SqrtPriceX96,
 
     /// Pool tick after the swap.
-    pub tick: i32,
+    pub tick: TickIndex,
 
     /// Active liquidity after the swap. May differ from the input value
     /// if tick boundaries were crossed.
-    pub liquidity: u128,
+    pub liquidity: Liquidity,
 
     pub fee_growth_global0_x128: U256,
 
@@ -413,13 +427,13 @@ pub struct FullSwapResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapSimulationResult {
     /// Pool sqrt price after the simulated swap, in Q64.96.
-    pub sqrt_price_x96: U256,
+    pub sqrt_price_x96: SqrtPriceX96,
 
     /// Pool tick after the simulated swap.
-    pub tick: i32,
+    pub tick: TickIndex,
 
     /// Active liquidity after the simulated swap.
-    pub liquidity: u128,
+    pub liquidity: Liquidity,
 
     pub fee_growth_global0_x128: U256,
 
@@ -468,11 +482,11 @@ impl Pool {
     /// [`Pool::new`] constructor remains available for trusted, already
     /// validated state.
     pub fn try_new(
-        sqrt_price_x96: U256,
-        tick: i32,
-        liquidity: u128,
+        sqrt_price_x96: SqrtPriceX96,
+        tick: TickIndex,
+        liquidity: Liquidity,
         fee: u32,
-        tick_spacing: i32,
+        tick_spacing: u32,
         ticks: PoolTicks,
     ) -> Result<Self, SwapSimError> {
         PoolSnapshot {
@@ -494,11 +508,11 @@ impl Pool {
     ///
     /// Prefer [`Pool::try_new`] for external input.
     pub fn new(
-        sqrt_price_x96: U256,
-        tick: i32,
-        liquidity: u128,
+        sqrt_price_x96: SqrtPriceX96,
+        tick: TickIndex,
+        liquidity: Liquidity,
         fee: u32,
-        tick_spacing: i32,
+        tick_spacing: u32,
         ticks: PoolTicks,
     ) -> Self {
         let cache = Arc::new(PoolCache::default());
@@ -591,7 +605,6 @@ impl Pool {
         // prevent deadlock if both are called concurrently.
         let mut ticks = self.ticks.write();
         let mut state = self.state.write();
-        validate_tick_range(state.tick)?;
         let delta = liquidity_principal_delta(&state, &self.cache, params)?;
         let liquidity_after = if params.liquidity_delta != 0
             && state.tick >= params.tick_lower
@@ -677,8 +690,8 @@ impl Pool {
     /// Return current all-time fee growth inside a tick range.
     pub fn fee_growth_inside(
         &self,
-        tick_lower: i32,
-        tick_upper: i32,
+        tick_lower: TickIndex,
+        tick_upper: TickIndex,
     ) -> Result<(U256, U256), SwapSimError> {
         check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
         let ticks = self.ticks.read();
@@ -807,7 +820,7 @@ impl Pool {
         &self,
         amount_in: U256,
         zero_for_one: bool,
-    ) -> Result<(u128, U256, i32, u128), SwapSimError> {
+    ) -> Result<(u128, SqrtPriceX96, TickIndex, Liquidity), SwapSimError> {
         let result = self.simulate_swap(SwapParams::new(
             zero_for_one,
             SignedAmount::negative(amount_in),
@@ -887,9 +900,9 @@ impl Pool {
 /// Mutable loop state shared by the light and full executors.
 #[derive(Debug, Clone, Copy)]
 struct SwapLoopState {
-    sqrt_price_x96: U256,
-    tick: i32,
-    liquidity: u128,
+    sqrt_price_x96: SqrtPriceX96,
+    tick: TickIndex,
+    liquidity: Liquidity,
     fee_growth_global0_x128: U256,
     fee_growth_global1_x128: U256,
 }
@@ -900,7 +913,7 @@ fn execute_swap_light_from_state<G: TickCrossing>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<SwapSimulationResult, SwapSimError> {
     validate_tick_range(state.tick)?;
@@ -950,7 +963,7 @@ fn execute_swap_full_from_state<G: TickCrossing>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<FullSwapResult, SwapSimError> {
     let (light, crossings) = execute_swap_core::<G, true>(
@@ -970,7 +983,7 @@ fn execute_swap_core<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<(SwapSimulationResult, Option<Vec<TickCrossInfo>>), SwapSimError> {
     validate_tick_range(state.tick)?;
@@ -1037,14 +1050,14 @@ fn accrue_lp_fee(
     fee_amount: U256,
     zero_for_one: bool,
 ) -> Result<(), SwapSimError> {
-    if fee_amount.is_zero() || result.liquidity == 0 {
+    if fee_amount.is_zero() || result.liquidity.is_zero() {
         return Ok(());
     }
 
     let growth = crate::core::math::full::mul_div(
         fee_amount,
         U256::ONE << 128u32,
-        U256::from(result.liquidity),
+        result.liquidity.as_u256(),
     )
     .map_err(|_| SwapSimError::AmountOverflow)?;
 
@@ -1130,7 +1143,7 @@ pub fn delta_amount_in(delta: &BalanceDelta, zero_for_one: bool) -> u128 {
 /// re-entering the generic `compute_swap_step` dispatcher from the hot path.
 #[derive(Debug, Clone, Copy)]
 struct LightSwapStep {
-    sqrt_ratio_next_x96: U256,
+    sqrt_ratio_next_x96: SqrtPriceX96,
     amount_in: U256,
     amount_out: U256,
     fee_amount: U256,
@@ -1170,28 +1183,35 @@ fn fee_on_exact_input_fast(amount_in: U256, fee_pips: u32) -> Result<U256, SwapM
 /// direction, fee, and liquidity, so this function skips that generic layer.
 #[inline]
 fn compute_swap_step_exact_in_fast(
-    sqrt_ratio_current_x96: U256,
-    sqrt_ratio_target_x96: U256,
-    liquidity: u128,
+    sqrt_ratio_current_x96: SqrtPriceX96,
+    sqrt_ratio_target_x96: SqrtPriceX96,
+    liquidity: Liquidity,
     amount_remaining: U256,
     fee_pips: u32,
     zero_for_one: bool,
 ) -> Result<LightSwapStep, SwapMathError> {
-    let liquidity_u = U256::from(liquidity);
+    let Some(liquidity) = NonZeroLiquidity::new(liquidity.value()) else {
+        return Ok(LightSwapStep {
+            sqrt_ratio_next_x96: sqrt_ratio_target_x96,
+            amount_in: U256::ZERO,
+            amount_out: U256::ZERO,
+            fee_amount: U256::ZERO,
+        });
+    };
     let amount_remaining_less_fee = amount_less_fee_exact_in_fast(amount_remaining, fee_pips)?;
 
-    let max_amount_in = if zero_for_one {
+    let (max_amount_in, _) = if zero_for_one {
         get_amount0_delta(
             sqrt_ratio_target_x96,
             sqrt_ratio_current_x96,
-            liquidity_u,
+            liquidity,
             true,
         )?
     } else {
         get_amount1_delta(
             sqrt_ratio_current_x96,
             sqrt_ratio_target_x96,
-            liquidity_u,
+            liquidity,
             true,
         )?
     };
@@ -1206,25 +1226,25 @@ fn compute_swap_step_exact_in_fast(
         // recompute amount_in from the rounded next price.
         let next = get_next_sqrt_price_from_input(
             sqrt_ratio_current_x96,
-            liquidity_u,
+            liquidity,
             amount_remaining_less_fee,
             zero_for_one,
         )?;
         (next, amount_remaining_less_fee)
     };
 
-    let amount_out = if zero_for_one {
+    let (amount_out, _) = if zero_for_one {
         get_amount1_delta(
             sqrt_ratio_next_x96,
             sqrt_ratio_current_x96,
-            liquidity_u,
+            liquidity,
             false,
         )?
     } else {
         get_amount0_delta(
             sqrt_ratio_current_x96,
             sqrt_ratio_next_x96,
-            liquidity_u,
+            liquidity,
             false,
         )?
     };
@@ -1246,29 +1266,36 @@ fn compute_swap_step_exact_in_fast(
 /// Exact-output swap-step calculation for the lightweight pool loop.
 #[inline]
 fn compute_swap_step_exact_out_fast(
-    sqrt_ratio_current_x96: U256,
-    sqrt_ratio_target_x96: U256,
-    liquidity: u128,
+    sqrt_ratio_current_x96: SqrtPriceX96,
+    sqrt_ratio_target_x96: SqrtPriceX96,
+    liquidity: Liquidity,
     amount_remaining: U256,
     fee_pips: u32,
     zero_for_one: bool,
 ) -> Result<LightSwapStep, SwapMathError> {
     debug_assert!(fee_pips < MAX_SWAP_FEE);
 
-    let liquidity_u = U256::from(liquidity);
+    let Some(liquidity) = NonZeroLiquidity::new(liquidity.value()) else {
+        return Ok(LightSwapStep {
+            sqrt_ratio_next_x96: sqrt_ratio_target_x96,
+            amount_in: U256::ZERO,
+            amount_out: U256::ZERO,
+            fee_amount: U256::ZERO,
+        });
+    };
 
-    let max_amount_out = if zero_for_one {
+    let (max_amount_out, _) = if zero_for_one {
         get_amount1_delta(
             sqrt_ratio_target_x96,
             sqrt_ratio_current_x96,
-            liquidity_u,
+            liquidity,
             false,
         )?
     } else {
         get_amount0_delta(
             sqrt_ratio_current_x96,
             sqrt_ratio_target_x96,
-            liquidity_u,
+            liquidity,
             false,
         )?
     };
@@ -1278,27 +1305,17 @@ fn compute_swap_step_exact_out_fast(
     } else {
         let next = get_next_sqrt_price_from_output(
             sqrt_ratio_current_x96,
-            liquidity_u,
+            liquidity,
             amount_remaining,
             zero_for_one,
         )?;
         (next, amount_remaining)
     };
 
-    let amount_in = if zero_for_one {
-        get_amount0_delta(
-            sqrt_ratio_next_x96,
-            sqrt_ratio_current_x96,
-            liquidity_u,
-            true,
-        )?
+    let (amount_in, _) = if zero_for_one {
+        get_amount0_delta(sqrt_ratio_next_x96, sqrt_ratio_current_x96, liquidity, true)?
     } else {
-        get_amount1_delta(
-            sqrt_ratio_current_x96,
-            sqrt_ratio_next_x96,
-            liquidity_u,
-            true,
-        )?
+        get_amount1_delta(sqrt_ratio_current_x96, sqrt_ratio_next_x96, liquidity, true)?
     };
 
     let fee_amount = fee_on_exact_input_fast(amount_in, fee_pips)?;
@@ -1361,10 +1378,10 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
     crossings: Option<&mut Vec<TickCrossInfo>>,
     effective_swap_fee: u32,
     params: SwapParams,
-    tick_next: i32,
+    tick_next: TickIndex,
     tick_initialized: bool,
-    sqrt_boundary: U256,
-    sqrt_target: U256,
+    sqrt_boundary: SqrtPriceX96,
+    sqrt_target: SqrtPriceX96,
     #[cfg(feature = "protocol-fee")] total_protocol_fee: &mut U256,
 ) -> Result<bool, SwapSimError> {
     // If price limit is before the tick boundary, the cached boundary-cross amount is invalid.
@@ -1372,12 +1389,16 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
         return Ok(false);
     }
 
+    let Some(liquidity) = NonZeroLiquidity::new(result.liquidity.value()) else {
+        return Ok(false);
+    };
+
     let Some(entry) = cache.get_or_compute_boundary_cross(
         tick_next,
         params.zero_for_one,
         result.sqrt_price_x96,
         sqrt_boundary,
-        result.liquidity,
+        liquidity,
         effective_swap_fee,
     )?
     else {
@@ -1430,11 +1451,7 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
         }
     }
 
-    result.tick = if params.zero_for_one {
-        tick_next.wrapping_sub(1)
-    } else {
-        tick_next
-    };
+    result.tick = tick_after_cross(tick_next, params.zero_for_one)?;
 
     Ok(true)
 }
@@ -1450,10 +1467,10 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
     crossings: Option<&mut Vec<TickCrossInfo>>,
     effective_swap_fee: u32,
     params: SwapParams,
-    tick_next: i32,
+    tick_next: TickIndex,
     tick_initialized: bool,
-    sqrt_boundary: U256,
-    sqrt_target: U256,
+    sqrt_boundary: SqrtPriceX96,
+    sqrt_target: SqrtPriceX96,
     #[cfg(feature = "protocol-fee")] total_protocol_fee: &mut U256,
 ) -> Result<bool, SwapSimError> {
     // If price limit is before the tick boundary, the cached boundary-cross amount is invalid.
@@ -1461,12 +1478,16 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
         return Ok(false);
     }
 
+    let Some(liquidity) = NonZeroLiquidity::new(result.liquidity.value()) else {
+        return Ok(false);
+    };
+
     let Some(entry) = cache.get_or_compute_boundary_cross(
         tick_next,
         params.zero_for_one,
         result.sqrt_price_x96,
         sqrt_boundary,
-        result.liquidity,
+        liquidity,
         effective_swap_fee,
     )?
     else {
@@ -1519,11 +1540,7 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
         }
     }
 
-    result.tick = if params.zero_for_one {
-        tick_next.wrapping_sub(1)
-    } else {
-        tick_next
-    };
+    result.tick = tick_after_cross(tick_next, params.zero_for_one)?;
 
     Ok(true)
 }
@@ -1538,7 +1555,7 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<SwapSimulationResult, SwapSimError> {
     let mut result = SwapLoopState {
@@ -1573,7 +1590,7 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
 
         // V4 clamps tickNext before pricing because the bitmap is not aware
         // of global min/max tick bounds.
-        let tick_next = next_tick.tick_next.clamp(MIN_TICK, MAX_TICK);
+        let tick_next = next_tick.tick_next.clamp(TickIndex::MIN, TickIndex::MAX);
 
         let sqrt_boundary = cache.get_sqrt_price_at_tick(tick_next)?;
         let sqrt_target = get_sqrt_price_target(
@@ -1645,15 +1662,11 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
                 result.liquidity = add_liquidity_delta(result.liquidity, liquidity_net)?;
             }
 
-            result.tick = if params.zero_for_one {
-                tick_next.wrapping_sub(1)
-            } else {
-                tick_next
-            };
+            result.tick = tick_after_cross(tick_next, params.zero_for_one)?;
         } else if result.sqrt_price_x96 != sqrt_start {
             // A non-boundary price movement is terminal for this step: either
             // the specified amount was exhausted or the price limit was hit.
-            result.tick = get_tick_at_sqrt_price(result.sqrt_price_x96)?;
+            result.tick = get_tick_at_sqrt_price(&result.sqrt_price_x96);
             break;
         }
     }
@@ -1684,7 +1697,7 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<SwapSimulationResult, SwapSimError> {
     let mut result = SwapLoopState {
@@ -1719,7 +1732,7 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
 
         // V4 clamps tickNext before pricing because the bitmap is not aware
         // of global min/max tick bounds.
-        let tick_next = next_tick.tick_next.clamp(MIN_TICK, MAX_TICK);
+        let tick_next = next_tick.tick_next.clamp(TickIndex::MIN, TickIndex::MAX);
 
         let sqrt_boundary = cache.get_sqrt_price_at_tick(tick_next)?;
         let sqrt_target = get_sqrt_price_target(
@@ -1790,15 +1803,11 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
                 result.liquidity = add_liquidity_delta(result.liquidity, liquidity_net)?;
             }
 
-            result.tick = if params.zero_for_one {
-                tick_next.wrapping_sub(1)
-            } else {
-                tick_next
-            };
+            result.tick = tick_after_cross(tick_next, params.zero_for_one)?;
         } else if result.sqrt_price_x96 != sqrt_start {
             // A non-boundary price movement is terminal for this step: either
             // the specified amount was exhausted or the price limit was hit.
-            result.tick = get_tick_at_sqrt_price(result.sqrt_price_x96)?;
+            result.tick = get_tick_at_sqrt_price(&result.sqrt_price_x96);
             break;
         }
     }
@@ -1828,7 +1837,7 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<(SwapSimulationResult, Option<Vec<TickCrossInfo>>), SwapSimError> {
     let mut result = SwapLoopState {
@@ -1869,7 +1878,7 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
 
         // V4 clamps tickNext before pricing because the bitmap is not aware
         // of global min/max tick bounds.
-        let tick_next = next_tick.tick_next.clamp(MIN_TICK, MAX_TICK);
+        let tick_next = next_tick.tick_next.clamp(TickIndex::MIN, TickIndex::MAX);
 
         let sqrt_boundary = cache.get_sqrt_price_at_tick(tick_next)?;
         let sqrt_target = get_sqrt_price_target(
@@ -1952,18 +1961,14 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
                 }
             }
 
-            result.tick = if params.zero_for_one {
-                tick_next.wrapping_sub(1)
-            } else {
-                tick_next
-            };
+            result.tick = tick_after_cross(tick_next, params.zero_for_one)?;
         } else if result.sqrt_price_x96 != sqrt_start {
             if amount_remaining.is_zero() || result.sqrt_price_x96 == params.sqrt_price_limit_x96 {
-                result.tick = get_tick_at_sqrt_price(result.sqrt_price_x96)?;
+                result.tick = get_tick_at_sqrt_price(&result.sqrt_price_x96);
                 break;
             }
 
-            result.tick = get_tick_at_sqrt_price(result.sqrt_price_x96)?;
+            result.tick = get_tick_at_sqrt_price(&result.sqrt_price_x96);
         }
     }
 
@@ -1994,7 +1999,7 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     ticks: &G,
     cache: &PoolCache,
     effective_swap_fee: u32,
-    tick_spacing: i32,
+    tick_spacing: u32,
     params: SwapParams,
 ) -> Result<(SwapSimulationResult, Option<Vec<TickCrossInfo>>), SwapSimError> {
     let mut result = SwapLoopState {
@@ -2035,7 +2040,7 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
 
         // V4 clamps tickNext before pricing because the bitmap is not aware
         // of global min/max tick bounds.
-        let tick_next = next_tick.tick_next.clamp(MIN_TICK, MAX_TICK);
+        let tick_next = next_tick.tick_next.clamp(TickIndex::MIN, TickIndex::MAX);
 
         let sqrt_boundary = cache.get_sqrt_price_at_tick(tick_next)?;
         let sqrt_target = get_sqrt_price_target(
@@ -2117,18 +2122,14 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
                 }
             }
 
-            result.tick = if params.zero_for_one {
-                tick_next.wrapping_sub(1)
-            } else {
-                tick_next
-            };
+            result.tick = tick_after_cross(tick_next, params.zero_for_one)?;
         } else if result.sqrt_price_x96 != sqrt_start {
             if amount_remaining.is_zero() || result.sqrt_price_x96 == params.sqrt_price_limit_x96 {
-                result.tick = get_tick_at_sqrt_price(result.sqrt_price_x96)?;
+                result.tick = get_tick_at_sqrt_price(&result.sqrt_price_x96);
                 break;
             }
 
-            result.tick = get_tick_at_sqrt_price(result.sqrt_price_x96)?;
+            result.tick = get_tick_at_sqrt_price(&result.sqrt_price_x96);
         }
     }
 
@@ -2159,17 +2160,23 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
 /// Matches V4: zeroForOne must stay strictly above `MIN_SQRT_PRICE`;
 /// oneForZero must stay strictly below `MAX_SQRT_PRICE`.
 #[inline]
-fn extreme_price_limit(zero_for_one: bool) -> U256 {
+fn extreme_price_limit(zero_for_one: bool) -> SqrtPriceX96 {
     if zero_for_one {
-        MIN_SQRT_PRICE + U256::ONE
+        SqrtPriceX96::from_u256(SqrtPriceX96::MIN.as_u256() + U256::ONE)
+            .expect("MIN_SQRT_PRICE + 1 is a valid price")
     } else {
-        MAX_SQRT_PRICE - U256::ONE
+        SqrtPriceX96::from_u256(SqrtPriceX96::MAX.as_u256() - U256::ONE)
+            .expect("MAX_SQRT_PRICE - 1 is a valid price")
     }
 }
 
 /// Validate that tick_lower < tick_upper and both are aligned to tick_spacing.
 #[inline]
-fn check_ticks(tick_lower: i32, tick_upper: i32, tick_spacing: i32) -> Result<(), SwapSimError> {
+fn check_ticks(
+    tick_lower: TickIndex,
+    tick_upper: TickIndex,
+    tick_spacing: u32,
+) -> Result<(), SwapSimError> {
     if tick_lower >= tick_upper {
         return Err(SwapSimError::InvalidTick);
     }
@@ -2179,17 +2186,17 @@ fn check_ticks(tick_lower: i32, tick_upper: i32, tick_spacing: i32) -> Result<()
 }
 
 trait FeeGrowthTicks {
-    fn fee_tick(&self, tick: i32) -> Option<TickInfo>;
+    fn fee_tick(&self, tick: TickIndex) -> Option<TickInfo>;
 }
 
 impl FeeGrowthTicks for PoolTicksReadGuard<'_> {
-    fn fee_tick(&self, tick: i32) -> Option<TickInfo> {
+    fn fee_tick(&self, tick: TickIndex) -> Option<TickInfo> {
         self.get(tick)
     }
 }
 
 impl FeeGrowthTicks for PoolTicksWriteGuard<'_> {
-    fn fee_tick(&self, tick: i32) -> Option<TickInfo> {
+    fn fee_tick(&self, tick: TickIndex) -> Option<TickInfo> {
         self.get(tick)
     }
 }
@@ -2197,9 +2204,9 @@ impl FeeGrowthTicks for PoolTicksWriteGuard<'_> {
 #[inline]
 fn fee_growth_inside_from_ticks<T: FeeGrowthTicks>(
     ticks: &T,
-    tick_current: i32,
-    tick_lower: i32,
-    tick_upper: i32,
+    tick_current: TickIndex,
+    tick_lower: TickIndex,
+    tick_upper: TickIndex,
     fee_growth_global0_x128: U256,
     fee_growth_global1_x128: U256,
 ) -> (U256, U256) {
@@ -2281,18 +2288,18 @@ fn liquidity_principal_delta(
 /// This delegates to the optimized `sqrt_price_math` implementation so
 /// liquidity modifications and swap steps share the same fast, audited math.
 fn get_amount0_delta_unsigned(
-    sqrt_price_a_x96: U256,
-    sqrt_price_b_x96: U256,
+    sqrt_price_a_x96: SqrtPriceX96,
+    sqrt_price_b_x96: SqrtPriceX96,
     liquidity: u128,
     round_up: bool,
 ) -> Result<U256, SwapSimError> {
-    get_amount0_delta(
-        sqrt_price_a_x96,
-        sqrt_price_b_x96,
-        U256::from(liquidity),
-        round_up,
-    )
-    .map_err(|_| SwapSimError::AmountOverflow)
+    let Some(liquidity) = NonZeroLiquidity::new(liquidity) else {
+        return Ok(U256::ZERO);
+    };
+
+    get_amount0_delta(sqrt_price_a_x96, sqrt_price_b_x96, liquidity, round_up)
+        .map(|(amount, _)| amount)
+        .map_err(|_| SwapSimError::AmountOverflow)
 }
 
 /// Unsigned token1 delta for a liquidity change between two sqrt prices.
@@ -2300,18 +2307,18 @@ fn get_amount0_delta_unsigned(
 /// This delegates to the optimized `sqrt_price_math` implementation so
 /// liquidity modifications and swap steps share the same fast, audited math.
 fn get_amount1_delta_unsigned(
-    sqrt_price_a_x96: U256,
-    sqrt_price_b_x96: U256,
+    sqrt_price_a_x96: SqrtPriceX96,
+    sqrt_price_b_x96: SqrtPriceX96,
     liquidity: u128,
     round_up: bool,
 ) -> Result<U256, SwapSimError> {
-    get_amount1_delta(
-        sqrt_price_a_x96,
-        sqrt_price_b_x96,
-        U256::from(liquidity),
-        round_up,
-    )
-    .map_err(|_| SwapSimError::AmountOverflow)
+    let Some(liquidity) = NonZeroLiquidity::new(liquidity) else {
+        return Ok(U256::ZERO);
+    };
+
+    get_amount1_delta(sqrt_price_a_x96, sqrt_price_b_x96, liquidity, round_up)
+        .map(|(amount, _)| amount)
+        .map_err(|_| SwapSimError::AmountOverflow)
 }
 
 /// Convert a U256 magnitude and sign flag to `i128`, accepting `i128::MIN`.
@@ -2337,8 +2344,8 @@ fn u256_magnitude_to_i128(amount: U256, negative: bool) -> Result<i128, SwapSimE
 }
 
 fn get_amount0_delta_signed(
-    sqrt_price_a_x96: U256,
-    sqrt_price_b_x96: U256,
+    sqrt_price_a_x96: SqrtPriceX96,
+    sqrt_price_b_x96: SqrtPriceX96,
     liquidity_delta: i128,
 ) -> Result<i128, SwapSimError> {
     if liquidity_delta < 0 {
@@ -2361,8 +2368,8 @@ fn get_amount0_delta_signed(
 }
 
 fn get_amount1_delta_signed(
-    sqrt_price_a_x96: U256,
-    sqrt_price_b_x96: U256,
+    sqrt_price_a_x96: SqrtPriceX96,
+    sqrt_price_b_x96: SqrtPriceX96,
     liquidity_delta: i128,
 ) -> Result<i128, SwapSimError> {
     if liquidity_delta < 0 {
@@ -2386,15 +2393,32 @@ fn get_amount1_delta_signed(
 
 /// Apply a signed `liquidity_net` delta to the active liquidity.
 #[inline]
-fn add_liquidity_delta(liquidity: u128, delta: i128) -> Result<u128, SwapSimError> {
-    if delta < 0 {
+fn add_liquidity_delta(liquidity: Liquidity, delta: i128) -> Result<Liquidity, SwapSimError> {
+    let raw = if delta < 0 {
         liquidity
+            .value()
             .checked_sub(delta.unsigned_abs())
-            .ok_or(SwapSimError::LiquidityUnderflow)
+            .ok_or(SwapSimError::LiquidityUnderflow)?
     } else {
         liquidity
+            .value()
             .checked_add(delta as u128)
-            .ok_or(SwapSimError::LiquidityOverflow)
+            .ok_or(SwapSimError::LiquidityOverflow)?
+    };
+
+    Ok(Liquidity::new(raw))
+}
+
+#[inline]
+fn tick_after_cross(tick_next: TickIndex, zero_for_one: bool) -> Result<TickIndex, SwapSimError> {
+    if zero_for_one {
+        tick_next
+            .value()
+            .checked_sub(1)
+            .and_then(TickIndex::new)
+            .ok_or(SwapSimError::InvalidTick)
+    } else {
+        Ok(tick_next)
     }
 }
 
@@ -2475,7 +2499,7 @@ fn validate_swap_fee_for_exactness(fee: u32, exact_in: bool) -> Result<(), SwapS
 }
 
 #[inline]
-fn validate_tick_spacing(tick_spacing: i32) -> Result<(), SwapSimError> {
+fn validate_tick_spacing(tick_spacing: u32) -> Result<(), SwapSimError> {
     if !(MIN_TICK_SPACING..=MAX_TICK_SPACING).contains(&tick_spacing) {
         Err(SwapSimError::InvalidTickSpacing)
     } else {
@@ -2484,8 +2508,8 @@ fn validate_tick_spacing(tick_spacing: i32) -> Result<(), SwapSimError> {
 }
 
 #[inline]
-fn validate_tick_range(tick: i32) -> Result<(), SwapSimError> {
-    if !(MIN_TICK..=MAX_TICK).contains(&tick) {
+fn validate_tick_index_for_spacing(tick: TickIndex, tick_spacing: u32) -> Result<(), SwapSimError> {
+    if tick.value() % tick_spacing as i32 != 0 {
         Err(SwapSimError::InvalidTick)
     } else {
         Ok(())
@@ -2493,13 +2517,8 @@ fn validate_tick_range(tick: i32) -> Result<(), SwapSimError> {
 }
 
 #[inline]
-fn validate_tick_index_for_spacing(tick: i32, tick_spacing: i32) -> Result<(), SwapSimError> {
-    validate_tick_range(tick)?;
-    if tick % tick_spacing != 0 {
-        Err(SwapSimError::InvalidTick)
-    } else {
-        Ok(())
-    }
+fn validate_tick_range(_tick: TickIndex) -> Result<(), SwapSimError> {
+    Ok(())
 }
 
 /// Return the next initialized tick within the current bitmap word.
@@ -2513,11 +2532,11 @@ fn validate_tick_index_for_spacing(tick: i32, tick_spacing: i32) -> Result<(), S
 #[inline(always)]
 fn next_initialized_tick_within_one_word_fallback<G: TickCrossing + ?Sized>(
     ticks: &G,
-    tick: i32,
-    tick_spacing: i32,
+    tick: TickIndex,
+    tick_spacing: u32,
     zero_for_one: bool,
 ) -> NextInitializedTick {
-    let compressed = tick.div_euclid(tick_spacing);
+    let compressed = tick.div_euclid(tick_spacing as i32);
 
     let boundary_compressed = if zero_for_one {
         // Lowest compressed tick in the current 256-bit word.
@@ -2528,9 +2547,12 @@ fn next_initialized_tick_within_one_word_fallback<G: TickCrossing + ?Sized>(
         next_compressed + (255 - next_compressed.rem_euclid(256))
     };
 
-    let boundary_tick = boundary_compressed
-        .saturating_mul(tick_spacing)
-        .clamp(MIN_TICK, MAX_TICK);
+    let boundary_tick = TickIndex::new(
+        boundary_compressed
+            .saturating_mul(tick_spacing as i32)
+            .clamp(TickIndex::MIN.value(), TickIndex::MAX.value()),
+    )
+    .expect("must be within tick index bounds");
 
     let next = ticks.next_initialized_tick(tick, zero_for_one);
 
@@ -2557,12 +2579,12 @@ fn next_initialized_tick_within_one_word_fallback<G: TickCrossing + ?Sized>(
 fn validate_price_limit(
     state: &PoolState,
     zero_for_one: bool,
-    limit: U256,
+    limit: SqrtPriceX96,
 ) -> Result<(), SwapSimError> {
-    let min_price = MIN_SQRT_PRICE;
-    let max_price = MAX_SQRT_PRICE;
+    let min_price = SqrtPriceX96::MIN;
+    let max_price = SqrtPriceX96::MAX;
 
-    if state.sqrt_price_x96 < min_price || state.sqrt_price_x96 > max_price {
+    if !state.sqrt_price_x96.is_valid() {
         return Err(SwapSimError::InvalidPoolSqrtPrice);
     }
 
@@ -2596,11 +2618,12 @@ fn validate_price_limit(
 ///
 /// Panics if `tick_spacing` is outside `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
 /// Validate untrusted spacing before calling.
-pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
+pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: u32) -> u128 {
     assert!(
         (MIN_TICK_SPACING..=MAX_TICK_SPACING).contains(&tick_spacing),
         "tick_spacing {tick_spacing} out of [{MIN_TICK_SPACING}, {MAX_TICK_SPACING}]"
     );
+    let tick_spacing = tick_spacing as i32;
     let min_compressed = MIN_TICK.div_euclid(tick_spacing);
     let max_compressed = MAX_TICK.div_euclid(tick_spacing);
     let num_ticks = (max_compressed - min_compressed + 1) as u128;
@@ -2621,21 +2644,39 @@ mod tests {
         U256::from(n) * U256::from(1_000_000_000_000_000_000u128)
     }
 
-    fn sqrt_price_1_1() -> U160 {
-        U160::ONE << 96
+    fn tick(index: i32) -> TickIndex {
+        TickIndex::new(index).expect("tick index out of range")
+    }
+
+    fn sqrt_at(index: i32) -> SqrtPriceX96 {
+        get_sqrt_price_at_tick(tick(index))
+    }
+
+    fn sqrt_from_u160(value: U160) -> SqrtPriceX96 {
+        SqrtPriceX96::new(value).expect("sqrt price out of range")
+    }
+
+    fn invalid_sqrt_from_u160(value: U160) -> SqrtPriceX96 {
+        unsafe { SqrtPriceX96::new_unchecked(value) }
+    }
+
+    fn sqrt_price_1_1() -> SqrtPriceX96 {
+        sqrt_from_u160(U160::ONE << 96)
     }
 
     fn test_min_sqrt_price() -> U160 {
         U160::from(4_295_128_739u64)
     }
 
-    fn tick_info(tick_idx: i32, liquidity_net: i128, liquidity_gross: u128) -> (i32, TickInfo) {
+    fn tick_info(
+        tick_idx: i32,
+        liquidity_net: i128,
+        liquidity_gross: u128,
+    ) -> (TickIndex, TickInfo) {
         (
-            tick_idx,
+            tick(tick_idx),
             TickInfo::new(
-                TickIndex::new(tick_idx)
-                    .expect("tick index out of range")
-                    .sqrt_price_x96(),
+                sqrt_at(tick_idx).value(),
                 liquidity_gross,
                 liquidity_net,
                 U256::ZERO,
@@ -2644,7 +2685,7 @@ mod tests {
         )
     }
 
-    fn basic_ticks() -> [(i32, TickInfo); 2] {
+    fn basic_ticks() -> [(TickIndex, TickInfo); 2] {
         [
             tick_info(
                 -120,
@@ -2660,12 +2701,12 @@ mod tests {
     }
 
     fn make_pool(
-        sqrt_price_x96: U160,
+        sqrt_price_x96: SqrtPriceX96,
         tick: i32,
         liquidity: u128,
         fee: u32,
-        tick_spacing: i32,
-        ticks: impl IntoIterator<Item = (i32, TickInfo)>,
+        tick_spacing: u32,
+        ticks: impl IntoIterator<Item = (TickIndex, TickInfo)>,
     ) -> Pool {
         let tick_map =
             PoolTicks::from_snapshot(tick_spacing, ticks.into_iter().collect::<BTreeMap<_, _>>())
@@ -2675,9 +2716,9 @@ mod tests {
 
         Pool {
             state: Arc::new(RwLock::new(PoolState {
-                sqrt_price_x96: sqrt_price_x96.to::<U256>(),
-                tick,
-                liquidity,
+                sqrt_price_x96,
+                tick: self::tick(tick),
+                liquidity: Liquidity::new(liquidity),
                 fee_growth_global0_x128: U256::ZERO,
                 fee_growth_global1_x128: U256::ZERO,
             })),
@@ -2686,7 +2727,7 @@ mod tests {
             ticks: tick_map,
             cache,
             price_cache: Arc::new(PriceCache::new(
-                sqrt_price_x96_to_price(sqrt_price_x96.to::<U256>()),
+                sqrt_price_x96_to_price(sqrt_price_x96),
                 fee,
             )),
         }
@@ -2696,7 +2737,7 @@ mod tests {
         *pool.state.read()
     }
 
-    fn basic_pool(ticks: &[(i32, TickInfo)]) -> Pool {
+    fn basic_pool(ticks: &[(TickIndex, TickInfo)]) -> Pool {
         make_pool(
             sqrt_price_1_1(),
             0,
@@ -2710,12 +2751,12 @@ mod tests {
     fn make_params(
         zero_for_one: bool,
         amount: SignedAmount,
-        sqrt_price_limit_x96: U160,
+        sqrt_price_limit_x96: SqrtPriceX96,
     ) -> SwapParams {
         SwapParams {
             zero_for_one,
             amount,
-            sqrt_price_limit_x96: sqrt_price_limit_x96.to::<U256>(),
+            sqrt_price_limit_x96,
             #[cfg(feature = "protocol-fee")]
             protocol_fee: None,
         }
@@ -2731,7 +2772,7 @@ mod tests {
             .simulate_swap(make_params(
                 true,
                 SignedAmount::negative(U256::ZERO),
-                get_sqrt_price_at_tick(-120).unwrap(),
+                sqrt_at(-120),
             ))
             .expect("zero-amount swap should succeed");
 
@@ -2746,7 +2787,7 @@ mod tests {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
         let before = read_pool_state(&pool);
-        let limit = get_sqrt_price_at_tick(-120).unwrap();
+        let limit = sqrt_at(-120);
 
         let result = pool
             .swap(make_params(true, SignedAmount::negative(ether(1)), limit))
@@ -2764,7 +2805,7 @@ mod tests {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
         let before = read_pool_state(&pool);
-        let limit = get_sqrt_price_at_tick(-120).unwrap();
+        let limit = sqrt_at(-120);
 
         let result = pool
             .simulate_swap(make_params(true, SignedAmount::negative(ether(1)), limit))
@@ -2781,11 +2822,7 @@ mod tests {
     fn light_and_full_simulation_match_final_result() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let params = make_params(
-            true,
-            SignedAmount::negative(ether(1)),
-            get_sqrt_price_at_tick(-120).unwrap(),
-        );
+        let params = make_params(true, SignedAmount::negative(ether(1)), sqrt_at(-120));
 
         let light = pool
             .simulate_swap(params)
@@ -2810,7 +2847,7 @@ mod tests {
         let params = make_params(
             true,
             SignedAmount::positive(U256::from(1_000_000_000_000u128)),
-            get_sqrt_price_at_tick(-120).unwrap(),
+            sqrt_at(-120),
         );
 
         let light = pool
@@ -2833,7 +2870,7 @@ mod tests {
     fn zero_for_one_exact_in_delta_signs() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let limit = get_sqrt_price_at_tick(-120).unwrap();
+        let limit = sqrt_at(-120);
 
         let result = pool
             .simulate_swap(make_params(true, SignedAmount::negative(ether(1)), limit))
@@ -2852,7 +2889,7 @@ mod tests {
     fn one_for_zero_exact_in_delta_signs() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let limit = get_sqrt_price_at_tick(120).unwrap();
+        let limit = sqrt_at(120);
 
         let result = pool
             .simulate_swap(make_params(false, SignedAmount::negative(ether(1)), limit))
@@ -2870,7 +2907,7 @@ mod tests {
     fn zero_for_one_price_moves_down() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let limit = get_sqrt_price_at_tick(-120).unwrap();
+        let limit = sqrt_at(-120);
 
         let before_price = read_pool_state(&pool).sqrt_price_x96;
         let result = pool
@@ -2878,17 +2915,14 @@ mod tests {
             .unwrap();
 
         assert!(result.sqrt_price_x96 <= before_price, "price must not rise");
-        assert!(
-            result.sqrt_price_x96 >= limit.to::<U256>(),
-            "price must not cross limit"
-        );
+        assert!(result.sqrt_price_x96 >= limit, "price must not cross limit");
     }
 
     #[test]
     fn one_for_zero_price_moves_up() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let limit = get_sqrt_price_at_tick(120).unwrap();
+        let limit = sqrt_at(120);
 
         let before_price = read_pool_state(&pool).sqrt_price_x96;
         let result = pool
@@ -2896,17 +2930,14 @@ mod tests {
             .unwrap();
 
         assert!(result.sqrt_price_x96 >= before_price, "price must not fall");
-        assert!(
-            result.sqrt_price_x96 <= limit.to::<U256>(),
-            "price must not cross limit"
-        );
+        assert!(result.sqrt_price_x96 <= limit, "price must not cross limit");
     }
 
     #[test]
     fn amount_in_and_out_are_consistent_with_raw_delta() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let limit = get_sqrt_price_at_tick(-120).unwrap();
+        let limit = sqrt_at(-120);
 
         let result = pool
             .simulate_swap(make_params(true, SignedAmount::negative(ether(1)), limit))
@@ -2998,7 +3029,7 @@ mod tests {
             .simulate_swap(make_params(
                 true,
                 SignedAmount::positive(U256::from(requested)),
-                get_sqrt_price_at_tick(-120).unwrap(),
+                sqrt_at(-120),
             ))
             .expect("exact-out swap should succeed");
 
@@ -3017,13 +3048,13 @@ mod tests {
             .simulate_swap_full(make_params(
                 true,
                 SignedAmount::negative(ether(100)),
-                get_sqrt_price_at_tick(-240).unwrap(),
+                sqrt_at(-240),
             ))
             .unwrap();
 
         // The swap crossed tick -120, so crossing metadata must be present.
         assert_eq!(result.crossings.len(), 1);
-        assert_eq!(result.crossings[0].tick, -120);
+        assert_eq!(result.crossings[0].tick, tick(-120));
 
         // Cumulative input is bounded by total input.
         let total_input = U256::from(delta_amount_in(&result.delta, true));
@@ -3031,7 +3062,7 @@ mod tests {
         assert!(result.crossings[0].cumulative_input <= total_input);
 
         // Liquidity is drained below the active range.
-        assert_eq!(result.crossings[0].liquidity_after, 0);
+        assert_eq!(result.crossings[0].liquidity_after, Liquidity::ZERO);
     }
 
     #[test]
@@ -3044,7 +3075,7 @@ mod tests {
             .simulate_swap_full(make_params(
                 true,
                 SignedAmount::negative(U256::from(1_000u128)),
-                get_sqrt_price_at_tick(-1).unwrap(),
+                sqrt_at(-1),
             ))
             .unwrap();
 
@@ -3060,7 +3091,7 @@ mod tests {
             .simulate_swap_full(make_params(
                 true,
                 SignedAmount::positive(U256::from(1_000_000u128)),
-                get_sqrt_price_at_tick(-240).unwrap(),
+                sqrt_at(-240),
             ))
             .unwrap();
 
@@ -3072,7 +3103,7 @@ mod tests {
 
     fn one_range_pool(liq: u128) -> Pool {
         make_pool(
-            get_sqrt_price_at_tick(0).unwrap(),
+            sqrt_at(0),
             0,
             liq,
             3_000,
@@ -3093,12 +3124,16 @@ mod tests {
             .simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(100)),
-                get_sqrt_price_at_tick(-240).unwrap(),
+                sqrt_at(-240),
             ))
             .expect("swap should succeed");
 
-        assert!(result.tick <= -120, "must have crossed tick -120");
-        assert_eq!(result.liquidity, 0, "no liquidity below range");
+        assert!(result.tick <= tick(-120), "must have crossed tick -120");
+        assert_eq!(
+            result.liquidity,
+            Liquidity::ZERO,
+            "no liquidity below range"
+        );
     }
 
     #[test]
@@ -3110,12 +3145,16 @@ mod tests {
             .simulate_swap(make_params(
                 false,
                 SignedAmount::negative(ether(100)),
-                get_sqrt_price_at_tick(240).unwrap(),
+                sqrt_at(240),
             ))
             .expect("swap should succeed");
 
-        assert!(result.tick >= 120, "must have crossed tick 120");
-        assert_eq!(result.liquidity, 0, "no liquidity above range");
+        assert!(result.tick >= tick(120), "must have crossed tick 120");
+        assert_eq!(
+            result.liquidity,
+            Liquidity::ZERO,
+            "no liquidity above range"
+        );
     }
 
     #[test]
@@ -3124,36 +3163,37 @@ mod tests {
         let liq = 1_000_000_000_000u128;
 
         let result = pool
-            .modify_liquidity(ModifyLiquidityParams::new(-120, 120, liq as i128))
+            .modify_liquidity(ModifyLiquidityParams::new(
+                tick(-120),
+                tick(120),
+                liq as i128,
+            ))
             .expect("add should succeed");
 
-        assert_eq!(result.liquidity, liq);
+        assert_eq!(result.liquidity, Liquidity::new(liq));
         // Liquidity delta is caller / PoolManager perspective: caller owes tokens when LP adds.
         assert!(result.delta.amount0 < 0, "caller pays token0");
         assert!(result.delta.amount1 < 0, "caller pays token1");
         assert!(result.flipped_lower && result.flipped_upper);
 
         let ticks = pool.ticks.read();
-        assert_eq!(ticks.get(-120).unwrap().liquidity_net, liq as i128);
-        assert_eq!(ticks.get(120).unwrap().liquidity_net, -(liq as i128));
+        assert_eq!(ticks.get(tick(-120)).unwrap().liquidity_net, liq as i128);
+        assert_eq!(ticks.get(tick(120)).unwrap().liquidity_net, -(liq as i128));
     }
 
     #[test]
     fn add_liquidity_below_range_only_token0() {
-        let pool = make_pool(
-            get_sqrt_price_at_tick(-240).unwrap(),
-            -240,
-            0,
-            3_000,
-            60,
-            [],
-        );
+        let pool = make_pool(sqrt_at(-240), -240, 0, 3_000, 60, []);
 
         let result = pool
-            .modify_liquidity(ModifyLiquidityParams::new(-120, 120, 1_000_000_000_000i128))
+            .modify_liquidity(ModifyLiquidityParams::new(
+                tick(-120),
+                tick(120),
+                1_000_000_000_000i128,
+            ))
             .expect("add should succeed");
 
-        assert_eq!(result.liquidity, 0, "out-of-range position");
+        assert_eq!(result.liquidity, Liquidity::ZERO, "out-of-range position");
 
         // Price below range: adding liquidity requires only token0 from the caller.
         assert!(result.delta.amount0 < 0, "caller pays token0");
@@ -3165,39 +3205,27 @@ mod tests {
         let pool = make_pool(sqrt_price_1_1(), 0, 0, 3_000, 60, []);
         let liq = 1_000_000_000_000i128;
 
-        pool.modify_liquidity(ModifyLiquidityParams::new(-120, 120, liq))
+        pool.modify_liquidity(ModifyLiquidityParams::new(tick(-120), tick(120), liq))
             .unwrap();
 
         let result = pool
-            .modify_liquidity(ModifyLiquidityParams::new(-120, 120, -liq))
+            .modify_liquidity(ModifyLiquidityParams::new(tick(-120), tick(120), -liq))
             .expect("remove should succeed");
 
-        assert_eq!(result.liquidity, 0);
+        assert_eq!(result.liquidity, Liquidity::ZERO);
         // Removing liquidity means the caller receives tokens back from the pool.
         assert!(result.delta.amount0 > 0, "caller receives token0");
         assert!(result.delta.amount1 > 0, "caller receives token1");
         assert!(result.flipped_lower && result.flipped_upper);
 
         let ticks = pool.ticks.read();
-        assert!(ticks.get(-120).is_none());
-        assert!(ticks.get(120).is_none());
+        assert!(ticks.get(tick(-120)).is_none());
+        assert!(ticks.get(tick(120)).is_none());
     }
 
     #[test]
     fn rejects_out_of_range_state_tick() {
-        let ticks = basic_ticks();
-        let pool = basic_pool(&ticks);
-        pool.state.write().tick = MIN_TICK - 1;
-
-        assert_eq!(
-            pool.simulate_swap(make_params(
-                true,
-                SignedAmount::negative(ether(1)),
-                get_sqrt_price_at_tick(-60).unwrap(),
-            ))
-            .unwrap_err(),
-            SwapSimError::InvalidTick
-        );
+        assert!(TickIndex::new(MIN_TICK - 1).is_none());
     }
 
     #[test]
@@ -3216,7 +3244,7 @@ mod tests {
             .simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(1)),
-                get_sqrt_price_at_tick(-60).unwrap(),
+                sqrt_at(-60),
             ))
             .expect("V4 allows 100% fee for exact-input");
 
@@ -3235,7 +3263,7 @@ mod tests {
             pool.simulate_swap(make_params(
                 true,
                 SignedAmount::positive(U256::from(1_000_000u128)),
-                get_sqrt_price_at_tick(-60).unwrap(),
+                sqrt_at(-60),
             ))
             .unwrap_err(),
             SwapSimError::FeeTooLarge
@@ -3252,7 +3280,7 @@ mod tests {
             pool.simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(1)),
-                get_sqrt_price_at_tick(-60).unwrap(),
+                sqrt_at(-60),
             ))
             .unwrap_err(),
             SwapSimError::InvalidTickSpacing
@@ -3268,7 +3296,7 @@ mod tests {
             pool.simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(1)),
-                get_sqrt_price_at_tick(1).unwrap(),
+                sqrt_at(1),
             ))
             .unwrap_err(),
             SwapSimError::PriceLimitAlreadyExceeded
@@ -3284,7 +3312,7 @@ mod tests {
             pool.simulate_swap(make_params(
                 false,
                 SignedAmount::negative(ether(1)),
-                get_sqrt_price_at_tick(-1).unwrap(),
+                sqrt_at(-1),
             ))
             .unwrap_err(),
             SwapSimError::PriceLimitAlreadyExceeded
@@ -3300,7 +3328,7 @@ mod tests {
             pool.simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(1)),
-                test_min_sqrt_price() - U160::ONE,
+                invalid_sqrt_from_u160(test_min_sqrt_price() - U160::ONE),
             ))
             .unwrap_err(),
             SwapSimError::PriceLimitOutOfBounds
@@ -3311,13 +3339,14 @@ mod tests {
     fn rejects_invalid_pool_sqrt_price() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        pool.state.write().sqrt_price_x96 = (test_min_sqrt_price() - U160::ONE).to::<U256>();
+        pool.state.write().sqrt_price_x96 =
+            invalid_sqrt_from_u160(test_min_sqrt_price() - U160::ONE);
 
         assert_eq!(
             pool.simulate_swap(make_params(
                 true,
                 SignedAmount::negative(ether(1)),
-                test_min_sqrt_price(),
+                sqrt_from_u160(test_min_sqrt_price()),
             ))
             .unwrap_err(),
             SwapSimError::InvalidPoolSqrtPrice
@@ -3341,8 +3370,8 @@ mod tests {
     fn next_tick_down_returns_tick_at_current() {
         let ticks = tick_pool_for_search();
         let guard = ticks.read();
-        let next = guard.next_initialized_tick(0, true);
-        assert_eq!(next.tick_next, 0);
+        let next = guard.next_initialized_tick(tick(0), true);
+        assert_eq!(next.tick_next, tick(0));
         assert!(next.initialized);
     }
 
@@ -3350,8 +3379,8 @@ mod tests {
     fn next_tick_up_skips_current() {
         let ticks = tick_pool_for_search();
         let guard = ticks.read();
-        let next = guard.next_initialized_tick(0, false);
-        assert_eq!(next.tick_next, 240);
+        let next = guard.next_initialized_tick(tick(0), false);
+        assert_eq!(next.tick_next, tick(240));
         assert!(next.initialized);
     }
 
@@ -3360,19 +3389,19 @@ mod tests {
         let ticks = PoolTicks::from_snapshot(60, [tick_info(120, 0, 1)].into()).unwrap();
         let guard = ticks.read();
 
-        let down = guard.next_initialized_tick(50, true);
-        assert_eq!(down.tick_next, MIN_TICK);
+        let down = guard.next_initialized_tick(tick(50), true);
+        assert_eq!(down.tick_next, TickIndex::MIN);
         assert!(!down.initialized);
 
-        let up = guard.next_initialized_tick(120, false);
-        assert_eq!(up.tick_next, MAX_TICK);
+        let up = guard.next_initialized_tick(tick(120), false);
+        assert_eq!(up.tick_next, TickIndex::MAX);
         assert!(!up.initialized);
     }
 
     #[test]
     fn max_liquidity_matches_formula() {
         for &ts in &[1i32, 10, 60, 200, 32_767] {
-            let result = tick_spacing_to_max_liquidity_per_tick(ts);
+            let result = tick_spacing_to_max_liquidity_per_tick(ts as u32);
             let min_c = MIN_TICK.div_euclid(ts);
             let max_c = MAX_TICK.div_euclid(ts);
             let num_ticks = (max_c - min_c + 1) as u128;
@@ -3398,10 +3427,10 @@ mod tests {
                 tick_info(-600, liq as i128, liq),
                 tick_info(600, -(liq as i128), liq),
             ];
-            let pool = make_pool(get_sqrt_price_at_tick(0).unwrap(), 0, liq, fee, 60, ticks);
+            let pool = make_pool(sqrt_at(0), 0, liq, fee, 60, ticks);
 
             let limit_tick = if zero_for_one { -limit_tick_offset } else { limit_tick_offset };
-            let limit = get_sqrt_price_at_tick(limit_tick).unwrap();
+            let limit = sqrt_at(limit_tick);
             let amount = if exact_in {
                 SignedAmount::negative(U256::from(amount_raw))
             } else {
@@ -3412,13 +3441,13 @@ mod tests {
                 .simulate_swap(make_params(zero_for_one, amount, limit))
                 .expect("swap should succeed");
 
-            let before_price = get_sqrt_price_at_tick(0).unwrap();
+            let before_price = sqrt_at(0);
             if zero_for_one {
-                prop_assert!(result.sqrt_price_x96 <= before_price.to::<U256>(), "price rose on zeroForOne");
-                prop_assert!(result.sqrt_price_x96 >= limit.to::<U256>(), "price crossed limit going down");
+                prop_assert!(result.sqrt_price_x96 <= before_price, "price rose on zeroForOne");
+                prop_assert!(result.sqrt_price_x96 >= limit, "price crossed limit going down");
             } else {
-                prop_assert!(result.sqrt_price_x96 >= before_price.to::<U256>(), "price fell on oneForZero");
-                prop_assert!(result.sqrt_price_x96 <= limit.to::<U256>(), "price crossed limit going up");
+                prop_assert!(result.sqrt_price_x96 >= before_price, "price fell on oneForZero");
+                prop_assert!(result.sqrt_price_x96 <= limit, "price crossed limit going up");
             }
         }
 
@@ -3432,13 +3461,13 @@ mod tests {
                 tick_info(-600, liq as i128, liq),
                 tick_info(600, -(liq as i128), liq),
             ];
-            let pool = make_pool(get_sqrt_price_at_tick(0).unwrap(), 0, liq, 3_000, 60, ticks);
+            let pool = make_pool(sqrt_at(0), 0, liq, 3_000, 60, ticks);
 
             let result = pool
                 .simulate_swap(make_params(
                     zero_for_one,
                     SignedAmount::negative(U256::from(amount_raw)),
-                    extreme_price_limit(zero_for_one).to::<U160>(),
+                    extreme_price_limit(zero_for_one),
                 ))
                 .expect("swap should succeed");
 
@@ -3469,13 +3498,13 @@ mod tests {
                 tick_info(-600, liq as i128, liq),
                 tick_info(600, -(liq as i128), liq),
             ];
-            let pool = make_pool(get_sqrt_price_at_tick(0).unwrap(), 0, liq, 3_000, 60, ticks);
+            let pool = make_pool(sqrt_at(0), 0, liq, 3_000, 60, ticks);
 
             let result = pool
                 .simulate_swap(make_params(
                     zero_for_one,
                     SignedAmount::positive(U256::from(amount_raw)),
-                    extreme_price_limit(zero_for_one).to::<U160>(),
+                    extreme_price_limit(zero_for_one),
                 ))
                 .expect("swap should succeed");
 

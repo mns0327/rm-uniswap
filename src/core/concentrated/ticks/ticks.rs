@@ -11,12 +11,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::{
     Error as SwapSimError,
     core::{
-        math::tick::{MAX_TICK, MAX_TICK_SPACING, MIN_TICK},
-        types::{NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate},
+        math::tick::MAX_TICK_SPACING,
+        types::{NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate, tick::TickIndex},
     },
 };
 
-pub const MIN_TICK_SPACING: i32 = 1;
+pub const MIN_TICK_SPACING: u32 = 1;
 
 /// Ordered initialized tick store for a pool.
 ///
@@ -26,8 +26,8 @@ pub const MIN_TICK_SPACING: i32 = 1;
 /// `range()` in `O(log n)` without allocating a sorted vector per swap.
 #[derive(Debug, Clone)]
 pub struct PoolTicks {
-    tick_spacing: i32,
-    inner: Arc<RwLock<BTreeMap<i32, TickInfo>>>,
+    tick_spacing: u32,
+    inner: Arc<RwLock<BTreeMap<TickIndex, TickInfo>>>,
 }
 
 impl Serialize for PoolTicks {
@@ -51,7 +51,7 @@ impl<'de> Deserialize<'de> for PoolTicks {
 
 impl PoolTicks {
     /// Create an empty initialized-tick store for one pool.
-    pub fn new(tick_spacing: i32) -> Result<Self, SwapSimError> {
+    pub fn new(tick_spacing: u32) -> Result<Self, SwapSimError> {
         validate_tick_spacing(tick_spacing)?;
         Ok(Self {
             tick_spacing,
@@ -62,12 +62,12 @@ impl PoolTicks {
     /// Return the pool tick spacing this tick store was validated against.
     #[inline]
     #[must_use]
-    pub fn tick_spacing(&self) -> i32 {
+    pub fn tick_spacing(&self) -> u32 {
         self.tick_spacing
     }
 
     /// Returns a serializable snapshot of all tick data as a map.
-    pub fn snapshot(&self) -> BTreeMap<i32, TickInfo> {
+    pub fn snapshot(&self) -> BTreeMap<TickIndex, TickInfo> {
         self.inner.read().clone()
     }
 
@@ -82,8 +82,8 @@ impl PoolTicks {
 
     /// Rebuilds a PoolTicks from a snapshot.
     pub fn from_snapshot(
-        tick_spacing: i32,
-        ticks: BTreeMap<i32, TickInfo>,
+        tick_spacing: u32,
+        ticks: BTreeMap<TickIndex, TickInfo>,
     ) -> Result<Self, SwapSimError> {
         let pool_ticks = Self::new(tick_spacing)?;
         for (tick_idx, info) in ticks {
@@ -100,7 +100,7 @@ impl PoolTicks {
     ///
     /// Passing `liquidity_gross == 0` removes the tick. This matches the desired
     /// invariant that the map contains initialized ticks only.
-    pub fn set(&self, tick_idx: i32, info: TickInfo) -> Result<(), SwapSimError> {
+    pub fn set(&self, tick_idx: TickIndex, info: TickInfo) -> Result<(), SwapSimError> {
         validate_tick_index_for_spacing(tick_idx, self.tick_spacing)?;
 
         let mut ticks = self.inner.write();
@@ -114,7 +114,7 @@ impl PoolTicks {
 
     /// Remove a tick boundary from the initialized set.
     #[inline]
-    pub fn remove(&self, tick_idx: i32) -> Result<Option<TickInfo>, SwapSimError> {
+    pub fn remove(&self, tick_idx: TickIndex) -> Result<Option<TickInfo>, SwapSimError> {
         validate_tick_index_for_spacing(tick_idx, self.tick_spacing)?;
         Ok(self.inner.write().remove(&tick_idx))
     }
@@ -141,13 +141,13 @@ impl PoolTicks {
 ///
 /// The swap loop should use this API instead of reaching into the map directly.
 pub struct PoolTicksReadGuard<'a> {
-    inner: RwLockReadGuard<'a, BTreeMap<i32, TickInfo>>,
+    inner: RwLockReadGuard<'a, BTreeMap<TickIndex, TickInfo>>,
 }
 
 impl<'a> PoolTicksReadGuard<'a> {
     /// Returns an owned copy of the initialized ticks while retaining the read
     /// lock for the caller's surrounding state snapshot.
-    pub fn snapshot(&self) -> BTreeMap<i32, TickInfo> {
+    pub fn snapshot(&self) -> BTreeMap<TickIndex, TickInfo> {
         self.inner.clone()
     }
 
@@ -157,7 +157,7 @@ impl<'a> PoolTicksReadGuard<'a> {
     #[must_use]
     pub fn next_initialized_tick(
         &self,
-        current_tick: i32,
+        current_tick: TickIndex,
         zero_for_one: bool,
     ) -> NextInitializedTick {
         if zero_for_one {
@@ -169,7 +169,7 @@ impl<'a> PoolTicksReadGuard<'a> {
                     initialized: true,
                 })
                 .unwrap_or(NextInitializedTick {
-                    tick_next: MIN_TICK,
+                    tick_next: TickIndex::MIN,
                     initialized: false,
                 })
         } else {
@@ -181,7 +181,7 @@ impl<'a> PoolTicksReadGuard<'a> {
                     initialized: true,
                 })
                 .unwrap_or(NextInitializedTick {
-                    tick_next: MAX_TICK,
+                    tick_next: TickIndex::MAX,
                     initialized: false,
                 })
         }
@@ -193,7 +193,7 @@ impl<'a> PoolTicksReadGuard<'a> {
     /// negates it for `zeroForOne`. This method combines those two steps while
     /// keeping the same semantics.
     #[inline]
-    pub fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError> {
+    pub fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError> {
         let info = self
             .inner
             .get(&tick_next)
@@ -206,7 +206,7 @@ impl<'a> PoolTicksReadGuard<'a> {
     /// Return a copy of a tick if it exists. Useful for tests and diagnostics.
     #[inline]
     #[must_use]
-    pub fn get(&self, tick_idx: i32) -> Option<TickInfo> {
+    pub fn get(&self, tick_idx: TickIndex) -> Option<TickInfo> {
         self.inner.get(&tick_idx).copied()
     }
 
@@ -222,7 +222,7 @@ impl<'a> PoolTicksReadGuard<'a> {
         self.inner.is_empty()
     }
 
-    pub fn first_tick(&self) -> i32 {
+    pub fn first_tick(&self) -> TickIndex {
         self.inner
             .keys()
             .copied()
@@ -230,7 +230,7 @@ impl<'a> PoolTicksReadGuard<'a> {
             .expect("ticks not initialized")
     }
 
-    pub fn last_tick(&self) -> i32 {
+    pub fn last_tick(&self) -> TickIndex {
         self.inner
             .keys()
             .copied()
@@ -245,15 +245,15 @@ impl<'a> PoolTicksReadGuard<'a> {
 /// `liquidity_gross`, adjusts `liquidity_net` with the lower/upper tick sign
 /// convention, and removes the tick when gross liquidity returns to zero.
 pub struct PoolTicksWriteGuard<'a> {
-    tick_spacing: i32,
-    inner: RwLockWriteGuard<'a, BTreeMap<i32, TickInfo>>,
+    tick_spacing: u32,
+    inner: RwLockWriteGuard<'a, BTreeMap<TickIndex, TickInfo>>,
 }
 
 impl<'a> PoolTicksWriteGuard<'a> {
     #[inline]
     pub fn next_initialized_tick(
         &self,
-        current_tick: i32,
+        current_tick: TickIndex,
         zero_for_one: bool,
     ) -> NextInitializedTick {
         if zero_for_one {
@@ -265,7 +265,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
                     initialized: true,
                 })
                 .unwrap_or(NextInitializedTick {
-                    tick_next: MIN_TICK,
+                    tick_next: TickIndex::MIN,
                     initialized: false,
                 })
         } else {
@@ -277,14 +277,14 @@ impl<'a> PoolTicksWriteGuard<'a> {
                     initialized: true,
                 })
                 .unwrap_or(NextInitializedTick {
-                    tick_next: MAX_TICK,
+                    tick_next: TickIndex::MAX,
                     initialized: false,
                 })
         }
     }
 
     #[inline]
-    pub fn cross_tick(&self, tick_next: i32) -> Result<i128, SwapSimError> {
+    pub fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError> {
         self.inner
             .get(&tick_next)
             .map(|info| info.liquidity_net)
@@ -332,7 +332,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
     }
 
     #[inline]
-    fn apply_tick_update(&mut self, tick_idx: i32, after: Option<TickInfo>) {
+    fn apply_tick_update(&mut self, tick_idx: TickIndex, after: Option<TickInfo>) {
         if let Some(info) = after {
             self.inner.insert(tick_idx, info);
         } else {
@@ -347,7 +347,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
     /// liquidity net decreases when liquidity is added.
     pub fn update_tick(
         &mut self,
-        tick_idx: i32,
+        tick_idx: TickIndex,
         liquidity_delta: i128,
         upper: bool,
     ) -> Result<TickUpdate, SwapSimError> {
@@ -369,8 +369,8 @@ impl<'a> PoolTicksWriteGuard<'a> {
     /// partial mutation if the upper tick underflows or max-liquidity checks fail.
     pub fn update_tick_pair(
         &mut self,
-        tick_lower: i32,
-        tick_upper: i32,
+        tick_lower: TickIndex,
+        tick_upper: TickIndex,
         liquidity_delta: i128,
         max_liquidity_per_tick: Option<u128>,
     ) -> Result<(TickUpdate, TickUpdate), SwapSimError> {
@@ -413,9 +413,9 @@ impl<'a> PoolTicksWriteGuard<'a> {
     /// the current global fee growth.
     pub fn initialize_fee_growth_if_needed(
         &mut self,
-        tick_idx: i32,
+        tick_idx: TickIndex,
         was_uninitialized: bool,
-        current_tick: i32,
+        current_tick: TickIndex,
         fee_growth_global0_x128: U256,
         fee_growth_global1_x128: U256,
     ) {
@@ -431,7 +431,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
     /// Apply Uniswap's fee-growth transition when price crosses a tick.
     pub fn cross_fee_growth(
         &mut self,
-        tick_idx: i32,
+        tick_idx: TickIndex,
         fee_growth_global0_x128: U256,
         fee_growth_global1_x128: U256,
     ) -> Result<(), SwapSimError> {
@@ -449,14 +449,14 @@ impl<'a> PoolTicksWriteGuard<'a> {
     /// Return a copy of a tick if it exists. Useful for tests and diagnostics.
     #[inline]
     #[must_use]
-    pub fn get(&self, tick_idx: i32) -> Option<TickInfo> {
+    pub fn get(&self, tick_idx: TickIndex) -> Option<TickInfo> {
         self.inner.get(&tick_idx).copied()
     }
 }
 
 /// Reject tick spacings outside `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
 #[inline]
-fn validate_tick_spacing(tick_spacing: i32) -> Result<(), SwapSimError> {
+fn validate_tick_spacing(tick_spacing: u32) -> Result<(), SwapSimError> {
     if !(MIN_TICK_SPACING..=MAX_TICK_SPACING).contains(&tick_spacing) {
         Err(SwapSimError::InvalidTickSpacing)
     } else {
@@ -464,27 +464,14 @@ fn validate_tick_spacing(tick_spacing: i32) -> Result<(), SwapSimError> {
     }
 }
 
-/// Reject a single tick index outside `[MIN_TICK, MAX_TICK]`.
-///
-/// Used to validate both `state.tick` and individual tick-array entries.
-#[inline]
-fn validate_tick_range(tick: i32) -> Result<(), SwapSimError> {
-    if !(MIN_TICK..=MAX_TICK).contains(&tick) {
-        Err(SwapSimError::InvalidTick)
-    } else {
-        Ok(())
-    }
-}
-
+// TODO: remove method
 /// Reject a tick index outside the absolute range or not aligned to spacing.
 #[inline]
-fn validate_tick_index_for_spacing(tick: i32, tick_spacing: i32) -> Result<(), SwapSimError> {
-    validate_tick_range(tick)?;
-
-    if tick % tick_spacing != 0 {
-        Err(SwapSimError::InvalidTick)
-    } else {
+fn validate_tick_index_for_spacing(tick: TickIndex, tick_spacing: u32) -> Result<(), SwapSimError> {
+    if tick.for_spacing(tick_spacing) {
         Ok(())
+    } else {
+        Err(SwapSimError::InvalidTick)
     }
 }
 

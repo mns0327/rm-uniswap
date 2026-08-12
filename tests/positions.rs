@@ -1,16 +1,27 @@
 #![cfg(feature = "positions")]
 
 use alloy::primitives::Address;
-use rm_uniswap::v4::{Pool, PoolTicks, SignedAmount, SwapParams, positions::PositionManager};
+use rm_uniswap::v4::{
+    positions::PositionManager, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams,
+    TickIndex,
+};
 use ruint::aliases::U256;
 #[cfg(feature = "v4-hooks")]
 use std::sync::Arc;
 
+fn tick(index: i32) -> TickIndex {
+    TickIndex::new(index).unwrap()
+}
+
+fn sqrt_price_1_1() -> SqrtPriceX96 {
+    SqrtPriceX96::from_u256(U256::ONE << 96u32).unwrap()
+}
+
 fn empty_pool() -> Pool {
     Pool::new(
-        U256::ONE << 96u32,
-        0,
-        0,
+        sqrt_price_1_1(),
+        tick(0),
+        Liquidity::ZERO,
         3_000,
         60,
         PoolTicks::new(60).unwrap(),
@@ -22,7 +33,14 @@ fn returns_fee_delta_separately_from_principal() {
     let owner = Address::repeat_byte(0x22);
     let manager = PositionManager::new(empty_pool());
     let minted = manager
-        .mint(owner, -120, 120, 1_000_000_000_000, u128::MAX, u128::MAX)
+        .mint(
+            owner,
+            tick(-120),
+            tick(120),
+            1_000_000_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
         .unwrap();
 
     manager
@@ -50,7 +68,9 @@ fn slippage_failure_does_not_mutate_pool() {
     let manager = PositionManager::new(empty_pool());
     let before = *manager.pool().state.read();
 
-    assert!(manager.mint(owner, -120, 120, 1_000_000, 0, 0).is_err());
+    assert!(manager
+        .mint(owner, tick(-120), tick(120), 1_000_000, 0, 0)
+        .is_err());
     let after = *manager.pool().state.read();
     assert_eq!(before.liquidity, after.liquidity);
     assert!(manager.pool().ticks.read().is_empty());
@@ -61,10 +81,24 @@ fn fee_growth_outside_assigns_post_cross_fees_to_the_active_range() {
     let owner = Address::repeat_byte(0x44);
     let manager = PositionManager::new(empty_pool());
     let left = manager
-        .mint(owner, -120, 0, 1_000_000_000_000, u128::MAX, u128::MAX)
+        .mint(
+            owner,
+            tick(-120),
+            tick(0),
+            1_000_000_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
         .unwrap();
     let right = manager
-        .mint(owner, 0, 120, 1_000_000_000_000, u128::MAX, u128::MAX)
+        .mint(
+            owner,
+            tick(0),
+            tick(120),
+            1_000_000_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
         .unwrap();
 
     manager
@@ -84,8 +118,8 @@ fn fee_growth_outside_assigns_post_cross_fees_to_the_active_range() {
 #[test]
 fn v4_hook_failure_rolls_back_before_pool_mutation() {
     use rm_uniswap::{
-        Error,
         v4::positions::{LiquidityHook, ModifyRequest, ModifyResult},
+        Error,
     };
 
     struct Reject;
@@ -101,12 +135,17 @@ fn v4_hook_failure_rolls_back_before_pool_mutation() {
 
     let owner = Address::repeat_byte(0x55);
     let manager = PositionManager::with_hook(empty_pool(), Arc::new(Reject));
-    assert!(
-        manager
-            .mint(owner, -120, 120, 1_000_000, u128::MAX, u128::MAX)
-            .is_err()
-    );
-    assert_eq!(manager.pool().state.read().liquidity, 0);
+    assert!(manager
+        .mint(
+            owner,
+            tick(-120),
+            tick(120),
+            1_000_000,
+            u128::MAX,
+            u128::MAX
+        )
+        .is_err());
+    assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
     assert!(manager.pool().ticks.read().is_empty());
 }
 
@@ -114,8 +153,8 @@ fn v4_hook_failure_rolls_back_before_pool_mutation() {
 #[test]
 fn before_hook_failure_rolls_back_before_pool_mutation() {
     use rm_uniswap::{
-        Error,
         v4::positions::{LiquidityHook, ModifyRequest},
+        Error,
     };
 
     struct Reject;
@@ -129,11 +168,18 @@ fn before_hook_failure_rolls_back_before_pool_mutation() {
     let manager = PositionManager::with_hook(empty_pool(), Arc::new(Reject));
     assert_eq!(
         manager
-            .mint(owner, -120, 120, 1_000_000, u128::MAX, u128::MAX)
+            .mint(
+                owner,
+                tick(-120),
+                tick(120),
+                1_000_000,
+                u128::MAX,
+                u128::MAX
+            )
             .unwrap_err(),
         Error::Unauthorized
     );
-    assert_eq!(manager.pool().state.read().liquidity, 0);
+    assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
     assert!(manager.pool().ticks.read().is_empty());
 }
 
@@ -142,8 +188,8 @@ fn before_hook_failure_rolls_back_before_pool_mutation() {
 fn hooks_run_in_before_then_after_order() {
     use parking_lot::Mutex;
     use rm_uniswap::v4::{
-        BalanceDelta,
         positions::{LiquidityHook, ModifyRequest, ModifyResult},
+        BalanceDelta,
     };
 
     struct Recorder(Arc<Mutex<Vec<&'static str>>>);
@@ -171,7 +217,14 @@ fn hooks_run_in_before_then_after_order() {
     let owner = Address::repeat_byte(0x57);
     let manager = PositionManager::with_hook(empty_pool(), Arc::new(Recorder(Arc::clone(&events))));
     manager
-        .mint(owner, -120, 120, 1_000_000, u128::MAX, u128::MAX)
+        .mint(
+            owner,
+            tick(-120),
+            tick(120),
+            1_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
         .unwrap();
 
     assert_eq!(&*events.lock(), &["before", "after"]);
@@ -214,7 +267,14 @@ fn hook_runs_without_holding_position_map_lock() {
     );
     let mint_manager = manager.clone();
     let mint_thread = std::thread::spawn(move || {
-        mint_manager.mint(owner, -120, 120, 1_000_000, u128::MAX, u128::MAX)
+        mint_manager.mint(
+            owner,
+            tick(-120),
+            tick(120),
+            1_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
     });
 
     entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -237,11 +297,11 @@ fn hook_runs_without_holding_position_map_lock() {
 #[test]
 fn hook_delta_overflow_fails_before_pool_or_position_mutation() {
     use rm_uniswap::{
-        Error,
         v4::{
-            BalanceDelta,
             positions::{LiquidityHook, ModifyRequest, ModifyResult},
+            BalanceDelta,
         },
+        Error,
     };
 
     struct OverflowOnCollect;
@@ -265,7 +325,14 @@ fn hook_delta_overflow_fails_before_pool_or_position_mutation() {
     let owner = Address::repeat_byte(0x59);
     let manager = PositionManager::with_hook(empty_pool(), Arc::new(OverflowOnCollect));
     let minted = manager
-        .mint(owner, -120, 120, 1_000_000_000_000, u128::MAX, u128::MAX)
+        .mint(
+            owner,
+            tick(-120),
+            tick(120),
+            1_000_000_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
         .unwrap();
     manager
         .pool()

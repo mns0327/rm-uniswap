@@ -5,10 +5,7 @@ use crate::{
         concentrated::ticks::{bitmap::HierBitmap, slab_value::TickSlabValue},
         types::{tick::TickIndex, tick_slab_indexer::TickSlabIndexer},
     },
-    v4::{
-        TickInfo,
-        tick_math::{MAX_TICK, MIN_TICK},
-    },
+    v4::TickInfo,
 };
 
 const INITIAL_CACHE_VALUE: u16 = u16::MAX;
@@ -317,7 +314,9 @@ impl TickSlab {
 /// Calculates the number of page buckets required to cover the protocol tick range.
 #[inline(always)]
 fn calculate_cache_cap(tick_spacing: u32) -> u16 {
-    (((MAX_TICK - MIN_TICK) as usize / tick_spacing as usize) >> 5) as u16 + 1
+    (((TickIndex::MAX.value() - TickIndex::MIN.value()) as usize / tick_spacing as usize) >> 5)
+        as u16
+        + 1
 }
 
 #[cfg(test)]
