@@ -97,6 +97,22 @@ impl SqrtPriceX96 {
         self.0 == Self::MAX.0
     }
 
+    /// Returns the loosest valid price limit for a given swap direction.
+    ///
+    /// Matches V4: zeroForOne swaps must stay strictly above
+    /// `MIN_SQRT_PRICE`; oneForZero swaps must stay strictly below
+    /// `MAX_SQRT_PRICE`.
+    #[inline(always)]
+    pub fn extreme_price_limit(zero_for_one: bool) -> Self {
+        if zero_for_one {
+            Self::from_u256(Self::MIN.as_u256() + U256::ONE)
+                .expect("MIN_SQRT_PRICE + 1 is a valid price")
+        } else {
+            Self::from_u256(Self::MAX.as_u256() - U256::ONE)
+                .expect("MAX_SQRT_PRICE - 1 is a valid price")
+        }
+    }
+
     /// Returns the greatest tick whose sqrt price is less than or equal to this value.
     ///
     /// This follows the same floor semantics as Uniswap `getTickAtSqrtRatio`.
@@ -297,6 +313,18 @@ mod tests {
         assert!(SqrtPriceX96::MAX.is_max());
         assert!(!SqrtPriceX96::MIN.is_max());
         assert!(!SqrtPriceX96::new(sqrt_price_1_1()).unwrap().is_max());
+    }
+
+    #[test]
+    fn extreme_price_limit_returns_strict_v4_bounds() {
+        assert_eq!(
+            SqrtPriceX96::extreme_price_limit(true).value(),
+            SqrtPriceX96::MIN.value() + U160::ONE
+        );
+        assert_eq!(
+            SqrtPriceX96::extreme_price_limit(false).value(),
+            SqrtPriceX96::MAX.value() - U160::ONE
+        );
     }
 
     #[test]

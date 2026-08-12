@@ -311,7 +311,7 @@ impl SwapParams {
         Self {
             zero_for_one,
             amount,
-            sqrt_price_limit_x96: extreme_price_limit(zero_for_one),
+            sqrt_price_limit_x96: SqrtPriceX96::extreme_price_limit(zero_for_one),
             #[cfg(feature = "protocol-fee")]
             protocol_fee: None,
         }
@@ -2140,21 +2140,6 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     Ok((light, crossings))
 }
 
-/// Returns the loosest valid price limit for a given swap direction.
-///
-/// Matches V4: zeroForOne must stay strictly above `MIN_SQRT_PRICE`;
-/// oneForZero must stay strictly below `MAX_SQRT_PRICE`.
-#[inline]
-fn extreme_price_limit(zero_for_one: bool) -> SqrtPriceX96 {
-    if zero_for_one {
-        SqrtPriceX96::from_u256(SqrtPriceX96::MIN.as_u256() + U256::ONE)
-            .expect("MIN_SQRT_PRICE + 1 is a valid price")
-    } else {
-        SqrtPriceX96::from_u256(SqrtPriceX96::MAX.as_u256() - U256::ONE)
-            .expect("MAX_SQRT_PRICE - 1 is a valid price")
-    }
-}
-
 /// Validate that tick_lower < tick_upper and both are aligned to tick_spacing.
 #[inline]
 fn check_ticks(
@@ -2553,34 +2538,21 @@ fn next_initialized_tick_within_one_word_fallback<G: TickCrossing + ?Sized>(
     }
 }
 
-/// Validate pool sqrt price and price limit against V4's revert conditions.
+/// Validate the price limit against the current pool price.
 fn validate_price_limit(
     state: &PoolState,
     zero_for_one: bool,
     limit: SqrtPriceX96,
 ) -> Result<(), SwapSimError> {
-    let min_price = SqrtPriceX96::MIN;
-    let max_price = SqrtPriceX96::MAX;
-
-    if !state.sqrt_price_x96.is_valid() {
-        return Err(SwapSimError::InvalidPoolSqrtPrice);
-    }
-
     if zero_for_one {
-        // V4: limit must be strictly below current price and strictly above MIN_SQRT_PRICE.
+        // V4: limit must be strictly below current price.
         if limit >= state.sqrt_price_x96 {
             return Err(SwapSimError::PriceLimitAlreadyExceeded);
         }
-        if limit <= min_price {
-            return Err(SwapSimError::PriceLimitOutOfBounds);
-        }
     } else {
-        // V4: limit must be strictly above current price and strictly below MAX_SQRT_PRICE.
+        // V4: limit must be strictly above current price.
         if limit <= state.sqrt_price_x96 {
             return Err(SwapSimError::PriceLimitAlreadyExceeded);
-        }
-        if limit >= max_price {
-            return Err(SwapSimError::PriceLimitOutOfBounds);
         }
     }
 
@@ -3265,22 +3237,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_limit_below_absolute_minimum() {
-        let ticks = basic_ticks();
-        let pool = basic_pool(&ticks);
-
-        assert_eq!(
-            pool.simulate_swap(make_params(
-                true,
-                SignedAmount::negative(ether(1)),
-                invalid_sqrt_from_u160(test_min_sqrt_price() - U160::ONE),
-            ))
-            .unwrap_err(),
-            SwapSimError::PriceLimitOutOfBounds
-        );
-    }
-
-    #[test]
     fn rejects_invalid_pool_sqrt_price() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
@@ -3398,7 +3354,7 @@ mod tests {
                 .simulate_swap(make_params(
                     zero_for_one,
                     SignedAmount::negative(U256::from(amount_raw)),
-                    extreme_price_limit(zero_for_one),
+                    SqrtPriceX96::extreme_price_limit(zero_for_one),
                 ))
                 .expect("swap should succeed");
 
@@ -3435,7 +3391,7 @@ mod tests {
                 .simulate_swap(make_params(
                     zero_for_one,
                     SignedAmount::positive(U256::from(amount_raw)),
-                    extreme_price_limit(zero_for_one),
+                    SqrtPriceX96::extreme_price_limit(zero_for_one),
                 ))
                 .expect("swap should succeed");
 
