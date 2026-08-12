@@ -3,7 +3,7 @@
 use alloy::primitives::Address;
 use rm_uniswap::v4::{
     positions::PositionManager, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams,
-    TickIndex,
+    TickIndex, TickSpacing,
 };
 use ruint::aliases::U256;
 #[cfg(feature = "v4-hooks")]
@@ -17,14 +17,18 @@ fn sqrt_price_1_1() -> SqrtPriceX96 {
     SqrtPriceX96::from_u256(U256::ONE << 96u32).unwrap()
 }
 
+fn tick_spacing_60() -> TickSpacing {
+    TickSpacing::new(60).unwrap()
+}
+
 fn empty_pool() -> Pool {
     Pool::new(
         sqrt_price_1_1(),
         tick(0),
         Liquidity::ZERO,
         3_000,
-        60,
-        PoolTicks::new(60).unwrap(),
+        tick_spacing_60(),
+        PoolTicks::new(tick_spacing_60()).unwrap(),
     )
 }
 

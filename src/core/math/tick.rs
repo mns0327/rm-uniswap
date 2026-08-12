@@ -11,9 +11,6 @@ use crate::core::types::{sqrt_price::SqrtPriceX96, tick::TickIndex};
 /// Error type retained for TickMath-compatible helper APIs.
 pub type TickMathError = crate::Error;
 
-/// Maximum tick spacing accepted by tick-spacing helper APIs.
-pub const MAX_TICK_SPACING: u32 = i16::MAX as u32;
-
 // Multipliers from Uniswap TickMath.sol, encoded as Q128 fixed-point values.
 // Entry k is floor(2^128 / sqrt(1.0001^(2^k))). Applying the entries for each
 // set bit in abs(tick) reconstructs sqrt(1.0001^tick) before final Q64.96

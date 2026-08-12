@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{core::types::sqrt_price::SqrtPriceX96, v4::tick_math::get_sqrt_price_at_tick};
+use crate::{
+    core::types::{sqrt_price::SqrtPriceX96, tick_spacing::TickSpacing},
+    v4::tick_math::get_sqrt_price_at_tick,
+};
 use std::ops::Deref;
 
 /// A validated tick index within the Uniswap v4 valid tick range
@@ -47,8 +50,8 @@ impl TickIndex {
     /// Uniswap pools only allow positions to start and end on ticks that are
     /// exact multiples of their configured spacing. Callers must pass a valid
     /// non-zero pool tick spacing.
-    pub fn for_spacing(&self, tick_spacing: u32) -> bool {
-        self.value() % tick_spacing as i32 == 0
+    pub fn for_spacing(&self, tick_spacing: TickSpacing) -> bool {
+        self.value() % tick_spacing.as_i32() == 0
     }
 }
 

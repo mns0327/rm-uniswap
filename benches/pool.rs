@@ -5,7 +5,9 @@
 use std::path::Path;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rm_uniswap::v4::{ModifyLiquidityParams, Pool, SignedAmount, SwapParams, TickIndex};
+use rm_uniswap::v4::{
+    ModifyLiquidityParams, Pool, SignedAmount, SwapParams, TickIndex, TickSpacing,
+};
 use ruint::aliases::U256;
 
 fn build_test_pool() -> Pool {
@@ -141,13 +143,10 @@ fn bench_pool(c: &mut Criterion) {
 fn bench_utils(c: &mut Criterion) {
     let mut group = c.benchmark_group("utils");
 
-    group.bench_function("tick_spacing_to_max_liquidity_per_tick", |b| {
+    group.bench_function("tick_spacing_max_liquidity_per_tick", |b| {
         b.iter(|| {
-            let ts = black_box(60i32);
-            let min_compressed = -887272i32.div_euclid(ts);
-            let max_compressed = 887272i32.div_euclid(ts);
-            let num_ticks = (max_compressed - min_compressed + 1) as u128;
-            black_box(u128::MAX / num_ticks)
+            let tick_spacing = black_box(TickSpacing::new(60).unwrap());
+            black_box(tick_spacing.max_liquidity_per_tick())
         })
     });
 

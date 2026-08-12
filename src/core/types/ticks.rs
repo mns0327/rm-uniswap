@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ruint::aliases::{U160, U256};
 use serde::{Deserialize, Serialize};
 
-use crate::core::types::tick::TickIndex;
+use crate::core::types::{tick::TickIndex, tick_spacing::TickSpacing};
 
 /// Tick data stored at an initialized tick boundary.
 ///
@@ -95,6 +95,6 @@ pub struct TickUpdate {
 /// through `PoolTicks::from_snapshot`, which validates every entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolTicksSnapshot {
-    pub tick_spacing: u32,
+    pub tick_spacing: TickSpacing,
     pub inner: BTreeMap<TickIndex, TickInfo>,
 }

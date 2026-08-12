@@ -1,3 +1,4 @@
+use crate::core::types::{liquidity::Liquidity, tick::TickIndex};
 use serde::{Deserialize, Serialize};
 
 use std::ops::Deref;
@@ -29,18 +30,35 @@ impl TickSpacing {
     }
 
     /// Returns the underlying raw tick-spacing value as `i16`.
+    #[inline(always)]
     pub const fn value(&self) -> i16 {
         self.0
     }
 
     /// Returns the underlying raw tick-spacing value as `u32`.
+    #[inline(always)]
     pub const fn as_u32(&self) -> u32 {
         self.0 as u32
     }
 
     /// Returns the underlying raw tick-spacing value as `i32`.
+    #[inline(always)]
     pub const fn as_i32(&self) -> i32 {
         self.0 as i32
+    }
+
+    /// Returns the maximum gross liquidity allowed at one initialized tick.
+    ///
+    /// Derived from the number of usable compressed ticks between
+    /// [`TickIndex::MIN`] and [`TickIndex::MAX`], matching Uniswap v4's
+    /// `Pool.tickSpacingToMaxLiquidityPerTick`.
+    #[inline(always)]
+    pub const fn max_liquidity_per_tick(&self) -> Liquidity {
+        let tick_spacing = self.as_i32();
+        let min_compressed = TickIndex::MIN.value().div_euclid(tick_spacing);
+        let max_compressed = TickIndex::MAX.value().div_euclid(tick_spacing);
+        let num_ticks = (max_compressed - min_compressed + 1) as u128;
+        Liquidity::new(u128::MAX / num_ticks)
     }
 }
 
@@ -149,6 +167,25 @@ mod tests {
     fn as_i32_returns_widened_signed_value() {
         let spacing = TickSpacing::new(200).unwrap();
         assert_eq!(spacing.as_i32(), 200i32);
+    }
+
+    // ---------- max_liquidity_per_tick() ----------
+
+    #[test]
+    fn max_liquidity_per_tick_matches_formula() {
+        for &raw in &[1i16, 10, 60, 200, i16::MAX] {
+            let spacing = TickSpacing::new(raw).unwrap();
+            let tick_spacing = raw as i32;
+            let min_compressed = TickIndex::MIN.value().div_euclid(tick_spacing);
+            let max_compressed = TickIndex::MAX.value().div_euclid(tick_spacing);
+            let num_ticks = (max_compressed - min_compressed + 1) as u128;
+
+            assert_eq!(
+                spacing.max_liquidity_per_tick(),
+                Liquidity::new(u128::MAX / num_ticks),
+                "mismatch at tick_spacing={raw}"
+            );
+        }
     }
 
     // ---------- Deref ----------

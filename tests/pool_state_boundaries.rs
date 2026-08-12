@@ -1,17 +1,19 @@
 use std::collections::BTreeMap;
 
 use rm_uniswap::{
-    Error,
     v4::{
-        Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex, TickInfo,
-        tick_math,
+        tick_math, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex,
+        TickInfo, TickSpacing,
     },
+    Error,
 };
 use ruint::aliases::U256;
 
 const LIQUIDITY: u128 = 1_000_000_000_000;
 const FEE: u32 = 3_000;
-const TICK_SPACING: u32 = 60;
+fn tick_spacing_60() -> TickSpacing {
+    TickSpacing::new(60).unwrap()
+}
 
 fn tick(index: i32) -> TickIndex {
     TickIndex::new(index).unwrap()
@@ -23,7 +25,7 @@ fn sqrt_price_1_1() -> SqrtPriceX96 {
 
 fn valid_pool() -> Pool {
     let ticks = PoolTicks::from_snapshot(
-        TICK_SPACING,
+        tick_spacing_60(),
         BTreeMap::from([
             (
                 tick(-60),
@@ -50,7 +52,7 @@ fn valid_pool() -> Pool {
         tick(0),
         Liquidity::new(LIQUIDITY),
         FEE,
-        TICK_SPACING,
+        tick_spacing_60(),
         ticks,
     )
     .unwrap()
@@ -59,7 +61,7 @@ fn valid_pool() -> Pool {
 #[test]
 fn snapshot_rejects_tick_spacing_mismatch() {
     let mut snapshot = valid_pool().snapshot();
-    snapshot.ticks.tick_spacing = 10;
+    snapshot.ticks.tick_spacing = TickSpacing::new(10).unwrap();
 
     assert_eq!(
         Pool::try_from(snapshot).unwrap_err(),

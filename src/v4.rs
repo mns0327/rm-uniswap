@@ -8,9 +8,9 @@
 /// must be updated.
 pub use crate::Error;
 pub use crate::core::concentrated::pool::{
-    FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot, PoolState,
-    SwapParams, SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in,
-    delta_amount_out, tick_spacing_to_max_liquidity_per_tick,
+    delta_amount_in, delta_amount_out, FullSwapResult, ModifyLiquidityParams,
+    ModifyLiquidityResult, Pool, PoolSnapshot, PoolState, SwapParams, SwapSimulationResult,
+    TickCrossInfo, TickCrossing,
 };
 pub use crate::core::concentrated::ticks::ticks::PoolTicks;
 pub use crate::core::math::{
@@ -23,6 +23,7 @@ pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::signed::I256 as SignedAmount;
 pub use crate::core::types::sqrt_price::SqrtPriceX96;
 pub use crate::core::types::tick::TickIndex;
+pub use crate::core::types::tick_spacing::TickSpacing;
 pub use crate::core::types::{PoolTicksSnapshot, TickInfo};
 
 #[cfg(feature = "positions")]

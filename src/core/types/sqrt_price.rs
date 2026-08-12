@@ -14,7 +14,7 @@ use crate::core::{math::tick::get_tick_at_sqrt_price, types::tick::TickIndex};
 /// circulation is inside the protocol-supported sqrt-price range. This mirrors
 /// [`TickIndex`]: callers validate once at the boundary, then pass a compact
 /// type through pool math without repeatedly checking raw values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct SqrtPriceX96(U160);
 
@@ -167,6 +167,16 @@ macro_rules! sqrt_price_x96 {
         $crate::v4::SqrtPriceX96::new(value)
             .unwrap_or_else(|| panic!("SqrtPriceX96 value is out of range: {}", value,))
     }};
+}
+
+impl<'de> Deserialize<'de> for SqrtPriceX96 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = U160::deserialize(deserializer)?;
+        Self::new(value).ok_or(serde::de::Error::custom("invalid SqrtPriceX96 value"))
+    }
 }
 
 /// Allows a `SqrtPriceX96` to be transparently dereferenced to `&U160`,

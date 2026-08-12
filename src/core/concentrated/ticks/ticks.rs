@@ -10,13 +10,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     Error as SwapSimError,
-    core::{
-        math::tick::MAX_TICK_SPACING,
-        types::{NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate, tick::TickIndex},
+    core::types::{
+        NextInitializedTick, PoolTicksSnapshot, TickInfo, TickUpdate, liquidity::Liquidity,
+        tick::TickIndex, tick_spacing::TickSpacing,
     },
 };
-
-pub const MIN_TICK_SPACING: u32 = 1;
 
 /// Ordered initialized tick store for a pool.
 ///
@@ -26,7 +24,7 @@ pub const MIN_TICK_SPACING: u32 = 1;
 /// `range()` in `O(log n)` without allocating a sorted vector per swap.
 #[derive(Debug, Clone)]
 pub struct PoolTicks {
-    tick_spacing: u32,
+    tick_spacing: TickSpacing,
     inner: Arc<RwLock<BTreeMap<TickIndex, TickInfo>>>,
 }
 
@@ -51,8 +49,7 @@ impl<'de> Deserialize<'de> for PoolTicks {
 
 impl PoolTicks {
     /// Create an empty initialized-tick store for one pool.
-    pub fn new(tick_spacing: u32) -> Result<Self, SwapSimError> {
-        validate_tick_spacing(tick_spacing)?;
+    pub fn new(tick_spacing: TickSpacing) -> Result<Self, SwapSimError> {
         Ok(Self {
             tick_spacing,
             inner: Arc::new(RwLock::new(BTreeMap::new())),
@@ -62,7 +59,7 @@ impl PoolTicks {
     /// Return the pool tick spacing this tick store was validated against.
     #[inline]
     #[must_use]
-    pub fn tick_spacing(&self) -> u32 {
+    pub fn tick_spacing(&self) -> TickSpacing {
         self.tick_spacing
     }
 
@@ -82,7 +79,7 @@ impl PoolTicks {
 
     /// Rebuilds a PoolTicks from a snapshot.
     pub fn from_snapshot(
-        tick_spacing: u32,
+        tick_spacing: TickSpacing,
         ticks: BTreeMap<TickIndex, TickInfo>,
     ) -> Result<Self, SwapSimError> {
         let pool_ticks = Self::new(tick_spacing)?;
@@ -245,7 +242,7 @@ impl<'a> PoolTicksReadGuard<'a> {
 /// `liquidity_gross`, adjusts `liquidity_net` with the lower/upper tick sign
 /// convention, and removes the tick when gross liquidity returns to zero.
 pub struct PoolTicksWriteGuard<'a> {
-    tick_spacing: u32,
+    tick_spacing: TickSpacing,
     inner: RwLockWriteGuard<'a, BTreeMap<TickIndex, TickInfo>>,
 }
 
@@ -372,7 +369,7 @@ impl<'a> PoolTicksWriteGuard<'a> {
         tick_lower: TickIndex,
         tick_upper: TickIndex,
         liquidity_delta: i128,
-        max_liquidity_per_tick: Option<u128>,
+        max_liquidity_per_tick: Option<Liquidity>,
     ) -> Result<(TickUpdate, TickUpdate), SwapSimError> {
         validate_tick_index_for_spacing(tick_lower, self.tick_spacing)?;
         validate_tick_index_for_spacing(tick_upper, self.tick_spacing)?;
@@ -394,8 +391,8 @@ impl<'a> PoolTicksWriteGuard<'a> {
             Self::compute_tick_update(upper_before, liquidity_delta, true)?;
 
         if let Some(max_liquidity_per_tick) = max_liquidity_per_tick
-            && (lower_update.liquidity_gross_after > max_liquidity_per_tick
-                || upper_update.liquidity_gross_after > max_liquidity_per_tick)
+            && (lower_update.liquidity_gross_after > max_liquidity_per_tick.value()
+                || upper_update.liquidity_gross_after > max_liquidity_per_tick.value())
         {
             return Err(SwapSimError::LiquidityOverflow);
         }
@@ -454,20 +451,12 @@ impl<'a> PoolTicksWriteGuard<'a> {
     }
 }
 
-/// Reject tick spacings outside `[MIN_TICK_SPACING, MAX_TICK_SPACING]`.
-#[inline]
-fn validate_tick_spacing(tick_spacing: u32) -> Result<(), SwapSimError> {
-    if !(MIN_TICK_SPACING..=MAX_TICK_SPACING).contains(&tick_spacing) {
-        Err(SwapSimError::InvalidTickSpacing)
-    } else {
-        Ok(())
-    }
-}
-
-// TODO: remove method
 /// Reject a tick index outside the absolute range or not aligned to spacing.
 #[inline]
-fn validate_tick_index_for_spacing(tick: TickIndex, tick_spacing: u32) -> Result<(), SwapSimError> {
+fn validate_tick_index_for_spacing(
+    tick: TickIndex,
+    tick_spacing: TickSpacing,
+) -> Result<(), SwapSimError> {
     if tick.for_spacing(tick_spacing) {
         Ok(())
     } else {
