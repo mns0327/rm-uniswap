@@ -178,15 +178,14 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: &SqrtPriceX96) -> TickIndex {
 
     let (_, carry) = log_lo.overflowing_add(TICK_HIGH_OFFSET);
     let tick_high = clamp_i64_to_tick_index(log_hi + carry as i64);
-    let tick = if tick_low == tick_high {
+
+    if tick_low == tick_high {
         tick_low
     } else if &get_sqrt_price_at_tick(tick_high) <= sqrt_price_x96 {
         tick_high
     } else {
         tick_low
-    };
-
-    tick
+    }
 }
 
 #[inline(always)]

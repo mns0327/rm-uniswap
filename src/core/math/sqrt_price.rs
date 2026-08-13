@@ -249,18 +249,16 @@ fn get_next_sqrt_price_from_amount0_add_rounding_up(
     // ---------------------------------------------------------
     let (product, product_overflowed) = amount.overflowing_mul(sqrt_p);
 
-    if !product_overflowed {
-        if let Some(denominator) = numerator1.checked_add(product) {
-            // Safety: `liquidity` is `NonZeroLiquidity`, so `numerator1 =
-            // liquidity << 96` is strictly positive. `checked_add` guarantees
-            // the positive numerator is preserved without wrapping, and the
-            // product is non-negative, so the denominator cannot be zero.
-            let denominator = unsafe { NonZeroU256::new_unchecked(denominator) };
+    if !product_overflowed && let Some(denominator) = numerator1.checked_add(product) {
+        // Safety: `liquidity` is `NonZeroLiquidity`, so `numerator1 =
+        // liquidity << 96` is strictly positive. `checked_add` guarantees
+        // the positive numerator is preserved without wrapping, and the
+        // product is non-negative, so the denominator cannot be zero.
+        let denominator = unsafe { NonZeroU256::new_unchecked(denominator) };
 
-            let result = liquidity_sqrt_q96_div_rounding_up(liquidity, sqrt_p_x96, denominator)?;
+        let result = liquidity_sqrt_q96_div_rounding_up(liquidity, sqrt_p_x96, denominator)?;
 
-            return into_sqrt_price(result);
-        }
+        return into_sqrt_price(result);
     }
 
     amount0_add_overflow_fallback(numerator1, sqrt_p, amount)

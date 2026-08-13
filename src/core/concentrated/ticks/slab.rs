@@ -47,7 +47,7 @@ impl TickSlab {
         let cache_cap = calculate_cache_cap(tick_spacing);
 
         Some(Self {
-            bitmap: HierBitmap::new(cache_cap as u16),
+            bitmap: HierBitmap::new(cache_cap),
             cache: vec![INITIAL_CACHE_VALUE; cache_cap as usize],
             values: Slab::new(),
             tick_spacing,

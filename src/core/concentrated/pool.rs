@@ -47,7 +47,7 @@ use crate::v4::swap_math::{amount_less_fee_exact_in, fee_on_exact_input};
 use super::{
     cache::PoolCache,
     price::{PriceCache, sqrt_price_x96_to_price},
-    ticks::ticks::{PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard},
+    ticks::pool_ticks::{PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard},
 };
 
 /// Maximum number of swap-loop iterations per simulation.

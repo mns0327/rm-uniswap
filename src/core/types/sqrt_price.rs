@@ -124,13 +124,13 @@ impl SqrtPriceX96 {
     /// Adds two sqrt prices and returns `None` on integer overflow or range overflow.
     #[inline(always)]
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
-        self.0.checked_add(rhs.0).and_then(|v| Self::new(v))
+        self.0.checked_add(rhs.0).and_then(Self::new)
     }
 
     /// Subtracts two sqrt prices and returns `None` on integer underflow or range underflow.
     #[inline(always)]
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-        self.0.checked_sub(rhs.0).and_then(|v| Self::new(v))
+        self.0.checked_sub(rhs.0).and_then(Self::new)
     }
 
     /// Returns the pair ordered by ascending sqrt price.

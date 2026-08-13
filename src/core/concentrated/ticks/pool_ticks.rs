@@ -378,12 +378,12 @@ impl<'a> PoolTicksWriteGuard<'a> {
             .inner
             .get(&tick_lower)
             .copied()
-            .unwrap_or_else(|| TickInfo::DEFAULT);
+            .unwrap_or(TickInfo::DEFAULT);
         let upper_before = self
             .inner
             .get(&tick_upper)
             .copied()
-            .unwrap_or_else(|| TickInfo::DEFAULT);
+            .unwrap_or(TickInfo::DEFAULT);
 
         let (lower_update, lower_after) =
             Self::compute_tick_update(lower_before, liquidity_delta, false)?;
