@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rm_uniswap::v4::{
     ModifyLiquidityParams, Pool, SignedAmount, SwapParams, TickIndex, TickSpacing,
 };

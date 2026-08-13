@@ -1,3 +1,13 @@
+use ruint::aliases::U256;
+
+use crate::{
+    Error,
+    core::{
+        math::sqrt_price::{get_amount0_delta, get_amount1_delta},
+        types::{nonzero::NonZeroLiquidity, sqrt_price::SqrtPriceX96, tick::TickIndex},
+    },
+};
+
 /// Signed token delta using Uniswap V4's **caller / PoolManager-perspective**
 /// `BalanceDelta` convention, matching the convention used by the current
 /// swap simulator.
@@ -33,6 +43,95 @@ pub struct BalanceDelta {
 }
 
 impl BalanceDelta {
+    /// Builds a swap delta from direction-aware input and output magnitudes.
+    ///
+    /// The returned delta uses V4's caller / PoolManager convention:
+    /// input is negative because the caller pays it, and output is positive
+    /// because the caller receives it. Exact-input and exact-output swaps share
+    /// this final accounting shape.
+    pub(crate) fn from_swap_amounts(
+        zero_for_one: bool,
+        input_paid_by_caller: U256,
+        output_received_by_caller: U256,
+    ) -> Result<Self, Error> {
+        let input_i128 = u256_to_i128_negative(input_paid_by_caller)?;
+        let output_i128 = u256_to_i128_positive(output_received_by_caller)?;
+
+        Ok(if zero_for_one {
+            Self {
+                amount0: input_i128,
+                amount1: output_i128,
+            }
+        } else {
+            Self {
+                amount0: output_i128,
+                amount1: input_i128,
+            }
+        })
+    }
+
+    /// Builds the principal token delta for a liquidity modification.
+    ///
+    /// The returned delta follows V4's caller / PoolManager convention:
+    /// adding liquidity is negative because the caller deposits principal,
+    /// while removing liquidity is positive because the caller receives it.
+    pub(crate) fn from_liquidity_principal(
+        tick_current: TickIndex,
+        tick_lower: TickIndex,
+        tick_upper: TickIndex,
+        sqrt_price_current_x96: SqrtPriceX96,
+        sqrt_price_lower_x96: SqrtPriceX96,
+        sqrt_price_upper_x96: SqrtPriceX96,
+        liquidity_delta: i128,
+    ) -> Result<Self, Error> {
+        let liquidity_delta_positive = liquidity_delta >= 0;
+        let liquidity_delta =
+            if let Some(value) = NonZeroLiquidity::new(liquidity_delta.unsigned_abs()) {
+                value
+            } else {
+                return Ok(Self::default());
+            };
+
+        if tick_current < tick_lower {
+            return Ok(Self {
+                amount0: amount0_delta_for_liquidity_change(
+                    sqrt_price_lower_x96,
+                    sqrt_price_upper_x96,
+                    liquidity_delta,
+                    liquidity_delta_positive,
+                )?,
+                amount1: 0,
+            });
+        }
+
+        if tick_current < tick_upper {
+            return Ok(Self {
+                amount0: amount0_delta_for_liquidity_change(
+                    sqrt_price_current_x96,
+                    sqrt_price_upper_x96,
+                    liquidity_delta,
+                    liquidity_delta_positive,
+                )?,
+                amount1: amount1_delta_for_liquidity_change(
+                    sqrt_price_lower_x96,
+                    sqrt_price_current_x96,
+                    liquidity_delta,
+                    liquidity_delta_positive,
+                )?,
+            });
+        }
+
+        Ok(Self {
+            amount0: 0,
+            amount1: amount1_delta_for_liquidity_change(
+                sqrt_price_lower_x96,
+                sqrt_price_upper_x96,
+                liquidity_delta,
+                liquidity_delta_positive,
+            )?,
+        })
+    }
+
     /// Direction-aware unsigned output amount.
     ///
     /// Caller / PoolManager perspective:
@@ -66,9 +165,96 @@ impl BalanceDelta {
     }
 }
 
+fn amount0_delta_for_liquidity_change(
+    sqrt_price_a_x96: SqrtPriceX96,
+    sqrt_price_b_x96: SqrtPriceX96,
+    liquidity_delta: NonZeroLiquidity,
+    liquidity_delta_positive: bool,
+) -> Result<i128, Error> {
+    let amount = get_amount0_delta(
+        sqrt_price_a_x96,
+        sqrt_price_b_x96,
+        liquidity_delta,
+        liquidity_delta_positive,
+    )
+    .map(|(amount, _)| amount)
+    .map_err(|_| Error::AmountOverflow)?;
+    liquidity_amount_to_i128(amount, liquidity_delta_positive)
+}
+
+fn amount1_delta_for_liquidity_change(
+    sqrt_price_a_x96: SqrtPriceX96,
+    sqrt_price_b_x96: SqrtPriceX96,
+    liquidity_delta: NonZeroLiquidity,
+    liquidity_delta_positive: bool,
+) -> Result<i128, Error> {
+    let amount = get_amount1_delta(
+        sqrt_price_a_x96,
+        sqrt_price_b_x96,
+        liquidity_delta,
+        liquidity_delta_positive,
+    )
+    .map(|(amount, _)| amount)
+    .map_err(|_| Error::AmountOverflow)?;
+    liquidity_amount_to_i128(amount, liquidity_delta_positive)
+}
+
+#[inline(always)]
+fn liquidity_amount_to_i128(amount: U256, liquidity_delta_positive: bool) -> Result<i128, Error> {
+    if liquidity_delta_positive {
+        u256_to_i128_negative(amount)
+    } else {
+        u256_to_i128_positive(amount)
+    }
+}
+
+#[inline(always)]
+fn u256_to_i128_positive(amount: U256) -> Result<i128, Error> {
+    let [lo, hi, upper0, upper1] = amount.into_limbs();
+
+    if (upper0 | upper1) != 0 || (hi >> 63) != 0 {
+        return Err(Error::AmountOverflow);
+    }
+
+    Ok((((hi as u128) << 64) | lo as u128) as i128)
+}
+
+#[inline(always)]
+fn u256_to_i128_negative(amount: U256) -> Result<i128, Error> {
+    let [lo, hi, upper0, upper1] = amount.into_limbs();
+
+    const LIMIT_HI: u64 = 1 << 63;
+
+    if (upper0 | upper1) != 0 || hi > LIMIT_HI || (hi == LIMIT_HI && lo != 0) {
+        return Err(Error::AmountOverflow);
+    }
+
+    let magnitude = ((hi as u128) << 64) | lo as u128;
+
+    Ok((magnitude as i128).wrapping_neg())
+}
+
 #[cfg(test)]
 mod tests {
+    use ruint::aliases::U256;
+
+    use crate::{
+        Error,
+        core::{
+            math::tick::get_sqrt_price_at_tick,
+            types::{sqrt_price::SqrtPriceX96, tick::TickIndex},
+        },
+    };
+
     use super::BalanceDelta;
+
+    fn tick(index: i32) -> TickIndex {
+        TickIndex::new(index).expect("tick index out of range")
+    }
+
+    fn sqrt_at(index: i32) -> SqrtPriceX96 {
+        get_sqrt_price_at_tick(tick(index))
+    }
 
     #[test]
     fn zero_for_one_exact_input_uses_caller_perspective() {
@@ -101,5 +287,135 @@ mod tests {
 
         assert_eq!(delta.amount_in(true), 0);
         assert_eq!(delta.amount_out(true), 0);
+    }
+
+    #[test]
+    fn from_swap_amounts_zero_for_one_sets_token0_input_and_token1_output() {
+        let delta = BalanceDelta::from_swap_amounts(true, U256::from(1_000u64), U256::from(990u64))
+            .unwrap();
+
+        assert_eq!(
+            delta,
+            BalanceDelta {
+                amount0: -1_000,
+                amount1: 990,
+            }
+        );
+        assert_eq!(delta.amount_in(true), 1_000);
+        assert_eq!(delta.amount_out(true), 990);
+    }
+
+    #[test]
+    fn from_swap_amounts_one_for_zero_sets_token1_input_and_token0_output() {
+        let delta =
+            BalanceDelta::from_swap_amounts(false, U256::from(1_000u64), U256::from(990u64))
+                .unwrap();
+
+        assert_eq!(
+            delta,
+            BalanceDelta {
+                amount0: 990,
+                amount1: -1_000,
+            }
+        );
+        assert_eq!(delta.amount_in(false), 1_000);
+        assert_eq!(delta.amount_out(false), 990);
+    }
+
+    #[test]
+    fn from_swap_amounts_accepts_i128_min_input_magnitude() {
+        let delta =
+            BalanceDelta::from_swap_amounts(true, U256::from(1u128) << 127, U256::ZERO).unwrap();
+
+        assert_eq!(delta.amount0, i128::MIN);
+        assert_eq!(delta.amount1, 0);
+    }
+
+    #[test]
+    fn from_swap_amounts_rejects_output_above_i128_max() {
+        let output_too_large = U256::from(i128::MAX as u128) + U256::ONE;
+
+        assert_eq!(
+            BalanceDelta::from_swap_amounts(true, U256::ZERO, output_too_large),
+            Err(Error::AmountOverflow)
+        );
+    }
+
+    #[test]
+    fn from_swap_amounts_rejects_input_below_i128_min() {
+        let input_too_large = (U256::from(1u128) << 127) + U256::ONE;
+
+        assert_eq!(
+            BalanceDelta::from_swap_amounts(true, input_too_large, U256::ZERO),
+            Err(Error::AmountOverflow)
+        );
+    }
+
+    #[test]
+    fn from_liquidity_principal_below_range_uses_only_token0() {
+        let delta = BalanceDelta::from_liquidity_principal(
+            tick(-240),
+            tick(-120),
+            tick(120),
+            sqrt_at(-240),
+            sqrt_at(-120),
+            sqrt_at(120),
+            1_000_000,
+        )
+        .unwrap();
+
+        assert!(delta.amount0 < 0);
+        assert_eq!(delta.amount1, 0);
+    }
+
+    #[test]
+    fn from_liquidity_principal_in_range_uses_both_tokens() {
+        let delta = BalanceDelta::from_liquidity_principal(
+            tick(0),
+            tick(-120),
+            tick(120),
+            sqrt_at(0),
+            sqrt_at(-120),
+            sqrt_at(120),
+            1_000_000,
+        )
+        .unwrap();
+
+        assert!(delta.amount0 < 0);
+        assert!(delta.amount1 < 0);
+    }
+
+    #[test]
+    fn from_liquidity_principal_above_range_uses_only_token1() {
+        let delta = BalanceDelta::from_liquidity_principal(
+            tick(240),
+            tick(-120),
+            tick(120),
+            sqrt_at(240),
+            sqrt_at(-120),
+            sqrt_at(120),
+            1_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(delta.amount0, 0);
+        assert!(delta.amount1 < 0);
+    }
+
+    #[test]
+    fn from_liquidity_principal_remove_liquidity_returns_positive_delta() {
+        let delta = BalanceDelta::from_liquidity_principal(
+            tick(0),
+            tick(-120),
+            tick(120),
+            sqrt_at(0),
+            sqrt_at(-120),
+            sqrt_at(120),
+            -1_000_000,
+        )
+        .unwrap();
+
+        assert!(delta.amount0 > 0);
+        assert!(delta.amount1 > 0);
     }
 }

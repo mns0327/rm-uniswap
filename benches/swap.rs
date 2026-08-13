@@ -2,9 +2,9 @@
 //!
 //! Run with: `cargo bench --bench swap`
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rm_uniswap::v4::{
-    swap_math, tick_math, NonZeroLiquidity, SignedAmount, SqrtPriceX96, TickIndex,
+    NonZeroLiquidity, SignedAmount, SqrtPriceX96, TickIndex, swap_math, tick_math,
 };
 use ruint::aliases::U256;
 

@@ -12,7 +12,7 @@
 
 use ruint::aliases::U256;
 
-use crate::core::types::fee::{FeeParams, MAX_SWAP_FEE};
+use crate::core::types::fee::{Fee, MAX_FEE};
 use crate::core::types::nonzero::NonZeroLiquidity;
 use crate::core::types::signed::I256 as SignedAmount;
 use crate::core::types::sqrt_price::SqrtPriceX96;
@@ -37,7 +37,10 @@ pub struct SwapStep {
 }
 
 #[inline(always)]
-fn amount_less_fee_exact_in(amount_remaining: U256, fee: FeeParams) -> Result<U256, MathError> {
+pub(crate) fn amount_less_fee_exact_in(
+    amount_remaining: U256,
+    fee: Fee,
+) -> Result<U256, MathError> {
     if fee.is_zero() {
         return Ok(amount_remaining);
     }
@@ -46,11 +49,11 @@ fn amount_less_fee_exact_in(amount_remaining: U256, fee: FeeParams) -> Result<U2
         return Ok(U256::ZERO);
     }
 
-    mul_div_u32_floor(amount_remaining, fee.complement, MAX_SWAP_FEE)
+    mul_div_u32_floor(amount_remaining, fee.complement(), MAX_FEE)
 }
 
 #[inline(always)]
-fn fee_on_exact_input(amount_in: U256, fee: FeeParams) -> Result<U256, MathError> {
+pub(crate) fn fee_on_exact_input(amount_in: U256, fee: Fee) -> Result<U256, MathError> {
     if amount_in.is_zero() || fee.is_zero() {
         return Ok(U256::ZERO);
     }
@@ -60,7 +63,7 @@ fn fee_on_exact_input(amount_in: U256, fee: FeeParams) -> Result<U256, MathError
     }
 
     // fee = ceil(amount_in * fee_pips / (MAX_SWAP_FEE - fee_pips))
-    mul_div_u32_ceil(amount_in, fee.pips, fee.complement)
+    mul_div_u32_ceil(amount_in, fee.pips(), fee.complement())
 }
 
 #[inline(always)]
@@ -85,7 +88,7 @@ pub fn compute_swap_step(
     amount: SignedAmount,
     fee_pips: u32,
 ) -> Result<SwapStep, SwapMathError> {
-    let fee = FeeParams::new(fee_pips).ok_or(SwapMathError::FeeTooLarge)?;
+    let fee = Fee::new(fee_pips).ok_or(SwapMathError::FeeTooLarge)?;
 
     // Keep original behavior: fee is validated before zero-amount no-op.
     if amount.is_zero() {
@@ -133,7 +136,7 @@ fn compute_exact_in(
     sqrt_ratio_target_x96: SqrtPriceX96,
     liquidity: NonZeroLiquidity,
     amount_remaining: U256,
-    fee: FeeParams,
+    fee: Fee,
     zero_for_one: bool,
 ) -> Result<SwapStep, SwapMathError> {
     let amount_remaining_less_fee = amount_less_fee_exact_in(amount_remaining, fee)?;
@@ -221,7 +224,7 @@ fn compute_exact_out(
     sqrt_ratio_target_x96: SqrtPriceX96,
     liquidity: NonZeroLiquidity,
     amount_remaining: U256,
-    fee: FeeParams,
+    fee: Fee,
     zero_for_one: bool,
 ) -> Result<SwapStep, SwapMathError> {
     debug_assert!(!fee.is_max());
@@ -372,7 +375,7 @@ mod tests {
             sqrt_price_101_100(),
             liq(1_000_000),
             SignedAmount::negative(ether(1)),
-            MAX_SWAP_FEE + 1,
+            MAX_FEE + 1,
         );
         assert_eq!(err, Err(SwapMathError::FeeTooLarge));
     }
@@ -384,7 +387,7 @@ mod tests {
             sqrt_price_101_100(),
             liq(1_000_000),
             SignedAmount::positive(ether(1)),
-            MAX_SWAP_FEE,
+            MAX_FEE,
         );
         assert_eq!(err, Err(SwapMathError::MaxFeeExactOut));
     }
@@ -396,7 +399,7 @@ mod tests {
             sqrt_price_101_100(),
             liq(1_000_000),
             SignedAmount::negative(ether(1)),
-            MAX_SWAP_FEE,
+            MAX_FEE,
         )
         .unwrap();
 
@@ -602,7 +605,7 @@ mod tests {
             sqrt_price_target in arb_sqrt_price(),
             liquidity         in 1u128..=u128::MAX,
             amount_remaining  in arb_u256(),
-            fee_pips          in 0u32..=MAX_SWAP_FEE,
+            fee_pips          in 0u32..=MAX_FEE,
         ) {
             let result = compute_swap_step(
                 sqrt_price,
@@ -668,7 +671,7 @@ mod tests {
             sqrt_price_target in arb_sqrt_price(),
             liquidity         in 1u128..=u128::MAX,
             amount_remaining  in arb_u256(),
-            fee_pips          in 0u32..MAX_SWAP_FEE, // strict: MAX_SWAP_FEE excluded for exact-out
+            fee_pips          in 0u32..MAX_FEE, // strict: MAX_SWAP_FEE excluded for exact-out
         ) {
             let result = compute_swap_step(
                 sqrt_price,

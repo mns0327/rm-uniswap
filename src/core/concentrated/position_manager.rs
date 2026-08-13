@@ -3,17 +3,17 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use crate::{
+    Error,
     core::{
         concentrated::pool::{ModifyLiquidityParams, Pool as ConcentratedPool},
         types::{delta::BalanceDelta, tick::TickIndex},
     },
-    Error,
 };
 use alloy::primitives::{Address, B256};
 use parking_lot::{Mutex, RwLock};

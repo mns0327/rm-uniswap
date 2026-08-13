@@ -2,8 +2,8 @@
 //!
 //! Run with: `cargo bench --bench tick`
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rm_uniswap::v4::{tick_math, SqrtPriceX96, TickIndex};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use rm_uniswap::v4::{SqrtPriceX96, TickIndex, tick_math};
 
 fn tick(value: i32) -> TickIndex {
     TickIndex::new(value).unwrap()

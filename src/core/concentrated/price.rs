@@ -1,6 +1,6 @@
 use ruint::aliases::U256;
 
-use crate::core::types::{atomic_f64::AtomicF64, sqrt_price::SqrtPriceX96};
+use crate::core::types::{atomic_f64::AtomicF64, fee::Fee, sqrt_price::SqrtPriceX96};
 
 /// Fee denominator used by Uniswap-style fee pips.
 ///
@@ -67,8 +67,8 @@ impl PriceCache {
     /// - `10_000` = `1.00%`
     ///
     /// Both swap directions are precomputed and stored as fee-adjusted prices.
-    pub fn new(zero_for_one_price: f64, fee: u32) -> Self {
-        let fee = (FEE_DENOMINATOR - fee as f64) / FEE_DENOMINATOR;
+    pub fn new(zero_for_one_price: f64, fee: Fee) -> Self {
+        let fee = (FEE_DENOMINATOR - fee.pips() as f64) / FEE_DENOMINATOR;
         let one_for_zero_price = 1.0 / zero_for_one_price;
 
         let zero_for_one_price_with_fee = zero_for_one_price * fee;

@@ -3,19 +3,17 @@ use std::{ops::Deref, sync::Arc};
 use dashmap::DashMap;
 use ruint::aliases::U256;
 
+use crate::core::math::swap::fee_on_exact_input;
 use crate::{
     Error as SwapSimError,
     core::{
         math::{
-            small_ratio::mul_div_u32_ceil,
             sqrt_price::{get_amount0_delta, get_amount1_delta},
             tick::get_sqrt_price_at_tick as compute_sqrt_price_at_tick,
         },
-        types::{nonzero::NonZeroLiquidity, sqrt_price::SqrtPriceX96, tick::TickIndex},
+        types::{fee::Fee, nonzero::NonZeroLiquidity, sqrt_price::SqrtPriceX96, tick::TickIndex},
     },
 };
-
-const MAX_SWAP_FEE: u32 = 1_000_000;
 
 /// Cached amount required to fully move from `sqrt_start_x96` to one tick boundary.
 ///
@@ -26,7 +24,7 @@ pub struct TickCrossCacheEntry {
     pub sqrt_start_x96: SqrtPriceX96,
     pub sqrt_boundary_x96: SqrtPriceX96,
     pub liquidity: NonZeroLiquidity,
-    pub fee_pips: u32,
+    pub fee: Fee,
 
     /// Fee-excluded input needed to reach the boundary.
     pub amount_in_to_cross: U256,
@@ -49,12 +47,12 @@ impl TickCrossCacheEntry {
         sqrt_start_x96: SqrtPriceX96,
         sqrt_boundary_x96: SqrtPriceX96,
         liquidity: NonZeroLiquidity,
-        fee_pips: u32,
+        fee: Fee,
     ) -> bool {
         self.sqrt_start_x96 == sqrt_start_x96
             && self.sqrt_boundary_x96 == sqrt_boundary_x96
             && self.liquidity.deref() == liquidity.deref()
-            && self.fee_pips == fee_pips
+            && self.fee == fee
     }
 
     #[inline(always)]
@@ -122,14 +120,10 @@ impl PoolCache {
         sqrt_start_x96: SqrtPriceX96,
         sqrt_boundary_x96: SqrtPriceX96,
         liquidity: NonZeroLiquidity,
-        fee_pips: u32,
+        fee: Fee,
     ) -> Result<Option<Arc<TickCrossCacheEntry>>, SwapSimError> {
-        if liquidity.is_zero() {
-            return Ok(None);
-        }
-
         // With 100% fee, exact-input has zero usable amount. Let the canonical path handle it.
-        if fee_pips >= MAX_SWAP_FEE {
+        if fee.is_max() {
             return Ok(None);
         }
 
@@ -147,7 +141,7 @@ impl PoolCache {
         if let Some(existing) = map.get(&tick_idx) {
             let entry = existing.value();
 
-            if entry.matches_state(sqrt_start_x96, sqrt_boundary_x96, liquidity, fee_pips) {
+            if entry.matches_state(sqrt_start_x96, sqrt_boundary_x96, liquidity, fee) {
                 return Ok(Some(Arc::clone(entry)));
             }
         }
@@ -157,7 +151,7 @@ impl PoolCache {
             sqrt_start_x96,
             sqrt_boundary_x96,
             liquidity,
-            fee_pips,
+            fee,
         )?);
 
         if entry.gross_in_to_cross.is_zero() || entry.amount_out_to_cross.is_zero() {
@@ -174,7 +168,7 @@ impl PoolCache {
         sqrt_start_x96: SqrtPriceX96,
         sqrt_boundary_x96: SqrtPriceX96,
         liquidity: NonZeroLiquidity,
-        fee_pips: u32,
+        fee: Fee,
     ) -> Result<TickCrossCacheEntry, SwapSimError> {
         let (amount_in_to_cross, _) = if zero_for_one {
             get_amount0_delta(sqrt_boundary_x96, sqrt_start_x96, liquidity, true)
@@ -192,7 +186,7 @@ impl PoolCache {
                 .map_err(|_| SwapSimError::AmountOverflow)?
         };
 
-        let fee_amount_to_cross = fee_on_exact_input_cached(amount_in_to_cross, fee_pips)?;
+        let fee_amount_to_cross = fee_on_exact_input(amount_in_to_cross, fee)?;
         let gross_in_to_cross = amount_in_to_cross
             .checked_add(fee_amount_to_cross)
             .ok_or(SwapSimError::AmountOverflow)?;
@@ -201,7 +195,7 @@ impl PoolCache {
             sqrt_start_x96,
             sqrt_boundary_x96,
             liquidity,
-            fee_pips,
+            fee,
             amount_in_to_cross,
             fee_amount_to_cross,
             gross_in_to_cross,
@@ -223,17 +217,4 @@ impl PoolCache {
         self.sqrt_tick_cache.clear();
         self.clear_cross_amounts();
     }
-}
-
-#[inline(always)]
-fn fee_on_exact_input_cached(amount_in: U256, fee_pips: u32) -> Result<U256, SwapSimError> {
-    if amount_in.is_zero() || fee_pips == 0 {
-        return Ok(U256::ZERO);
-    }
-
-    if fee_pips >= MAX_SWAP_FEE {
-        return Err(SwapSimError::FeeTooLarge);
-    }
-
-    mul_div_u32_ceil(amount_in, fee_pips, MAX_SWAP_FEE - fee_pips)
 }

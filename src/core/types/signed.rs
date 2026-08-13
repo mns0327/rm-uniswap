@@ -3,7 +3,6 @@ use std::fmt;
 use ruint::aliases::U256;
 
 use crate::Error;
-// Core type
 
 /// A 256-bit signed integer represented as a sign-magnitude pair.
 ///
@@ -65,6 +64,44 @@ impl I256 {
             value,
         }
     }
+
+    /// Attempts to narrow this signed 256-bit value into Rust's `i128`.
+    ///
+    /// Positive values must fit in `0..=i128::MAX`. Negative values may use a
+    /// magnitude up to `2^127`, where exactly `2^127` maps to `i128::MIN`.
+    /// Any larger magnitude returns `None`.
+    ///
+    /// The implementation checks the upper 128 bits first and only reconstructs
+    /// the low `u128` when narrowing is still possible. This keeps the hot
+    /// successful path allocation-free and avoids constructing temporary `U256`
+    /// bounds for every conversion.
+    #[inline]
+    pub fn try_i128(&self) -> Option<i128> {
+        let [lo, hi, upper0, upper1] = self.value.into_limbs();
+
+        // Anything above the low 128 bits cannot fit in an `i128` magnitude.
+        if upper0 != 0 || upper1 != 0 {
+            return None;
+        }
+
+        let magnitude = (u128::from(hi) << 64) | u128::from(lo);
+
+        if self.negative {
+            // `i128::MIN` has magnitude 2^127, which has no positive `i128`
+            // counterpart and must be handled before casting.
+            if magnitude == (1u128 << 127) {
+                Some(i128::MIN)
+            } else if magnitude < (1u128 << 127) {
+                Some(-(magnitude as i128))
+            } else {
+                None
+            }
+        } else if magnitude <= i128::MAX as u128 {
+            Some(magnitude as i128)
+        } else {
+            None
+        }
+    }
 }
 // From / TryFrom conversions
 
@@ -96,16 +133,7 @@ impl From<U256> for I256 {
 impl TryFrom<I256> for i128 {
     type Error = Error;
     fn try_from(s: I256) -> Result<Self, Self::Error> {
-        let max = U256::from(i128::MAX as u128);
-        if s.value > max {
-            return Err(Error::I128Overflow);
-        }
-        let v = s.value.to::<u128>() as i128;
-        if s.negative {
-            v.checked_neg().ok_or(Error::SignedOverflow)
-        } else {
-            Ok(v)
-        }
+        s.try_i128().ok_or(Error::I128Overflow)
     }
 }
 // Predicates & accessors
@@ -536,7 +564,7 @@ mod tests {
 
     #[test]
     fn to_i128_roundtrip() {
-        for v in [0i128, 1, -1, i128::MAX, i128::MIN + 1] {
+        for v in [0i128, 1, -1, i128::MAX, i128::MIN + 1, i128::MIN] {
             let s = I256::from(v);
             let result: Result<i128, _> = s.try_into();
             assert_eq!(result.unwrap(), v);
@@ -544,10 +572,29 @@ mod tests {
     }
 
     #[test]
-    fn to_i128_overflow() {
+    fn try_i128_rejects_positive_two_to_127() {
         let too_big = I256::positive(U256::from(i128::MAX as u128) + U256::from(1u128));
-        let result: Result<i128, _> = too_big.try_into();
-        assert!(result.is_err());
+        assert_eq!(too_big.try_i128(), None);
+        assert_eq!(i128::try_from(too_big), Err(Error::I128Overflow));
+    }
+
+    #[test]
+    fn try_i128_accepts_negative_two_to_127_as_min() {
+        let min = I256::negative(U256::from(1u128) << 127);
+        assert_eq!(min.try_i128(), Some(i128::MIN));
+    }
+
+    #[test]
+    fn try_i128_rejects_negative_larger_than_i128_min() {
+        let too_negative = I256::negative((U256::from(1u128) << 127) + U256::ONE);
+        assert_eq!(too_negative.try_i128(), None);
+        assert_eq!(i128::try_from(too_negative), Err(Error::I128Overflow));
+    }
+
+    #[test]
+    fn try_i128_rejects_values_with_upper_128_bits_set() {
+        assert_eq!(I256::positive(U256::from(1u128) << 128).try_i128(), None);
+        assert_eq!(I256::negative(U256::from(1u128) << 128).try_i128(), None);
     }
 
     #[test]

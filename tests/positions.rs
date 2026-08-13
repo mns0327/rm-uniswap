@@ -2,8 +2,8 @@
 
 use alloy::primitives::Address;
 use rm_uniswap::v4::{
-    positions::PositionManager, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams,
-    TickIndex, TickSpacing,
+    Fee, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex,
+    TickSpacing, positions::PositionManager,
 };
 use ruint::aliases::U256;
 #[cfg(feature = "v4-hooks")]
@@ -26,7 +26,7 @@ fn empty_pool() -> Pool {
         sqrt_price_1_1(),
         tick(0),
         Liquidity::ZERO,
-        3_000,
+        Fee::new(3_000).unwrap(),
         tick_spacing_60(),
         PoolTicks::new(tick_spacing_60()).unwrap(),
     )
@@ -72,9 +72,11 @@ fn slippage_failure_does_not_mutate_pool() {
     let manager = PositionManager::new(empty_pool());
     let before = *manager.pool().state.read();
 
-    assert!(manager
-        .mint(owner, tick(-120), tick(120), 1_000_000, 0, 0)
-        .is_err());
+    assert!(
+        manager
+            .mint(owner, tick(-120), tick(120), 1_000_000, 0, 0)
+            .is_err()
+    );
     let after = *manager.pool().state.read();
     assert_eq!(before.liquidity, after.liquidity);
     assert!(manager.pool().ticks.read().is_empty());
@@ -122,8 +124,8 @@ fn fee_growth_outside_assigns_post_cross_fees_to_the_active_range() {
 #[test]
 fn v4_hook_failure_rolls_back_before_pool_mutation() {
     use rm_uniswap::{
-        v4::positions::{LiquidityHook, ModifyRequest, ModifyResult},
         Error,
+        v4::positions::{LiquidityHook, ModifyRequest, ModifyResult},
     };
 
     struct Reject;
@@ -139,16 +141,18 @@ fn v4_hook_failure_rolls_back_before_pool_mutation() {
 
     let owner = Address::repeat_byte(0x55);
     let manager = PositionManager::with_hook(empty_pool(), Arc::new(Reject));
-    assert!(manager
-        .mint(
-            owner,
-            tick(-120),
-            tick(120),
-            1_000_000,
-            u128::MAX,
-            u128::MAX
-        )
-        .is_err());
+    assert!(
+        manager
+            .mint(
+                owner,
+                tick(-120),
+                tick(120),
+                1_000_000,
+                u128::MAX,
+                u128::MAX
+            )
+            .is_err()
+    );
     assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
     assert!(manager.pool().ticks.read().is_empty());
 }
@@ -157,8 +161,8 @@ fn v4_hook_failure_rolls_back_before_pool_mutation() {
 #[test]
 fn before_hook_failure_rolls_back_before_pool_mutation() {
     use rm_uniswap::{
-        v4::positions::{LiquidityHook, ModifyRequest},
         Error,
+        v4::positions::{LiquidityHook, ModifyRequest},
     };
 
     struct Reject;
@@ -192,8 +196,8 @@ fn before_hook_failure_rolls_back_before_pool_mutation() {
 fn hooks_run_in_before_then_after_order() {
     use parking_lot::Mutex;
     use rm_uniswap::v4::{
-        positions::{LiquidityHook, ModifyRequest, ModifyResult},
         BalanceDelta,
+        positions::{LiquidityHook, ModifyRequest, ModifyResult},
     };
 
     struct Recorder(Arc<Mutex<Vec<&'static str>>>);
@@ -301,11 +305,11 @@ fn hook_runs_without_holding_position_map_lock() {
 #[test]
 fn hook_delta_overflow_fails_before_pool_or_position_mutation() {
     use rm_uniswap::{
-        v4::{
-            positions::{LiquidityHook, ModifyRequest, ModifyResult},
-            BalanceDelta,
-        },
         Error,
+        v4::{
+            BalanceDelta,
+            positions::{LiquidityHook, ModifyRequest, ModifyResult},
+        },
     };
 
     struct OverflowOnCollect;

@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 
+use rm_uniswap::v4::Fee;
 use rm_uniswap::{
-    v4::{
-        tick_math, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex,
-        TickInfo, TickSpacing,
-    },
     Error,
+    v4::{
+        Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex, TickInfo,
+        TickSpacing, tick_math,
+    },
 };
 use ruint::aliases::U256;
 
 const LIQUIDITY: u128 = 1_000_000_000_000;
-const FEE: u32 = 3_000;
+const FEE: Fee = Fee::new(3_000).unwrap();
+
 fn tick_spacing_60() -> TickSpacing {
     TickSpacing::new(60).unwrap()
 }
@@ -136,7 +138,7 @@ fn mutating_swap_refreshes_scoring_price_cache() {
         let sqrt = result.sqrt_price_x96.value().to::<u128>() as f64 / 2f64.powi(96);
         1.0 / (sqrt * sqrt)
     };
-    let expected_with_fee = expected_raw * (1.0 - FEE as f64 / 1_000_000.0);
+    let expected_with_fee = expected_raw * (1.0 - FEE.pips() as f64 / 1_000_000.0);
 
     assert!(after < before);
     assert!((after - expected_with_fee).abs() < 1e-12);
