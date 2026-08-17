@@ -11,8 +11,8 @@ use std::{
 use crate::{
     Error,
     core::{
-        concentrated::pool::{ModifyLiquidityParams, Pool as ConcentratedPool},
-        types::{delta::BalanceDelta, tick::TickIndex},
+        concentrated::pool::Pool as ConcentratedPool,
+        types::{delta::BalanceDelta, params::ModifyLiquidityParams, tick::TickIndex},
     },
 };
 use alloy::primitives::{Address, B256};

@@ -3,6 +3,7 @@ pub(crate) mod delta;
 pub(crate) mod fee;
 pub(crate) mod liquidity;
 pub(crate) mod nonzero;
+pub mod params;
 pub(crate) mod signed;
 pub(crate) mod sqrt_price;
 pub(crate) mod tick;

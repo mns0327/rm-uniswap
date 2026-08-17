@@ -8,9 +8,7 @@
 /// must be updated.
 pub use crate::Error;
 pub use crate::core::concentrated::pool::{
-    FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot, PoolState,
-    SwapParams, SwapSimulationResult, TickCrossInfo, TickCrossing, delta_amount_in,
-    delta_amount_out,
+    Pool, PoolSnapshot, PoolState, TickCrossInfo, TickCrossing, delta_amount_in, delta_amount_out,
 };
 pub use crate::core::concentrated::ticks::pool_ticks::PoolTicks;
 pub use crate::core::math::{
@@ -21,6 +19,9 @@ pub use crate::core::types::delta::BalanceDelta;
 pub use crate::core::types::fee::Fee;
 pub use crate::core::types::liquidity::Liquidity;
 pub use crate::core::types::nonzero::NonZeroLiquidity;
+pub use crate::core::types::params::{
+    FullSwapResult, ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapSimulationResult,
+};
 pub use crate::core::types::signed::I256 as SignedAmount;
 pub use crate::core::types::sqrt_price::SqrtPriceX96;
 pub use crate::core::types::tick::TickIndex;
