@@ -7,6 +7,7 @@ use crate::core::types::liquidity::Liquidity;
 /// A `U256` that is guaranteed to be non-zero.
 pub struct NonZeroU256(U256);
 
+#[allow(dead_code)]
 impl NonZeroU256 {
     /// Attempts to construct a `NonZeroU256` from a raw `U256`.
     #[inline(always)]
