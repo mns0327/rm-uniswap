@@ -11,7 +11,7 @@ use crate::core::types::tick::TickIndex;
 /// (which slab page/bucket) and a `slot_index` (which slot within that
 /// bucket).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TickSlabIndexer(u32);
+pub struct TickSlabIndexer(u32);
 
 impl TickSlabIndexer {
     /// Encodes a `TickIndex` into its zigzag `u32` representation.

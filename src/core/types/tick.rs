@@ -13,7 +13,9 @@ use std::ops::Deref;
 /// any `TickIndex` in circulation has already been range-checked. This
 /// avoids re-validating tick bounds at every call site and prevents
 /// out-of-range ticks from silently propagating into pool math.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct TickIndex(i32);
 

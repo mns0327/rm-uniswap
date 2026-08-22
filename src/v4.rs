@@ -8,9 +8,9 @@
 /// must be updated.
 pub use crate::Error;
 pub use crate::core::concentrated::pool::{
-    Pool, PoolSnapshot, PoolState, TickCrossInfo, TickCrossing, delta_amount_in, delta_amount_out,
+    Pool, PoolSnapshot, PoolState, TickCrossInfo, delta_amount_in, delta_amount_out,
 };
-pub use crate::core::concentrated::ticks::pool_ticks::PoolTicks;
+pub use crate::core::concentrated::ticks::slab::TickSlab as PoolTicks;
 pub use crate::core::math::{
     full as full_math, sqrt_price as sqrt_price_math, swap as swap_math, swap::SwapStep,
     tick as tick_math,
@@ -26,7 +26,7 @@ pub use crate::core::types::signed::I256 as SignedAmount;
 pub use crate::core::types::sqrt_price::SqrtPriceX96;
 pub use crate::core::types::tick::TickIndex;
 pub use crate::core::types::tick_spacing::TickSpacing;
-pub use crate::core::types::{PoolTicksSnapshot, TickInfo};
+pub use crate::core::types::{PoolTicksSnapshot, TickInfo, TickInfoSnapshot};
 
 #[cfg(feature = "positions")]
 pub mod positions {

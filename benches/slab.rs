@@ -19,11 +19,14 @@ mod v4;
 pub use core::error::Error;
 
 use crate::{
-    core::{concentrated::ticks::slab::TickSlab, types::tick::TickIndex},
+    core::{
+        concentrated::ticks::slab::TickSlab,
+        types::{tick::TickIndex, tick_spacing::TickSpacing},
+    },
     v4::TickInfo,
 };
 
-const TICK_SPACING: u32 = 1;
+const TICK_SPACING: TickSpacing = TickSpacing::MIN;
 const DENSE_LIMIT: i32 = 65_535;
 const DENSE_STEP: usize = 17;
 const SPARSE_KEYS: [i32; 13] = [

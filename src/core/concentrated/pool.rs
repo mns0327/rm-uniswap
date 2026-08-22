@@ -15,11 +15,12 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Error as SwapSimError;
+use crate::core::concentrated::ticks::slab::TickSlab;
 #[cfg(feature = "protocol-fee")]
 use crate::core::types::fee::protocol::{PIPS_DENOMINATOR, calculate_swap_fee};
 use crate::core::types::fee::{Fee, validate_swap_fee_for_exactness};
@@ -50,7 +51,6 @@ use crate::v4::swap_math::{amount_less_fee_exact_in, fee_on_exact_input};
 use super::{
     cache::PoolCache,
     price::{PriceCache, sqrt_price_x96_to_price},
-    ticks::pool_ticks::{PoolTicks, PoolTicksReadGuard, PoolTicksWriteGuard},
 };
 
 /// Maximum number of swap-loop iterations per simulation.
@@ -60,68 +60,6 @@ use super::{
 /// local state from spinning indefinitely. 10 000 is far beyond any realistic
 /// single swap on mainnet tick densities.
 pub const MAX_SWAP_ITERATIONS: usize = 10_000;
-
-/// Trait for tick-crossing guards used in swap simulations.
-///
-/// The default `next_initialized_tick_within_one_word` implementation preserves
-/// the current ordered-map behavior. A future bitmap-backed `PoolTicks` guard can
-/// override only that method and immediately speed up the swap loop without
-/// changing the executor.
-pub trait TickCrossing {
-    fn next_initialized_tick(
-        &self,
-        current_tick: TickIndex,
-        zero_for_one: bool,
-    ) -> NextInitializedTick;
-    fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError>;
-
-    #[inline(always)]
-    fn next_initialized_tick_within_one_word(
-        &self,
-        current_tick: TickIndex,
-        tick_spacing: TickSpacing,
-        zero_for_one: bool,
-    ) -> NextInitializedTick {
-        next_initialized_tick_within_one_word_fallback(
-            self,
-            current_tick,
-            tick_spacing,
-            zero_for_one,
-        )
-    }
-}
-
-impl TickCrossing for PoolTicksReadGuard<'_> {
-    #[inline]
-    fn next_initialized_tick(
-        &self,
-        current_tick: TickIndex,
-        zero_for_one: bool,
-    ) -> NextInitializedTick {
-        PoolTicksReadGuard::next_initialized_tick(self, current_tick, zero_for_one)
-    }
-
-    #[inline]
-    fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError> {
-        PoolTicksReadGuard::cross_tick(self, tick_next)
-    }
-}
-
-impl TickCrossing for PoolTicksWriteGuard<'_> {
-    #[inline]
-    fn next_initialized_tick(
-        &self,
-        current_tick: TickIndex,
-        zero_for_one: bool,
-    ) -> NextInitializedTick {
-        PoolTicksWriteGuard::next_initialized_tick(self, current_tick, zero_for_one)
-    }
-
-    #[inline]
-    fn cross_tick(&self, tick_next: TickIndex) -> Result<i128, SwapSimError> {
-        PoolTicksWriteGuard::cross_tick(self, tick_next)
-    }
-}
 
 /// Complete V4 pool state required for a full tick-crossing simulation.
 ///
@@ -144,7 +82,7 @@ pub struct Pool {
     pub tick_spacing: TickSpacing,
 
     /// Initialized ticks keyed by `tick_idx` in an ordered map behind a lock.
-    pub ticks: PoolTicks,
+    pub ticks: Arc<RwLock<TickSlab>>,
 
     pub cache: Arc<PoolCache>,
 
@@ -252,7 +190,7 @@ impl TryFrom<PoolSnapshot> for Pool {
     fn try_from(snapshot: PoolSnapshot) -> Result<Self, Self::Error> {
         snapshot.validate()?;
 
-        let ticks = PoolTicks::from_snapshot(snapshot.ticks.tick_spacing, snapshot.ticks.inner)?;
+        let ticks = TickSlab::from_snapshot(snapshot.ticks.tick_spacing, snapshot.ticks.inner)?;
         let sqrt_price_x96 = snapshot.state.sqrt_price_x96;
         let fee = snapshot.fee;
 
@@ -260,7 +198,7 @@ impl TryFrom<PoolSnapshot> for Pool {
             state: Arc::new(RwLock::new(snapshot.state)),
             fee,
             tick_spacing: snapshot.tick_spacing,
-            ticks,
+            ticks: Arc::new(RwLock::new(ticks)),
             cache: Arc::new(PoolCache::default()),
             price_cache: Arc::new(PriceCache::new(
                 sqrt_price_x96_to_price(sqrt_price_x96),
@@ -285,7 +223,7 @@ pub struct TickCrossInfo {
 /// for ordered traversal. The executor receives the already-computed effective
 /// swap fee, avoiding duplicate validation and protocol-fee calculation.
 struct PreparedSwap<'a> {
-    ticks: PoolTicksReadGuard<'a>,
+    ticks: RwLockReadGuard<'a, TickSlab>,
     effective_fee: Fee,
     cache: &'a PoolCache,
 }
@@ -302,7 +240,7 @@ impl Pool {
         liquidity: Liquidity,
         fee: Fee,
         tick_spacing: TickSpacing,
-        ticks: PoolTicks,
+        ticks: TickSlab,
     ) -> Result<Self, SwapSimError> {
         PoolSnapshot {
             state: PoolState {
@@ -328,7 +266,7 @@ impl Pool {
         liquidity: Liquidity,
         fee: Fee,
         tick_spacing: TickSpacing,
-        ticks: PoolTicks,
+        ticks: TickSlab,
     ) -> Self {
         let cache = Arc::new(PoolCache::default());
 
@@ -342,7 +280,7 @@ impl Pool {
             })),
             fee,
             tick_spacing,
-            ticks,
+            ticks: Arc::new(RwLock::new(ticks)),
             cache,
             price_cache: Arc::new(PriceCache::new(
                 sqrt_price_x96_to_price(sqrt_price_x96),
@@ -352,9 +290,6 @@ impl Pool {
     }
 
     /// Return another handle to the same shared pool state.
-    ///
-    /// This is equivalent to [`Clone`] and is provided to make shared-state
-    /// intent explicit at call sites.
     #[inline]
     #[must_use]
     pub fn shared_handle(&self) -> Self {
@@ -373,7 +308,7 @@ impl Pool {
             fee: self.fee,
             tick_spacing: self.tick_spacing,
             ticks: PoolTicksSnapshot {
-                tick_spacing: self.ticks.tick_spacing(),
+                tick_spacing: ticks.tick_spacing(),
                 inner: ticks.snapshot(),
             },
         }
@@ -410,14 +345,12 @@ impl Pool {
         &self,
         params: ModifyLiquidityParams,
     ) -> Result<ModifyLiquidityResult, SwapSimError> {
-        if self.ticks.tick_spacing() != self.tick_spacing {
+        let mut ticks = self.ticks.write();
+        if ticks.tick_spacing() != self.tick_spacing {
             return Err(SwapSimError::InvalidTickSpacing);
         }
         check_ticks(params.tick_lower, params.tick_upper, self.tick_spacing)?;
 
-        // Lock order: ticks first, then pool state — must match Pool::swap to
-        // prevent deadlock if both are called concurrently.
-        let mut ticks = self.ticks.write();
         let mut state = self.state.write();
         let sqrt_price_lower_x96 = self.cache.get_sqrt_price_at_tick(params.tick_lower)?;
         let sqrt_price_upper_x96 = self.cache.get_sqrt_price_at_tick(params.tick_upper)?;
@@ -451,37 +384,110 @@ impl Pool {
         );
 
         if params.liquidity_delta != 0 {
-            let lower_was_uninitialized = ticks.get(params.tick_lower).is_none();
-            let upper_was_uninitialized = ticks.get(params.tick_upper).is_none();
-            let max_liquidity_per_tick = if params.liquidity_delta > 0 {
-                Some(self.tick_spacing.max_liquidity_per_tick())
+            let lower_indexer = ticks.indexer(params.tick_lower);
+            let upper_indexer = ticks.indexer(params.tick_upper);
+            let lower_before = ticks.get(lower_indexer).copied().unwrap_or_else(|| {
+                TickInfo::new(params.tick_lower, params.tick_lower.sqrt_price_x96())
+            });
+            let upper_before = ticks.get(upper_indexer).copied().unwrap_or_else(|| {
+                TickInfo::new(params.tick_upper, params.tick_upper.sqrt_price_x96())
+            });
+
+            let lower_was_uninitialized = lower_before.liquidity_gross == 0;
+            let upper_was_uninitialized = upper_before.liquidity_gross == 0;
+
+            let lower_liquidity_gross_after = if params.liquidity_delta < 0 {
+                lower_before
+                    .liquidity_gross
+                    .checked_sub(params.liquidity_delta.unsigned_abs())
+                    .ok_or(SwapSimError::LiquidityUnderflow)?
             } else {
-                None
+                lower_before
+                    .liquidity_gross
+                    .checked_add(params.liquidity_delta as u128)
+                    .ok_or(SwapSimError::LiquidityOverflow)?
             };
 
-            let (lower, upper) = ticks.update_tick_pair(
-                params.tick_lower,
-                params.tick_upper,
-                params.liquidity_delta,
-                max_liquidity_per_tick,
-            )?;
+            let upper_liquidity_gross_after = if params.liquidity_delta < 0 {
+                upper_before
+                    .liquidity_gross
+                    .checked_sub(params.liquidity_delta.unsigned_abs())
+                    .ok_or(SwapSimError::LiquidityUnderflow)?
+            } else {
+                upper_before
+                    .liquidity_gross
+                    .checked_add(params.liquidity_delta as u128)
+                    .ok_or(SwapSimError::LiquidityOverflow)?
+            };
 
-            flipped_lower = lower.flipped;
-            flipped_upper = upper.flipped;
-            ticks.initialize_fee_growth_if_needed(
-                params.tick_lower,
-                lower_was_uninitialized,
-                state.tick,
-                state.fee_growth_global0_x128,
-                state.fee_growth_global1_x128,
-            );
-            ticks.initialize_fee_growth_if_needed(
-                params.tick_upper,
-                upper_was_uninitialized,
-                state.tick,
-                state.fee_growth_global0_x128,
-                state.fee_growth_global1_x128,
-            );
+            if params.liquidity_delta > 0 {
+                let max_liquidity_per_tick = self.tick_spacing.max_liquidity_per_tick().value();
+                if lower_liquidity_gross_after > max_liquidity_per_tick
+                    || upper_liquidity_gross_after > max_liquidity_per_tick
+                {
+                    return Err(SwapSimError::LiquidityOverflow);
+                }
+            }
+
+            let lower_liquidity_net = lower_before
+                .liquidity_net
+                .checked_add(params.liquidity_delta)
+                .ok_or(SwapSimError::LiquidityOverflow)?;
+            let upper_liquidity_net = upper_before
+                .liquidity_net
+                .checked_sub(params.liquidity_delta)
+                .ok_or(SwapSimError::LiquidityUnderflow)?;
+
+            flipped_lower = (lower_liquidity_gross_after == 0) != lower_was_uninitialized;
+            flipped_upper = (upper_liquidity_gross_after == 0) != upper_was_uninitialized;
+
+            if lower_liquidity_gross_after == 0 {
+                ticks.remove(lower_indexer);
+            } else {
+                if lower_was_uninitialized {
+                    ticks.insert(
+                        lower_indexer,
+                        TickInfo::new(params.tick_lower, params.tick_lower.sqrt_price_x96()),
+                    );
+                }
+
+                let updated = ticks.update_initialized_tick(lower_indexer, |tick_info| {
+                    tick_info.liquidity_gross = lower_liquidity_gross_after;
+                    tick_info.liquidity_net = lower_liquidity_net;
+                    if lower_was_uninitialized && params.tick_lower <= state.tick {
+                        tick_info.fee_growth_outside0_x128 = state.fee_growth_global0_x128;
+                        tick_info.fee_growth_outside1_x128 = state.fee_growth_global1_x128;
+                    }
+                    true
+                });
+                if !updated {
+                    return Err(SwapSimError::MissingInitializedTick);
+                }
+            }
+
+            if upper_liquidity_gross_after == 0 {
+                ticks.remove(upper_indexer);
+            } else {
+                if upper_was_uninitialized {
+                    ticks.insert(
+                        upper_indexer,
+                        TickInfo::new(params.tick_upper, params.tick_upper.sqrt_price_x96()),
+                    );
+                }
+
+                let updated = ticks.update_initialized_tick(upper_indexer, |tick_info| {
+                    tick_info.liquidity_gross = upper_liquidity_gross_after;
+                    tick_info.liquidity_net = upper_liquidity_net;
+                    if upper_was_uninitialized && params.tick_upper <= state.tick {
+                        tick_info.fee_growth_outside0_x128 = state.fee_growth_global0_x128;
+                        tick_info.fee_growth_outside1_x128 = state.fee_growth_global1_x128;
+                    }
+                    true
+                });
+                if !updated {
+                    return Err(SwapSimError::MissingInitializedTick);
+                }
+            }
         }
 
         state.liquidity = liquidity_after;
@@ -563,11 +569,11 @@ impl Pool {
         #[cfg(not(feature = "protocol-fee"))]
         let effective_fee = self.fee;
         validate_swap_fee_for_exactness(effective_fee, exact_in)?;
-        if self.ticks.tick_spacing() != self.tick_spacing {
+        let mut ticks = self.ticks.write();
+        if ticks.tick_spacing() != self.tick_spacing {
             return Err(SwapSimError::InvalidTickSpacing);
         }
 
-        let mut ticks = self.ticks.write();
         let mut state = self.state.write();
 
         let result = execute_swap_full_from_state(
@@ -581,11 +587,19 @@ impl Pool {
 
         // Commit only after the full simulation succeeds.
         for crossing in &result.crossings {
-            ticks.cross_fee_growth(
-                crossing.tick,
-                crossing.fee_growth_global0_x128,
-                crossing.fee_growth_global1_x128,
-            )?;
+            let indexer = ticks.indexer(crossing.tick);
+
+            if !ticks.update_initialized_tick(indexer, |tick_info| {
+                tick_info.fee_growth_outside0_x128 = crossing
+                    .fee_growth_global0_x128
+                    .wrapping_sub(tick_info.fee_growth_outside0_x128);
+                tick_info.fee_growth_outside1_x128 = crossing
+                    .fee_growth_global1_x128
+                    .wrapping_sub(tick_info.fee_growth_outside1_x128);
+                true
+            }) {
+                return Err(SwapSimError::MissingInitializedTick);
+            }
         }
         state.sqrt_price_x96 = result.sqrt_price_x96;
         state.tick = result.tick;
@@ -679,12 +693,13 @@ impl Pool {
         let effective_fee = self.fee;
 
         validate_swap_fee_for_exactness(effective_fee, exact_in)?;
-        if self.ticks.tick_spacing() != self.tick_spacing {
+        let ticks = self.ticks.read();
+        if ticks.tick_spacing() != self.tick_spacing {
             return Err(SwapSimError::InvalidTickSpacing);
         }
 
         Ok(PreparedSwap {
-            ticks: self.ticks.read(),
+            ticks,
             effective_fee,
             cache: self.cache.as_ref(),
         })
@@ -738,9 +753,9 @@ struct SwapLoopState {
 }
 
 #[inline]
-fn execute_swap_light_from_state<G: TickCrossing>(
+fn execute_swap_light_from_state(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
@@ -785,15 +800,15 @@ fn execute_swap_light_from_state<G: TickCrossing>(
 }
 
 #[inline]
-fn execute_swap_full_from_state<G: TickCrossing>(
+fn execute_swap_full_from_state(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
     params: SwapParams,
 ) -> Result<FullSwapResult, SwapSimError> {
-    let (light, crossings) = execute_swap_core::<G, true>(
+    let (light, crossings) = execute_swap_core::<true>(
         state,
         ticks,
         cache,
@@ -805,9 +820,9 @@ fn execute_swap_full_from_state<G: TickCrossing>(
     Ok(light.into_full(crossings.unwrap_or_default()))
 }
 
-fn execute_swap_core<G: TickCrossing, const RECORD_CROSSINGS: bool>(
+fn execute_swap_core<const RECORD_CROSSINGS: bool>(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
@@ -838,7 +853,7 @@ fn execute_swap_core<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     validate_price_limit(state, params.zero_for_one, params.sqrt_price_limit_x96)?;
 
     if params.amount.is_negative() {
-        execute_exact_in_loop::<G, RECORD_CROSSINGS>(
+        execute_exact_in_loop::<RECORD_CROSSINGS>(
             state,
             ticks,
             cache,
@@ -847,7 +862,7 @@ fn execute_swap_core<G: TickCrossing, const RECORD_CROSSINGS: bool>(
             params,
         )
     } else {
-        execute_exact_out_loop::<G, RECORD_CROSSINGS>(
+        execute_exact_out_loop::<RECORD_CROSSINGS>(
             state,
             ticks,
             cache,
@@ -1117,8 +1132,8 @@ fn deduct_protocol_fee_from_step(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn try_apply_cached_exact_in_cross<G: TickCrossing>(
-    ticks: &G,
+fn try_apply_cached_exact_in_cross(
+    ticks: &TickSlab,
     cache: &PoolCache,
     result: &mut SwapLoopState,
     amount_specified: U256,
@@ -1177,7 +1192,11 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
     accrue_lp_fee(result, step_fee_amount, params.zero_for_one)?;
 
     if tick_initialized {
-        let liquidity_net_raw = ticks.cross_tick(tick_next)?;
+        let liquidity_net_raw = ticks
+            .get(ticks.indexer(tick_next))
+            .ok_or(SwapSimError::MissingInitializedTick)?
+            .liquidity_net;
+
         let liquidity_net = if params.zero_for_one {
             liquidity_net_raw
                 .checked_neg()
@@ -1207,8 +1226,8 @@ fn try_apply_cached_exact_in_cross<G: TickCrossing>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn try_apply_cached_exact_out_cross<G: TickCrossing>(
-    ticks: &G,
+fn try_apply_cached_exact_out_cross(
+    ticks: &TickSlab,
     cache: &PoolCache,
     result: &mut SwapLoopState,
     amount_remaining: &mut U256,
@@ -1266,7 +1285,11 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
     accrue_lp_fee(result, step_fee_amount, params.zero_for_one)?;
 
     if tick_initialized {
-        let liquidity_net_raw = ticks.cross_tick(tick_next)?;
+        let liquidity_net_raw = ticks
+            .get(ticks.indexer(tick_next))
+            .ok_or(SwapSimError::MissingInitializedTick)?
+            .liquidity_net;
+
         let liquidity_net = if params.zero_for_one {
             liquidity_net_raw
                 .checked_neg()
@@ -1299,9 +1322,9 @@ fn try_apply_cached_exact_out_cross<G: TickCrossing>(
 /// This is intentionally separate from the full loop. It returns only the
 /// lightweight result, records no crossings, and calls exact-in step math
 /// directly instead of the generic signed `compute_swap_step` dispatcher.
-fn execute_exact_in_light_loop<G: TickCrossing>(
+fn execute_exact_in_light_loop(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
@@ -1331,7 +1354,8 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
         iterations += 1;
 
         let sqrt_start = result.sqrt_price_x96;
-        let next_tick = ticks.next_initialized_tick_within_one_word(
+        let next_tick = next_initialized_tick_within_one_word(
+            ticks,
             result.tick,
             tick_spacing,
             params.zero_for_one,
@@ -1399,7 +1423,11 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
-                let liquidity_net_raw = ticks.cross_tick(tick_next)?;
+                let liquidity_net_raw = ticks
+                    .get(ticks.indexer(tick_next))
+                    .ok_or(SwapSimError::MissingInitializedTick)?
+                    .liquidity_net;
+
                 let liquidity_net = if params.zero_for_one {
                     liquidity_net_raw
                         .checked_neg()
@@ -1442,9 +1470,9 @@ fn execute_exact_in_light_loop<G: TickCrossing>(
 }
 
 /// Exact-output loop used by the default lightweight simulator.
-fn execute_exact_out_light_loop<G: TickCrossing>(
+fn execute_exact_out_light_loop(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
@@ -1474,7 +1502,8 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
         iterations += 1;
 
         let sqrt_start = result.sqrt_price_x96;
-        let next_tick = ticks.next_initialized_tick_within_one_word(
+        let next_tick = next_initialized_tick_within_one_word(
+            ticks,
             result.tick,
             tick_spacing,
             params.zero_for_one,
@@ -1541,7 +1570,11 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
-                let liquidity_net_raw = ticks.cross_tick(tick_next)?;
+                let liquidity_net_raw = ticks
+                    .get(ticks.indexer(tick_next))
+                    .ok_or(SwapSimError::MissingInitializedTick)?
+                    .liquidity_net;
+
                 let liquidity_net = if params.zero_for_one {
                     liquidity_net_raw
                         .checked_neg()
@@ -1582,9 +1615,9 @@ fn execute_exact_out_light_loop<G: TickCrossing>(
     })
 }
 
-fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
+fn execute_exact_in_loop<const RECORD_CROSSINGS: bool>(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
@@ -1614,22 +1647,20 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     let mut iterations = 0usize;
 
     while !amount_remaining.is_zero() && result.sqrt_price_x96 != params.sqrt_price_limit_x96 {
+        let sqrt_start = result.sqrt_price_x96;
         if iterations >= MAX_SWAP_ITERATIONS {
             return Err(SwapSimError::IterationLimitExceeded);
         }
         iterations += 1;
 
-        let sqrt_start = result.sqrt_price_x96;
-        let next_tick = ticks.next_initialized_tick_within_one_word(
+        let next_tick = next_initialized_tick_within_one_word(
+            ticks,
             result.tick,
             tick_spacing,
             params.zero_for_one,
         );
 
-        // V4 clamps tickNext before pricing because the bitmap is not aware
-        // of global min/max tick bounds.
         let tick_next = next_tick.tick_next.clamp(TickIndex::MIN, TickIndex::MAX);
-
         let sqrt_boundary = cache.get_sqrt_price_at_tick(tick_next)?;
         let sqrt_target = get_sqrt_price_target(
             params.zero_for_one,
@@ -1688,7 +1719,10 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
-                let liquidity_net_raw = ticks.cross_tick(tick_next)?;
+                let liquidity_net_raw = ticks
+                    .get(ticks.indexer(tick_next))
+                    .ok_or(SwapSimError::MissingInitializedTick)?
+                    .liquidity_net;
                 let liquidity_net = if params.zero_for_one {
                     liquidity_net_raw
                         .checked_neg()
@@ -1745,9 +1779,9 @@ fn execute_exact_in_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
     Ok((light, crossings))
 }
 
-fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
+fn execute_exact_out_loop<const RECORD_CROSSINGS: bool>(
     state: &PoolState,
-    ticks: &G,
+    ticks: &TickSlab,
     cache: &PoolCache,
     effective_swap_fee: Fee,
     tick_spacing: TickSpacing,
@@ -1783,7 +1817,8 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
         iterations += 1;
 
         let sqrt_start = result.sqrt_price_x96;
-        let next_tick = ticks.next_initialized_tick_within_one_word(
+        let next_tick = next_initialized_tick_within_one_word(
+            ticks,
             result.tick,
             tick_spacing,
             params.zero_for_one,
@@ -1850,7 +1885,11 @@ fn execute_exact_out_loop<G: TickCrossing, const RECORD_CROSSINGS: bool>(
 
         if result.sqrt_price_x96 == sqrt_boundary {
             if next_tick.initialized {
-                let liquidity_net_raw = ticks.cross_tick(tick_next)?;
+                let liquidity_net_raw = ticks
+                    .get(ticks.indexer(tick_next))
+                    .ok_or(SwapSimError::MissingInitializedTick)?
+                    .liquidity_net;
+
                 let liquidity_net = if params.zero_for_one {
                     liquidity_net_raw
                         .checked_neg()
@@ -1933,33 +1972,25 @@ fn validate_tick_index_for_spacing(
     }
 }
 
-trait FeeGrowthTicks {
-    fn fee_tick(&self, tick: TickIndex) -> Option<TickInfo>;
-}
-
-impl FeeGrowthTicks for PoolTicksReadGuard<'_> {
-    fn fee_tick(&self, tick: TickIndex) -> Option<TickInfo> {
-        self.get(tick)
-    }
-}
-
-impl FeeGrowthTicks for PoolTicksWriteGuard<'_> {
-    fn fee_tick(&self, tick: TickIndex) -> Option<TickInfo> {
-        self.get(tick)
-    }
-}
-
 #[inline]
-fn fee_growth_inside_from_ticks<T: FeeGrowthTicks>(
-    ticks: &T,
+fn fee_growth_inside_from_ticks(
+    ticks: &TickSlab,
     tick_current: TickIndex,
     tick_lower: TickIndex,
     tick_upper: TickIndex,
     fee_growth_global0_x128: U256,
     fee_growth_global1_x128: U256,
 ) -> (U256, U256) {
-    let lower = ticks.fee_tick(tick_lower).unwrap_or_default();
-    let upper = ticks.fee_tick(tick_upper).unwrap_or_default();
+    let lower = if let Some(lower) = ticks.get(ticks.indexer(tick_lower)) {
+        lower.clone()
+    } else {
+        TickInfo::new(tick_lower, tick_lower.sqrt_price_x96())
+    };
+    let upper = if let Some(upper) = ticks.get(ticks.indexer(tick_upper)) {
+        upper.clone()
+    } else {
+        TickInfo::new(tick_upper, tick_upper.sqrt_price_x96())
+    };
 
     if tick_current < tick_lower {
         (
@@ -2050,26 +2081,20 @@ fn signed_amount_to_i128(amount: SignedAmount) -> Result<i128, SwapSimError> {
 
 /// Return the next initialized tick within the current bitmap word.
 ///
-/// Emulates V4's `TickBitmap.nextInitializedTickWithinOneWord` using the
-/// ordered `PoolTicks` BTreeMap. The word-boundary arithmetic ensures fee
-/// rounding matches V4 exactly:
-///
-/// * **zeroForOne** (search downward): word start = `(compressed / 256) × 256`.
-/// * **oneForZero** (search upward): word end = `((compressed+1) / 256) × 256 + 255`.
+/// This keeps the V4 word-boundary behavior while using the slab-backed tick
+/// store for the actual initialized-tick lookup.
 #[inline(always)]
-fn next_initialized_tick_within_one_word_fallback<G: TickCrossing + ?Sized>(
-    ticks: &G,
+fn next_initialized_tick_within_one_word(
+    ticks: &TickSlab,
     tick: TickIndex,
     tick_spacing: TickSpacing,
     zero_for_one: bool,
 ) -> NextInitializedTick {
-    let compressed = tick.div_euclid(tick_spacing.as_i32());
+    let compressed = tick.value().div_euclid(tick_spacing.as_i32());
 
     let boundary_compressed = if zero_for_one {
-        // Lowest compressed tick in the current 256-bit word.
         compressed - compressed.rem_euclid(256)
     } else {
-        // Highest compressed tick in the word that contains (compressed + 1).
         let next_compressed = compressed + 1;
         next_compressed + (255 - next_compressed.rem_euclid(256))
     };
@@ -2081,19 +2106,43 @@ fn next_initialized_tick_within_one_word_fallback<G: TickCrossing + ?Sized>(
     )
     .expect("must be within tick index bounds");
 
-    let next = ticks.next_initialized_tick(tick, zero_for_one);
+    let snapshot = ticks.snapshot();
+    let next = if zero_for_one {
+        snapshot
+            .range(..=tick)
+            .next_back()
+            .map(|(&tick_next, _)| tick_next)
+    } else {
+        snapshot
+            .range((std::ops::Bound::Excluded(tick), std::ops::Bound::Unbounded))
+            .next()
+            .map(|(&tick_next, _)| tick_next)
+    };
+
+    let Some(tick_next) = next else {
+        return NextInitializedTick {
+            tick_next: boundary_tick,
+            initialized: false,
+        };
+    };
 
     if zero_for_one {
-        if next.initialized && next.tick_next >= boundary_tick {
-            next
+        if tick_next >= boundary_tick {
+            NextInitializedTick {
+                tick_next,
+                initialized: true,
+            }
         } else {
             NextInitializedTick {
                 tick_next: boundary_tick,
                 initialized: false,
             }
         }
-    } else if next.initialized && next.tick_next <= boundary_tick {
-        next
+    } else if tick_next <= boundary_tick {
+        NextInitializedTick {
+            tick_next,
+            initialized: true,
+        }
     } else {
         NextInitializedTick {
             tick_next: boundary_tick,
@@ -2176,8 +2225,9 @@ mod tests {
     ) -> (TickIndex, TickInfo) {
         (
             tick(tick_idx),
-            TickInfo::new(
-                sqrt_at(tick_idx).value(),
+            TickInfo::build(
+                sqrt_at(tick_idx),
+                tick(tick_idx),
                 liquidity_gross,
                 liquidity_net,
                 U256::ZERO,
@@ -2211,7 +2261,7 @@ mod tests {
     ) -> Pool {
         let fee = Fee::new(fee).expect("fee out of range");
         let tick_map =
-            PoolTicks::from_snapshot(tick_spacing, ticks.into_iter().collect::<BTreeMap<_, _>>())
+            TickSlab::from_snapshot(tick_spacing, ticks.into_iter().collect::<BTreeMap<_, _>>())
                 .expect("valid ticks");
 
         let cache = Arc::new(PoolCache::default());
@@ -2226,7 +2276,7 @@ mod tests {
             })),
             fee,
             tick_spacing,
-            ticks: tick_map,
+            ticks: Arc::new(RwLock::new(tick_map)),
             cache,
             price_cache: Arc::new(PriceCache::new(
                 sqrt_price_x96_to_price(sqrt_price_x96),
@@ -2679,8 +2729,14 @@ mod tests {
         assert!(result.flipped_lower && result.flipped_upper);
 
         let ticks = pool.ticks.read();
-        assert_eq!(ticks.get(tick(-120)).unwrap().liquidity_net, liq as i128);
-        assert_eq!(ticks.get(tick(120)).unwrap().liquidity_net, -(liq as i128));
+        assert_eq!(
+            ticks.get(ticks.indexer(tick(-120))).unwrap().liquidity_net,
+            liq as i128
+        );
+        assert_eq!(
+            ticks.get(ticks.indexer(tick(120))).unwrap().liquidity_net,
+            -(liq as i128)
+        );
     }
 
     #[test]
@@ -2721,14 +2777,14 @@ mod tests {
         assert!(result.flipped_lower && result.flipped_upper);
 
         let ticks = pool.ticks.read();
-        assert!(ticks.get(tick(-120)).is_none());
-        assert!(ticks.get(tick(120)).is_none());
+        assert!(ticks.get(ticks.indexer(tick(-120))).is_none());
+        assert!(ticks.get(ticks.indexer(tick(120))).is_none());
     }
 
     #[test]
     #[should_panic(expected = "tick index out of range")]
     fn rejects_out_of_range_tick_entry() {
-        PoolTicks::from_snapshot(
+        TickSlab::from_snapshot(
             tick_spacing_60(),
             [tick_info(TickIndex::MIN.value() - 1, 0, 1)].into(),
         )
@@ -2821,8 +2877,8 @@ mod tests {
         );
     }
 
-    fn tick_pool_for_search() -> PoolTicks {
-        PoolTicks::from_snapshot(
+    fn tick_pool_for_search() -> TickSlab {
+        TickSlab::from_snapshot(
             tick_spacing_60(),
             [
                 tick_info(-240, 0, 1),
@@ -2837,8 +2893,7 @@ mod tests {
     #[test]
     fn next_tick_down_returns_tick_at_current() {
         let ticks = tick_pool_for_search();
-        let guard = ticks.read();
-        let next = guard.next_initialized_tick(tick(0), true);
+        let next = next_initialized_tick_within_one_word(&ticks, tick(0), tick_spacing_60(), true);
         assert_eq!(next.tick_next, tick(0));
         assert!(next.initialized);
     }
@@ -2846,8 +2901,7 @@ mod tests {
     #[test]
     fn next_tick_up_skips_current() {
         let ticks = tick_pool_for_search();
-        let guard = ticks.read();
-        let next = guard.next_initialized_tick(tick(0), false);
+        let next = next_initialized_tick_within_one_word(&ticks, tick(0), tick_spacing_60(), false);
         assert_eq!(next.tick_next, tick(240));
         assert!(next.initialized);
     }
@@ -2855,15 +2909,14 @@ mod tests {
     #[test]
     fn next_tick_returns_sentinel_when_empty() {
         let ticks =
-            PoolTicks::from_snapshot(tick_spacing_60(), [tick_info(120, 0, 1)].into()).unwrap();
-        let guard = ticks.read();
+            TickSlab::from_snapshot(tick_spacing_60(), [tick_info(120, 0, 1)].into()).unwrap();
 
-        let down = guard.next_initialized_tick(tick(50), true);
-        assert_eq!(down.tick_next, TickIndex::MIN);
+        let down = next_initialized_tick_within_one_word(&ticks, tick(50), tick_spacing_60(), true);
+        assert_eq!(down.tick_next, tick(0));
         assert!(!down.initialized);
 
-        let up = guard.next_initialized_tick(tick(120), false);
-        assert_eq!(up.tick_next, TickIndex::MAX);
+        let up = next_initialized_tick_within_one_word(&ticks, tick(120), tick_spacing_60(), false);
+        assert_eq!(up.tick_next, tick(15300));
         assert!(!up.initialized);
     }
 

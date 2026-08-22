@@ -62,6 +62,14 @@ impl TickSpacing {
     }
 }
 
+/// Calculates the number of page buckets required to cover the protocol tick range.
+#[inline(always)]
+pub(crate) fn calculate_cache_cap(tick_spacing: TickSpacing) -> u16 {
+    (((TickIndex::MAX.value() - TickIndex::MIN.value()) as usize / tick_spacing.as_u32() as usize)
+        >> 5) as u16
+        + 1
+}
+
 /// Constructs a `TickSpacing` from a literal/expression, panicking if the value
 /// is out of range.
 ///
@@ -185,6 +193,17 @@ mod tests {
                 Liquidity::new(u128::MAX / num_ticks),
                 "mismatch at tick_spacing={raw}"
             );
+        }
+    }
+
+    #[test]
+    fn cache_capacity_covers_spacing_compressed_protocol_range() {
+        let cases = [(1, 55_455), (10, 5_546), (32_767, 2)];
+
+        for (raw_spacing, expected_capacity) in cases {
+            let spacing = TickSpacing::new(raw_spacing).unwrap();
+
+            assert_eq!(calculate_cache_cap(spacing), expected_capacity);
         }
     }
 

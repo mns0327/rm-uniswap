@@ -1,3 +1,5 @@
+use ruint::aliases::U256;
+
 use crate::{core::types::tick_slab_indexer::TickSlabIndexer, v4::TickInfo};
 
 /// Fixed-size storage for one page of initialized pool ticks.
@@ -7,13 +9,14 @@ use crate::{core::types::tick_slab_indexer::TickSlabIndexer, v4::TickInfo};
 /// as the storage unit behind its cache, so neighboring active ticks can be
 /// scanned with predictable memory access instead of allocating one node per
 /// tick.
+#[derive(Debug)]
 pub(crate) struct TickSlabValue {
     /// Tick payloads for this page.
     ///
     /// A slot can contain `TickInfo::default()` even when it is not logically
     /// present. Always consult `initialized_map` before exposing a slot to
     /// callers.
-    slots: [TickInfo; 32],
+    slots: [Option<TickInfo>; 32],
     /// Occupancy bitmap for the 32 slots in `slots`.
     ///
     /// Bit `i` is set when slot `i` has been inserted into the slab. The bit
@@ -41,7 +44,7 @@ impl TickSlabValue {
     /// initialized-page chain before storing it in the backing allocator.
     pub fn new(prev_idx: Option<u16>, next_idx: Option<u16>) -> Self {
         Self {
-            slots: [TickInfo::default(); 32],
+            slots: [None; 32],
             initialized_map: 0,
             prev_idx,
             next_idx,
@@ -64,7 +67,7 @@ impl TickSlabValue {
     /// page. This method only writes the page-local slot and updates the
     /// occupancy bitmap.
     pub fn insert(&mut self, tick_indexer: &TickSlabIndexer, tick_info: TickInfo) {
-        self.slots[tick_indexer.slot_index() as usize] = tick_info;
+        self.slots[tick_indexer.slot_index() as usize] = Some(tick_info);
         self.initialized_map |= 1 << tick_indexer.slot_index();
     }
 
@@ -75,7 +78,18 @@ impl TickSlabValue {
     /// inserted ticks are visible to callers.
     pub fn get(&self, tick_indexer: &TickSlabIndexer) -> Option<&TickInfo> {
         if self.is_initialized(tick_indexer) {
-            Some(&self.slots[tick_indexer.slot_index() as usize])
+            self.slots[tick_indexer.slot_index() as usize].as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Returns the mutable tick stored at the slot selected by `tick_indexer`.
+    ///
+    /// Like [`get`](Self::get), this only exposes logically initialized slots.
+    pub(crate) fn get_mut(&mut self, tick_indexer: &TickSlabIndexer) -> Option<&mut TickInfo> {
+        if self.is_initialized(tick_indexer) {
+            self.slots[tick_indexer.slot_index() as usize].as_mut()
         } else {
             None
         }
@@ -87,7 +101,7 @@ impl TickSlabValue {
     /// slab is responsible for unlinking this page if the removal makes it
     /// empty.
     pub fn remove(&mut self, tick_indexer: &TickSlabIndexer) {
-        self.slots[tick_indexer.slot_index() as usize] = TickInfo::DEFAULT;
+        self.slots[tick_indexer.slot_index() as usize] = None;
         self.initialized_map &= !(1 << tick_indexer.slot_index());
     }
 
@@ -116,7 +130,9 @@ impl TickSlabValue {
         }
 
         let next_slot = candidates.trailing_zeros() as u8;
-        Some((next_slot, &self.slots[next_slot as usize]))
+        self.slots[next_slot as usize]
+            .as_ref()
+            .map(|tick_info| (next_slot, tick_info))
     }
 
     /// Returns the previous initialized tick in this page before `tick_indexer`.
@@ -144,7 +160,9 @@ impl TickSlabValue {
         }
 
         let prev_slot = (u32::BITS - 1 - candidates.leading_zeros()) as u8;
-        Some((prev_slot, &self.slots[prev_slot as usize]))
+        self.slots[prev_slot as usize]
+            .as_ref()
+            .map(|tick_info| (prev_slot, tick_info))
     }
 
     /// Returns the first initialized tick in this page.
@@ -162,7 +180,9 @@ impl TickSlabValue {
         }
 
         let first_slot = self.initialized_map.trailing_zeros() as u8;
-        Some((first_slot, &self.slots[first_slot as usize]))
+        self.slots[first_slot as usize]
+            .as_ref()
+            .map(|tick_info| (first_slot, tick_info))
     }
 
     /// Returns the last initialized tick in this page.
@@ -181,7 +201,39 @@ impl TickSlabValue {
         }
 
         let last_slot = (u32::BITS - 1 - self.initialized_map.leading_zeros()) as u8;
-        Some((last_slot, &self.slots[last_slot as usize]))
+        self.slots[last_slot as usize]
+            .as_ref()
+            .map(|tick_info| (last_slot, tick_info))
+    }
+
+    /// Iterates over all logically initialized slots in this page.
+    pub(crate) fn initialized_slots(&self) -> impl Iterator<Item = (u8, &TickInfo)> + '_ {
+        (0..32).filter_map(|slot| {
+            if self.initialized_map & (1u32 << slot) != 0 {
+                self.slots[slot]
+                    .as_ref()
+                    .map(|tick_info| (slot as u8, tick_info))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn cross_fee_growth(
+        &mut self,
+        tick_indexer: &TickSlabIndexer,
+        fee_growth_global0_x128: U256,
+        fee_growth_global1_x128: U256,
+    ) -> bool {
+        if let Some(tick_info) = self.slots[tick_indexer.slot_index() as usize].as_mut() {
+            tick_info.fee_growth_outside0_x128 =
+                fee_growth_global0_x128.wrapping_sub(tick_info.fee_growth_outside0_x128);
+            tick_info.fee_growth_outside1_x128 =
+                fee_growth_global1_x128.wrapping_sub(tick_info.fee_growth_outside1_x128);
+            true
+        } else {
+            false
+        }
     }
 
     /// Returns whether the selected slot is logically present.

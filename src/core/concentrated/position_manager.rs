@@ -89,7 +89,6 @@ pub trait LiquidityHook: Send + Sync {
 /// Manager-owned mutations are serialized. User hooks run without the
 /// position-map lock, so read-only inspection remains available while a hook
 /// executes. Recursive position mutation from a hook is not supported.
-#[derive(Clone)]
 pub struct PositionManager {
     pool: ConcentratedPool,
     positions: Arc<RwLock<BTreeMap<u64, PositionInfo>>>,

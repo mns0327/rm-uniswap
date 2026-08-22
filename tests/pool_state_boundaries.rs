@@ -82,7 +82,10 @@ fn snapshot_rejects_tick_and_price_mismatch() {
 #[test]
 fn snapshot_rejects_zero_gross_initialized_tick() {
     let mut snapshot = valid_pool().snapshot();
-    snapshot.ticks.inner.insert(tick(-120), TickInfo::default());
+    snapshot
+        .ticks
+        .inner
+        .insert(tick(-120), TickInfo::default().into());
 
     assert_eq!(Pool::try_from(snapshot).unwrap_err(), Error::InvalidTick);
 }

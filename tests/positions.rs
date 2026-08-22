@@ -266,14 +266,14 @@ fn hook_runs_without_holding_position_map_lock() {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let owner = Address::repeat_byte(0x58);
-    let manager = PositionManager::with_hook(
+    let manager = Arc::new(PositionManager::with_hook(
         empty_pool(),
         Arc::new(BlockingHook {
             entered: entered_tx,
             release: Mutex::new(release_rx),
         }),
-    );
-    let mint_manager = manager.clone();
+    ));
+    let mint_manager = Arc::clone(&manager);
     let mint_thread = std::thread::spawn(move || {
         mint_manager.mint(
             owner,
@@ -287,7 +287,7 @@ fn hook_runs_without_holding_position_map_lock() {
 
     entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-    let inspect_manager = manager.clone();
+    let inspect_manager = Arc::clone(&manager);
     let (inspected_tx, inspected_rx) = mpsc::channel();
     let inspect_thread = std::thread::spawn(move || {
         inspected_tx.send(inspect_manager.position(1)).unwrap();

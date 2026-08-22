@@ -21,61 +21,72 @@ fn ether(n: u128) -> U256 {
 }
 
 fn bench_pool_ticks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("pool_ticks");
+    let mut group = c.benchmark_group("tick_slab_pool_storage");
 
     let pool = build_test_pool();
-    let pool_ticks = pool.ticks;
+    let pool_ticks = pool.ticks.clone();
 
-    let tick_lower = pool_ticks.read().first_tick();
-    let tick_upper = pool_ticks.read().last_tick();
+    let tick_snapshot = pool_ticks.read().snapshot();
+    let tick_upper = *tick_snapshot.keys().next_back().unwrap();
     let current_tick = TickIndex::new(0).unwrap();
 
-    group.bench_function("next_initialized_tick_zero_for_one", |b| {
+    group.bench_function("slab_next_initialized_tick_zero_for_one", |b| {
         let pool = pool_ticks.clone();
         b.iter(|| {
             let guard = pool.read();
-            guard.next_initialized_tick(current_tick, true)
+            let indexer = guard.indexer(black_box(current_tick));
+            black_box(
+                guard
+                    .next_initialized_tick(indexer, black_box(true))
+                    .map(|(indexer, tick_info)| (indexer, tick_info.liquidity_gross)),
+            )
         })
     });
 
-    group.bench_function("next_initialized_tick_one_for_zero", |b| {
+    group.bench_function("slab_next_initialized_tick_one_for_zero", |b| {
         let pool = pool_ticks.clone();
         b.iter(|| {
             let guard = pool.read();
-            guard.next_initialized_tick(current_tick, false)
+            let indexer = guard.indexer(black_box(current_tick));
+            black_box(
+                guard
+                    .next_initialized_tick(indexer, black_box(false))
+                    .map(|(indexer, tick_info)| (indexer, tick_info.liquidity_gross)),
+            )
         })
     });
 
-    group.bench_function("cross_tick", |b| {
-        let pool = pool_ticks.clone();
-        b.iter(|| {
-            let guard = pool.read();
-            guard.cross_tick(tick_upper).unwrap()
-        })
-    });
-
-    group.bench_function("update_tick", |b| {
+    group.bench_function("cross_fee_growth", |b| {
         let pool = pool_ticks.clone();
         b.iter(|| {
             let mut guard = pool.write();
             guard
-                .update_tick(black_box(tick_upper), black_box(500_i128), black_box(false))
-                .unwrap()
-        })
-    });
-
-    group.bench_function("update_tick_pair", |b| {
-        let pool = pool_ticks.clone();
-        b.iter(|| {
-            let mut guard = pool.write();
-            guard
-                .update_tick_pair(
-                    black_box(tick_lower),
+                .cross_fee_growth(
                     black_box(tick_upper),
-                    black_box(500_i128),
-                    None,
+                    black_box(U256::from(1_000_000u64)),
+                    black_box(U256::from(2_000_000u64)),
                 )
                 .unwrap()
+        })
+    });
+
+    group.bench_function("update_initialized_tick", |b| {
+        let pool = pool_ticks.clone();
+        b.iter(|| {
+            let mut guard = pool.write();
+            let indexer = guard.indexer(black_box(tick_upper));
+            guard.update_initialized_tick(indexer, |tick_info| {
+                tick_info.fee_growth_outside0_x128 = black_box(U256::from(500u64));
+                black_box(true)
+            })
+        })
+    });
+
+    group.bench_function("snapshot", |b| {
+        let pool = pool_ticks.clone();
+        b.iter(|| {
+            let guard = pool.read();
+            black_box(guard.snapshot())
         })
     });
 
@@ -87,8 +98,9 @@ fn bench_pool(c: &mut Criterion) {
 
     let pool = build_test_pool();
 
-    let tick_lower = pool.ticks.read().first_tick();
-    let tick_upper = pool.ticks.read().last_tick();
+    let tick_snapshot = pool.ticks.read().snapshot();
+    let tick_lower = *tick_snapshot.keys().next().unwrap();
+    let tick_upper = *tick_snapshot.keys().next_back().unwrap();
 
     group.bench_function("simulate_swap_exact_in", |b| {
         b.iter(|| {
