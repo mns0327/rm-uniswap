@@ -1,7 +1,6 @@
 use ruint::{
-    ParseError,
     aliases::{U160, U256},
-    uint,
+    uint, ParseError,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, ops::Deref};
@@ -151,13 +150,18 @@ impl SqrtPriceX96 {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
+/// # use rm_uniswap::sqrt_price_x96;
 /// let a = sqrt_price_x96!(79228162514264337593543950336);
-/// let b = sqrt_price_x96!(raw some_u160_value);
+/// let b = sqrt_price_x96!(raw rm_uniswap::v4::SqrtPriceX96::MIN.value());
 ///
 /// let c = sqrt_price_x96!(
 ///     str "1461446703485210103287273052203988822378723970342"
 /// );
+///
+/// assert_eq!(a.tick_index().value(), 0);
+/// assert_eq!(b, rm_uniswap::v4::SqrtPriceX96::MIN);
+/// assert_eq!(c, rm_uniswap::v4::SqrtPriceX96::MAX);
 /// ```
 #[macro_export]
 macro_rules! sqrt_price_x96 {

@@ -18,6 +18,7 @@ mod v4;
 
 pub use core::error::Error;
 
+use crate::v4::Liquidity;
 use crate::{
     core::{
         concentrated::ticks::slab::TickSlab,
@@ -42,10 +43,14 @@ fn tick(value: i32) -> TickIndex {
 
 fn info(tick_idx: i32) -> TickInfo {
     TickInfo {
-        liquidity_gross: tick_idx as u128 + 1,
+        liquidity_gross: Liquidity::new(tick_idx as u128 + 1),
         liquidity_net: tick_idx as i128,
         ..TickInfo::DEFAULT
     }
+}
+
+fn liquidity_gross(info: &TickInfo) -> u128 {
+    info.liquidity_gross.value()
 }
 
 fn build_dense_keys() -> Vec<i32> {
@@ -55,7 +60,7 @@ fn build_dense_keys() -> Vec<i32> {
 fn build_sparse_slab() -> TickSlab {
     let mut slab = TickSlab::new(TICK_SPACING).unwrap();
     for key in SPARSE_KEYS {
-        slab.insert(slab.indexer(tick(key)), info(key));
+        slab.insert(slab.indexer(tick(key)), info(key)).unwrap();
     }
     slab
 }
@@ -71,7 +76,7 @@ fn build_dense_slab() -> (TickSlab, Vec<i32>) {
     let keys = build_dense_keys();
     let mut slab = TickSlab::new(TICK_SPACING).unwrap();
     for &key in &keys {
-        slab.insert(slab.indexer(tick(key)), info(key));
+        slab.insert(slab.indexer(tick(key)), info(key)).unwrap();
     }
     (slab, keys)
 }
@@ -106,7 +111,8 @@ fn bench_tick_slab(c: &mut Criterion) {
             |mut slab| {
                 for &key in &dense_keys {
                     black_box(
-                        slab.insert(black_box(slab.indexer(tick(key))), black_box(info(key))),
+                        slab.insert(black_box(slab.indexer(tick(key))), black_box(info(key)))
+                            .unwrap(),
                     );
                 }
                 black_box(slab)
@@ -123,7 +129,7 @@ fn bench_tick_slab(c: &mut Criterion) {
                 sum = sum.wrapping_add(
                     dense_slab
                         .get(black_box(dense_slab.indexer(tick(key))))
-                        .map(|info| info.liquidity_gross)
+                        .map(liquidity_gross)
                         .unwrap_or_default(),
                 );
             }
@@ -151,7 +157,7 @@ fn bench_tick_slab(c: &mut Criterion) {
                 sum = sum.wrapping_add(
                     sparse_slab
                         .next(black_box(sparse_slab.indexer(tick(probe))))
-                        .map(|(_, info)| info.liquidity_gross)
+                        .map(|(_, info)| liquidity_gross(info))
                         .unwrap_or_default(),
                 );
             }
@@ -166,7 +172,7 @@ fn bench_tick_slab(c: &mut Criterion) {
                 sum = sum.wrapping_add(
                     sparse_slab
                         .prev(black_box(sparse_slab.indexer(tick(probe))))
-                        .map(|(_, info)| info.liquidity_gross)
+                        .map(|(_, info)| liquidity_gross(info))
                         .unwrap_or_default(),
                 );
             }
@@ -181,7 +187,7 @@ fn bench_tick_slab(c: &mut Criterion) {
                 for &key in &SPARSE_KEYS {
                     let indexer = slab.indexer(tick(key));
                     black_box(slab.remove(black_box(indexer)));
-                    black_box(slab.insert(black_box(indexer), black_box(info(key))));
+                    black_box(slab.insert(black_box(indexer), black_box(info(key))).unwrap());
                 }
                 black_box(slab)
             },
@@ -221,7 +227,7 @@ fn bench_btree_map(c: &mut Criterion) {
                 sum = sum.wrapping_add(
                     dense_map
                         .get(&black_box(key))
-                        .map(|info| info.liquidity_gross)
+                        .map(liquidity_gross)
                         .unwrap_or_default(),
                 );
             }
@@ -246,7 +252,7 @@ fn bench_btree_map(c: &mut Criterion) {
             for &probe in &PROBES {
                 sum = sum.wrapping_add(
                     btree_next(&sparse_map, black_box(probe))
-                        .map(|info| info.liquidity_gross)
+                        .map(liquidity_gross)
                         .unwrap_or_default(),
                 );
             }
@@ -260,7 +266,7 @@ fn bench_btree_map(c: &mut Criterion) {
             for &probe in &PROBES {
                 sum = sum.wrapping_add(
                     btree_prev(&sparse_map, black_box(probe))
-                        .map(|info| info.liquidity_gross)
+                        .map(liquidity_gross)
                         .unwrap_or_default(),
                 );
             }

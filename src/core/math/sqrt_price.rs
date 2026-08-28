@@ -9,6 +9,8 @@
 
 use crate::core::types::nonzero::{NonZeroLiquidity, NonZeroU256};
 use crate::core::types::sqrt_price::SqrtPriceX96;
+use crate::v4::Liquidity;
+use alloy::primitives::I256;
 use ruint::Uint;
 use ruint::aliases::{U128, U160, U256};
 
@@ -475,7 +477,7 @@ fn get_next_sqrt_price_from_amount1_sub_rounding_down(
 pub fn get_amount0_delta(
     sqrt_ratio_a_x96: SqrtPriceX96,
     sqrt_ratio_b_x96: SqrtPriceX96,
-    liquidity: NonZeroLiquidity,
+    liquidity: Liquidity,
     round_up: bool,
 ) -> Result<(U256, U288), SqrtPriceMathError> {
     let (sqrt_a, sqrt_b) = sqrt_ratio_a_x96.sort(sqrt_ratio_b_x96);
@@ -492,7 +494,7 @@ pub fn get_amount0_delta(
     // Cache the part shared with token1 delta: liquidity * (sqrt_b - sqrt_a).
     // The product is at most 288 bits because liquidity is uint128 and the
     // sqrt-price difference is below uint160.
-    let liquidity_128 = U128::from(liquidity.unwrap().value());
+    let liquidity_128 = U128::from(liquidity.value());
     let diff_160 = diff.to::<U160>();
     let liquidity_delta_sqrt: U288 = liquidity_128.widening_mul(diff_160);
 
@@ -504,6 +506,37 @@ pub fn get_amount0_delta(
     )?;
 
     Ok((amount, liquidity_delta_sqrt))
+}
+
+/// Returns the signed amount0 delta for a given liquidity delta and price range.
+#[inline(always)]
+pub fn get_amount0_delta_signed(
+    sqrt_ratio_a_x96: SqrtPriceX96,
+    sqrt_ratio_b_x96: SqrtPriceX96,
+    liquidity: i128,
+) -> Result<I256, SqrtPriceMathError> {
+    let result = if liquidity.is_negative() {
+        I256::from(
+            get_amount0_delta(
+                sqrt_ratio_a_x96,
+                sqrt_ratio_b_x96,
+                Liquidity::new(liquidity.abs() as u128),
+                false,
+            )?
+            .0,
+        )
+    } else {
+        -I256::from(
+            get_amount0_delta(
+                sqrt_ratio_a_x96,
+                sqrt_ratio_b_x96,
+                Liquidity::new(liquidity as u128),
+                true,
+            )?
+            .0,
+        )
+    };
+    Ok(result)
 }
 
 /// Computes token0 delta from a cached `liquidity * (sqrt_b - sqrt_a)` product.
@@ -567,7 +600,7 @@ pub(crate) fn get_amount0_delta_with_liquidity_delta(
 pub fn get_amount1_delta(
     sqrt_ratio_a_x96: SqrtPriceX96,
     sqrt_ratio_b_x96: SqrtPriceX96,
-    liquidity: NonZeroLiquidity,
+    liquidity: Liquidity,
     round_up: bool,
 ) -> Result<(U256, U288), SqrtPriceMathError> {
     let (sqrt_a, sqrt_b) = sqrt_ratio_a_x96.sort(sqrt_ratio_b_x96);
@@ -581,7 +614,7 @@ pub fn get_amount1_delta(
         return Ok((U256::ZERO, U288::ZERO));
     }
 
-    let liquidity_128 = U128::from(liquidity.unwrap().value());
+    let liquidity_128 = U128::from(liquidity.value());
     let diff_160 = diff.to::<U160>();
     let liquidity_delta_sqrt: U288 = liquidity_128.widening_mul(diff_160);
 
@@ -595,6 +628,37 @@ pub fn get_amount1_delta(
     };
 
     Ok((U256::from(result), liquidity_delta_sqrt))
+}
+
+/// Returns the signed amount1 delta for a given liquidity delta and price range.
+#[inline(always)]
+pub fn get_amount1_delta_signed(
+    sqrt_ratio_a_x96: SqrtPriceX96,
+    sqrt_ratio_b_x96: SqrtPriceX96,
+    liquidity: i128,
+) -> Result<I256, SqrtPriceMathError> {
+    let result = if liquidity.is_negative() {
+        I256::from(
+            get_amount1_delta(
+                sqrt_ratio_a_x96,
+                sqrt_ratio_b_x96,
+                Liquidity::new(liquidity.abs() as u128),
+                false,
+            )?
+            .0,
+        )
+    } else {
+        -I256::from(
+            get_amount1_delta(
+                sqrt_ratio_a_x96,
+                sqrt_ratio_b_x96,
+                Liquidity::new(liquidity as u128),
+                true,
+            )?
+            .0,
+        )
+    };
+    Ok(result)
 }
 
 /// Computes token1 delta from a cached `liquidity * (sqrt_b - sqrt_a)` product.
@@ -676,15 +740,15 @@ mod tests {
     }
 
     #[inline(always)]
-    fn liquidity(value: u128) -> NonZeroLiquidity {
-        NonZeroLiquidity::new(value).unwrap()
+    fn liquidity(value: u128) -> Liquidity {
+        Liquidity::new(value)
     }
 
     #[inline(always)]
     fn ref_amount0_delta(
         sqrt_ratio_a_x96: SqrtPriceX96,
         sqrt_ratio_b_x96: SqrtPriceX96,
-        liquidity: NonZeroLiquidity,
+        liquidity: Liquidity,
         round_up: bool,
     ) -> U256 {
         let (sqrt_a, sqrt_b) = sqrt_ratio_a_x96.sort(sqrt_ratio_b_x96);
@@ -710,7 +774,7 @@ mod tests {
     fn ref_amount1_delta(
         sqrt_ratio_a_x96: SqrtPriceX96,
         sqrt_ratio_b_x96: SqrtPriceX96,
-        liquidity: NonZeroLiquidity,
+        liquidity: Liquidity,
         round_up: bool,
     ) -> U256 {
         let (sqrt_a, sqrt_b) = sqrt_ratio_a_x96.sort(sqrt_ratio_b_x96);
@@ -773,7 +837,7 @@ mod tests {
         let liquidity = liquidity(u128::MAX);
 
         let diff = (sqrt_b.as_u256() - sqrt_a.as_u256()).to::<U160>();
-        let liquidity_delta_sqrt: U288 = U128::from(liquidity.unwrap().value()).widening_mul(diff);
+        let liquidity_delta_sqrt: U288 = U128::from(liquidity.value()).widening_mul(diff);
 
         for round_up in [false, true] {
             let (amount0, amount0_liquidity_delta_sqrt) =
@@ -844,7 +908,7 @@ mod tests {
     fn amount1_add_reports_price_overflow_for_oversized_quotient() {
         let err = get_next_sqrt_price_from_amount1_rounding_down(
             sqrt_price(q96()),
-            liquidity(1),
+            NonZeroLiquidity::new(1).unwrap(),
             U256::ONE << 200,
             true,
         )
@@ -857,7 +921,7 @@ mod tests {
     fn amount1_remove_reports_insufficient_reserves_for_oversized_quotient() {
         let err = get_next_sqrt_price_from_amount1_rounding_down(
             sqrt_price(q96()),
-            liquidity(1),
+            NonZeroLiquidity::new(1).unwrap(),
             U256::ONE << 200,
             false,
         )

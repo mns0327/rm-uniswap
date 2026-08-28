@@ -1,18 +1,24 @@
+//! Validated tick indexes for the Uniswap price grid.
+//!
+//! A tick is the discrete log-price coordinate used by Uniswap pool math. This
+//! module keeps raw `i32` values behind [`TickIndex`] once they have been
+//! checked against the protocol tick range, so the rest of the simulator can
+//! pass ticks around without repeating boundary checks.
+
 use serde::{Deserialize, Serialize};
+use std::ops::Deref;
 
 use crate::{
     core::types::{sqrt_price::SqrtPriceX96, tick_spacing::TickSpacing},
     v4::tick_math::get_sqrt_price_at_tick,
 };
-use std::ops::Deref;
 
-/// A validated tick index within the Uniswap v4 valid tick range
-/// (`TickIndex::MIN..=TickIndex::MAX`).
+/// A validated tick index within the Uniswap v4 protocol range.
 ///
-/// Wrapping a raw `i32` in this type guarantees, at the type level, that
-/// any `TickIndex` in circulation has already been range-checked. This
-/// avoids re-validating tick bounds at every call site and prevents
-/// out-of-range ticks from silently propagating into pool math.
+/// Wrapping a raw `i32` in this type guarantees that any `TickIndex` in
+/// circulation is inside [`Self::MIN`]..=[`Self::MAX`]. This mirrors
+/// [`SqrtPriceX96`]: callers validate once at the boundary, then pass a compact
+/// domain type through pool math, tick spacing checks, and price conversion.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -20,20 +26,39 @@ use std::ops::Deref;
 pub struct TickIndex(i32);
 
 impl TickIndex {
-    /// Highest tick accepted by the Uniswap v4 tick math bounds.
+    /// Highest tick accepted by Uniswap v4 `TickMath`.
     pub const MAX: Self = Self(887_272);
-    /// Lowest tick accepted by the Uniswap v4 tick math bounds.
+
+    /// Lowest tick accepted by Uniswap v4 `TickMath`.
     pub const MIN: Self = Self(-887_272);
+
+    /// Number of bits required to represent the signed protocol tick range.
+    ///
+    /// The slab indexer uses this width when projecting signed ticks into an
+    /// order-preserving unsigned key space.
+    pub const MAX_BITS: u32 = 32 - (TickIndex::MAX.value() as u32).leading_zeros() + 1;
 
     /// Attempts to construct a `TickIndex` from a raw `i32`.
     ///
     /// Returns `None` if `index` falls outside the inclusive
-    /// `[TickIndex::MIN, TickIndex::MAX]` range defined by the protocol.
+    /// [`Self::MIN`]..=[`Self::MAX`] range defined by Uniswap tick math.
     pub const fn new(index: i32) -> Option<Self> {
         if index < Self::MIN.value() || index > Self::MAX.value() {
             return None;
         }
         Some(Self(index))
+    }
+
+    /// Constructs a `TickIndex` without checking protocol bounds.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure `index` is inside [`Self::MIN`]..=[`Self::MAX`].
+    /// Prefer [`Self::new`] at API boundaries and use this only when a preceding
+    /// calculation already proves the range.
+    #[inline(always)]
+    pub const unsafe fn new_unchecked(index: i32) -> Self {
+        Self(index)
     }
 
     /// Returns the underlying raw tick value as `i32`.
@@ -42,6 +67,10 @@ impl TickIndex {
     }
 
     /// Returns the square root of the price at this tick, scaled by 2^96.
+    ///
+    /// This is the forward Uniswap tick conversion. The result is always within
+    /// the validated [`SqrtPriceX96`] range because `self` is already bounded by
+    /// [`Self::MIN`] and [`Self::MAX`].
     pub fn sqrt_price_x96(&self) -> SqrtPriceX96 {
         get_sqrt_price_at_tick(*self)
     }
@@ -67,7 +96,7 @@ impl TickIndex {
 #[macro_export]
 macro_rules! tick_idx {
     ($val:expr) => {{
-        $crate::core::types::tick::TickIndex::new($val)
+        $crate::v4::TickIndex::new($val)
             .unwrap_or_else(|| panic!("invalid TickIndex value: {}", $val))
     }};
 }

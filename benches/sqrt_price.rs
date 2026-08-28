@@ -60,7 +60,10 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
         let sqrt_b = tick_math::get_sqrt_price_at_tick(tick(60));
         b.iter(|| {
             black_box(sqrt_price_math::get_amount0_delta(
-                sqrt_a, sqrt_b, liquidity, true,
+                sqrt_a,
+                sqrt_b,
+                liquidity.unwrap(),
+                true,
             ))
         })
     });
@@ -70,7 +73,10 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
         let sqrt_b = tick_math::get_sqrt_price_at_tick(tick(60));
         b.iter(|| {
             black_box(sqrt_price_math::get_amount1_delta(
-                sqrt_a, sqrt_b, liquidity, true,
+                sqrt_a,
+                sqrt_b,
+                liquidity.unwrap(),
+                true,
             ))
         })
     });

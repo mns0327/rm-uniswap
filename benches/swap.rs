@@ -2,10 +2,9 @@
 //!
 //! Run with: `cargo bench --bench swap`
 
+use alloy::primitives::I256;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::v4::{
-    NonZeroLiquidity, SignedAmount, SqrtPriceX96, TickIndex, swap_math, tick_math,
-};
+use rm_uniswap::v4::{Fee, NonZeroLiquidity, SqrtPriceX96, TickIndex, swap_math, tick_math};
 use ruint::aliases::U256;
 
 fn tick(value: i32) -> TickIndex {
@@ -26,7 +25,7 @@ fn bench_swap_math(c: &mut Criterion) {
     let sqrt_current = sqrt_price_1_1();
     let sqrt_target = tick_math::get_sqrt_price_at_tick(tick(60));
     let liquidity = NonZeroLiquidity::new(1_000_000_000_000_000_000u128).unwrap();
-    let fee = 3000u32;
+    let fee = Fee::new(3000u32).unwrap();
 
     group.bench_function("compute_swap_step_exact_in", |b| {
         b.iter(|| {
@@ -34,7 +33,7 @@ fn bench_swap_math(c: &mut Criterion) {
                 black_box(sqrt_current),
                 black_box(sqrt_target),
                 black_box(liquidity),
-                black_box(SignedAmount::negative(ether(1))),
+                black_box(-I256::from(ether(1))),
                 black_box(fee),
             )
         })
@@ -46,7 +45,7 @@ fn bench_swap_math(c: &mut Criterion) {
                 black_box(sqrt_current),
                 black_box(sqrt_target),
                 black_box(liquidity),
-                black_box(SignedAmount::positive(ether(1))),
+                black_box(I256::from(ether(1))),
                 black_box(fee),
             )
         })

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use slab::Slab;
 
@@ -15,7 +16,7 @@ use crate::{
             ticks::TickInfoSnapshot,
         },
     },
-    v4::TickInfo,
+    v4::{Liquidity, TickInfo},
 };
 
 const INITIAL_CACHE_VALUE: u16 = u16::MAX;
@@ -43,6 +44,12 @@ pub struct TickSlab {
     values: Slab<TickSlabValue>,
     /// Pool tick spacing used to compress raw protocol ticks into page/slot indexes.
     tick_spacing: TickSpacing,
+    /// Protocol cap for gross liquidity at each initialized tick.
+    ///
+    /// The value is derived from the pool's tick spacing once at construction so
+    /// liquidity updates can enforce the Uniswap per-tick limit without
+    /// recomputing it on every position change.
+    max_liquidity_per_tick: Liquidity,
 }
 
 impl Serialize for TickSlab {
@@ -72,85 +79,44 @@ impl TickSlab {
     pub fn new(tick_spacing: TickSpacing) -> Option<Self> {
         let cache_cap = calculate_cache_cap(tick_spacing);
 
+        let max_liquidity_per_tick = tick_spacing.max_liquidity_per_tick();
+
         Some(Self {
             bitmap: HierBitmap::new(cache_cap),
             cache: vec![INITIAL_CACHE_VALUE; cache_cap as usize],
             values: Slab::new(),
             tick_spacing,
+            max_liquidity_per_tick,
         })
     }
 
-    /// Return the pool tick spacing this slab was indexed against.
-    #[inline]
+    /// Returns the pool tick spacing this slab was indexed against.
+    #[inline(always)]
     pub fn tick_spacing(&self) -> TickSpacing {
         self.tick_spacing
     }
 
+    /// Returns the maximum gross liquidity allowed at any one initialized tick.
+    ///
+    /// Position updates use this cached protocol limit before accepting added
+    /// liquidity, preventing one boundary tick from accumulating more liquidity
+    /// than the configured spacing permits.
+    #[inline(always)]
+    pub fn max_liquidity_per_tick(&self) -> Liquidity {
+        self.max_liquidity_per_tick
+    }
+
     /// Returns true when no initialized ticks are stored.
-    #[inline]
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
-    /// Returns a serializable snapshot of all initialized tick data as a map.
-    pub fn snapshot(&self) -> BTreeMap<TickIndex, TickInfoSnapshot> {
-        let mut ticks = BTreeMap::new();
-        let mut cache_index = self.bitmap.next_or_eq(0);
-
-        while let Some(current_cache_index) = cache_index {
-            if let Some((_, slab)) = self.get_slab(current_cache_index) {
-                for (slot_index, tick_info) in slab.initialized_slots() {
-                    ticks.insert(
-                        self.tick_from_parts(current_cache_index, slot_index),
-                        TickInfoSnapshot::from(*tick_info),
-                    );
-                }
-            }
-
-            cache_index = self.bitmap.next(current_cache_index);
-        }
-
-        ticks
-    }
-
-    /// Returns an owned snapshot that can be serialized or used to rebuild storage.
-    pub fn owned_snapshot(&self) -> PoolTicksSnapshot {
-        PoolTicksSnapshot {
-            tick_spacing: self.tick_spacing,
-            inner: self.snapshot(),
-        }
-    }
-
-    /// Rebuilds a `TickSlab` from an owned tick snapshot.
-    pub fn from_snapshot<I>(
-        tick_spacing: TickSpacing,
-        ticks: BTreeMap<TickIndex, I>,
-    ) -> Result<Self, SwapSimError>
-    where
-        I: Into<TickInfoSnapshot>,
-    {
-        let mut slab = Self::new(tick_spacing).expect("valid TickSpacing must build a TickSlab");
-
-        for (tick_idx, info) in ticks {
-            let info = info.into();
-            if !tick_idx.for_spacing(tick_spacing) {
-                return Err(SwapSimError::InvalidTick);
-            }
-
-            if info.liquidity_gross == 0 || info.liquidity_net.unsigned_abs() > info.liquidity_gross
-            {
-                return Err(SwapSimError::InvalidTick);
-            }
-
-            let indexer = slab.indexer(tick_idx);
-            slab.insert(indexer, info.into_tick_info(tick_idx));
-        }
-
-        Ok(slab)
-    }
-
-    #[inline(always)]
     /// Builds the page/slot index used by this slab from a protocol tick.
+    ///
+    /// The returned indexer is only meaningful for this slab's tick spacing. Use
+    /// it as the stable coordinate for reads, writes, removals, and traversal.
+    #[inline(always)]
     pub fn indexer(&self, tick_idx: TickIndex) -> TickSlabIndexer {
         TickSlabIndexer::from_tick(tick_idx, self.tick_spacing.as_u32())
     }
@@ -159,16 +125,27 @@ impl TickSlab {
     ///
     /// The outer page is allocated lazily, keeping memory proportional to active
     /// liquidity regions rather than to the full tick range supported by the pool.
-    pub fn insert(&mut self, tick_indexer: TickSlabIndexer, tick_info: TickInfo) {
+    /// Returns the stored tick payload so callers that create a boundary can keep
+    /// using the canonical value owned by the slab. Indexers outside this slab's
+    /// spacing-derived cache range are rejected instead of allocating invalid pages.
+    pub fn insert(
+        &mut self,
+        tick_indexer: TickSlabIndexer,
+        tick_info: TickInfo,
+    ) -> Result<&TickInfo, SwapSimError> {
         let cache_index: u16 = tick_indexer.cache_index();
 
-        let slab = if let Some((_, slab)) = self.get_slab_mut(cache_index) {
-            slab
+        if cache_index as usize >= self.cache.len() {
+            return Err(SwapSimError::InvalidTick);
+        }
+
+        let key = if let Some(key) = self.get_key(cache_index) {
+            key
         } else {
-            self.insert_empty_slab(cache_index)
+            self.insert_empty_slab(cache_index).0
         };
 
-        slab.insert(&tick_indexer, tick_info);
+        Ok(self.values[key as usize].insert(&tick_indexer, tick_info))
     }
 
     /// Returns the liquidity accounting data for an initialized tick, if present.
@@ -180,9 +157,10 @@ impl TickSlab {
     /// Returns the next initialized tick after `tick_indexer`, along with its slab indexer.
     ///
     /// Within a page, [`TickSlabValue::next_slot`] uses zero-count instructions on
-    /// the page occupancy map to jump to the next set bit. The returned
-    /// [`TickSlabIndexer`] identifies that initialized tick, so callers can keep
-    /// traversing without reconstructing the position from the `TickInfo`.
+    /// the page occupancy map to jump to the next set bit strictly after the
+    /// current slot. The returned [`TickSlabIndexer`] identifies that initialized
+    /// tick, so callers can keep traversing without reconstructing the position
+    /// from the `TickInfo`.
     ///
     /// If the current page has no later initialized slot, this follows the
     /// already-maintained page link and returns the first initialized slot in
@@ -223,11 +201,11 @@ impl TickSlab {
     /// Returns the previous initialized tick before `tick_indexer`, along with its slab indexer.
     ///
     /// This mirrors [`next`](Self::next): page-local lookup uses zero counts on
-    /// the occupancy bitmap and returns the [`TickSlabIndexer`] for the found
-    /// tick. If the current page has no earlier initialized slot, the slab
-    /// falls back to the previous page link and returns that page's last
-    /// initialized slot. When `tick_indexer` points to an absent page, the
-    /// bitmap lookup skips directly to the previous initialized page.
+    /// the occupancy bitmap to jump to the previous set bit strictly before the
+    /// current slot. If the current page has no earlier initialized slot, the
+    /// slab falls back to the previous page link and returns that page's last
+    /// initialized slot. When `tick_indexer` points to an absent page, the bitmap
+    /// lookup skips directly to the previous initialized page.
     pub fn prev(&self, tick_indexer: TickSlabIndexer) -> Option<(TickSlabIndexer, &TickInfo)> {
         let cache_index = tick_indexer.cache_index();
 
@@ -260,12 +238,13 @@ impl TickSlab {
             })
     }
 
-    #[inline(always)]
-    /// Return the next initialized tick boundary in the given swap direction.
+    /// Returns the next initialized tick boundary in the given swap direction.
     ///
     /// `zero_for_one` swaps move left through the tick range, so they use the
     /// previous initialized boundary. The opposite direction moves right and
-    /// uses the next initialized boundary.
+    /// uses the next initialized boundary. The current slot is never returned as
+    /// the next boundary.
+    #[inline(always)]
     pub fn next_initialized_tick(
         &self,
         tick_indexer: TickSlabIndexer,
@@ -278,20 +257,50 @@ impl TickSlab {
         }
     }
 
-    /// Mutates an initialized tick in place and reports whether it existed.
+    /// Crosses an initialized tick during a swap and returns its liquidity delta.
+    ///
+    /// Crossing flips each token's fee-growth-outside value around the current
+    /// global fee growth, matching the modulo arithmetic used by Uniswap fee
+    /// accounting. The stored `liquidity_net` is returned so the caller can apply
+    /// the active-liquidity change for the swap direction. Missing boundaries are
+    /// treated as state errors because traversal should only land on initialized
+    /// ticks.
+    #[inline(always)]
+    pub fn cross_tick(
+        &mut self,
+        tick_indexer: TickSlabIndexer,
+        fee_growth_global0_x128: U256,
+        fee_growth_global1_x128: U256,
+    ) -> Result<i128, SwapSimError> {
+        self.update_initialized_tick(tick_indexer, |tick_info| {
+            tick_info.fee_growth_outside0_x128 =
+                fee_growth_global0_x128.wrapping_sub(tick_info.fee_growth_outside0_x128);
+            tick_info.fee_growth_outside1_x128 =
+                fee_growth_global1_x128.wrapping_sub(tick_info.fee_growth_outside1_x128);
+
+            Ok(tick_info.liquidity_net)
+        })
+    }
+
+    /// Mutates an initialized tick in place and returns the closure result.
     ///
     /// The update closure only runs when both the page and the selected slot are
-    /// initialized. Missing ticks leave storage unchanged and return `false`,
-    /// which lets callers distinguish absent boundaries from successful no-op
-    /// updates.
-    pub fn update_initialized_tick<F>(&mut self, tick_indexer: TickSlabIndexer, update: F) -> bool
+    /// initialized. Missing ticks leave storage unchanged and return
+    /// `SwapSimError::MissingInitializedTick`, which keeps absent boundaries
+    /// distinct from successful updates that intentionally make no field changes.
+    /// The closure may return any caller-specific value computed from the updated
+    /// tick, such as the tick price or liquidity delta.
+    pub fn update_initialized_tick<F, T>(
+        &mut self,
+        tick_indexer: TickSlabIndexer,
+        update: F,
+    ) -> Result<T, SwapSimError>
     where
-        F: FnOnce(&mut TickInfo) -> bool,
+        F: FnOnce(&mut TickInfo) -> Result<T, SwapSimError>,
     {
         self.get_slab_mut(tick_indexer.cache_index())
             .and_then(|(_, slab)| slab.get_mut(&tick_indexer))
-            .map(update)
-            .unwrap_or(false)
+            .map_or(Err(SwapSimError::MissingInitializedTick), update)
     }
 
     /// Removes a tick and frees its page when the page no longer has initialized ticks.
@@ -331,29 +340,30 @@ impl TickSlab {
 
     /// Allocates an empty page at `cache_index` and links it into initialized order.
     #[inline(always)]
-    fn insert_empty_slab(&mut self, cache_index: u16) -> &mut TickSlabValue {
+    fn insert_empty_slab(&mut self, cache_index: u16) -> (u16, &mut TickSlabValue) {
         self.insert_slab(cache_index, TickSlabValue::new(None, None))
     }
 
-    /// Stores a page and updates bitmap/cache/neighbor metadata atomically from the
-    /// caller's perspective.
+    /// Stores a page and returns its backing allocator key plus mutable value.
+    ///
+    /// If the page already exists, its payload is replaced in place. Otherwise
+    /// the page is inserted into the bitmap, cache lookup table, and linked page
+    /// chain as one coherent operation from the caller's perspective.
     fn insert_slab(
         &mut self,
         cache_index: u16,
         mut tick_slab: TickSlabValue,
-    ) -> &mut TickSlabValue {
-        if self
-            .cache
-            .get(cache_index as usize)
-            .is_some_and(|key| *key != INITIAL_CACHE_VALUE)
-        {
-            let slab = self
-                .get_slab_mut(cache_index)
-                .map(|(_, slab)| slab)
-                .expect("slab should exist");
+    ) -> (u16, &mut TickSlabValue) {
+        if let Some(key) = self.cache.get(cache_index as usize).cloned() {
+            if key != INITIAL_CACHE_VALUE {
+                let slab = self
+                    .get_slab_mut(cache_index)
+                    .map(|(_, slab)| slab)
+                    .expect("slab should exist");
 
-            *slab = tick_slab;
-            return slab;
+                *slab = tick_slab;
+                return (key, slab);
+            }
         }
 
         let prev_idx = self.bitmap.prev(cache_index);
@@ -382,9 +392,12 @@ impl TickSlab {
             .cache
             .get_mut(cache_index as usize)
             .expect("cache slot should exist") = key;
-        self.values
-            .get_mut(key as usize)
-            .expect("slab should exist")
+        (
+            key,
+            self.values
+                .get_mut(key as usize)
+                .expect("slab should exist"),
+        )
     }
 
     /// Returns the backing allocator key for an initialized page.
@@ -439,19 +452,76 @@ impl TickSlab {
         self.values.try_remove(key as usize)
     }
 
-    /// Decodes a slab page/slot pair back into the aligned protocol tick it represents.
-    fn tick_from_parts(&self, cache_index: u16, slot_index: u8) -> TickIndex {
-        let encoded = ((cache_index as u32) << 5) | slot_index as u32;
-        let compressed = if encoded & 1 == 0 {
-            (encoded >> 1) as i32
-        } else {
-            -((encoded >> 1) as i32) - 1
-        };
-        let raw_tick = compressed
-            .checked_mul(self.tick_spacing.as_i32())
-            .expect("slab tick index should not overflow i32");
+    /// Returns a serializable snapshot of all initialized tick data.
+    ///
+    /// Pages are visited in protocol order and each page-local slot is decoded
+    /// back into the raw tick for this slab's spacing. Empty cache pages and
+    /// uninitialized slots are omitted from the snapshot.
+    pub fn snapshot(&self) -> BTreeMap<TickIndex, TickInfoSnapshot> {
+        let mut ticks = BTreeMap::new();
+        let mut cache_index = self.bitmap.next_or_eq(0);
 
-        TickIndex::new(raw_tick).expect("slab tick index should stay in protocol range")
+        while let Some(current_cache_index) = cache_index {
+            if let Some((_, slab)) = self.get_slab(current_cache_index) {
+                for (slot_index, tick_info) in slab.initialized_slots() {
+                    ticks.insert(
+                        TickSlabIndexer::from_parts(current_cache_index, slot_index)
+                            .to_tick(self.tick_spacing.as_u32()),
+                        TickInfoSnapshot::from(*tick_info),
+                    );
+                }
+            }
+
+            cache_index = self.bitmap.next(current_cache_index);
+        }
+
+        ticks
+    }
+
+    /// Returns an owned snapshot that can be serialized or used to rebuild storage.
+    pub fn owned_snapshot(&self) -> PoolTicksSnapshot {
+        PoolTicksSnapshot {
+            tick_spacing: self.tick_spacing,
+            inner: self.snapshot(),
+        }
+    }
+
+    /// Rebuilds tick storage from a persisted tick snapshot.
+    ///
+    /// Snapshot entries must be aligned to the supplied spacing and represent
+    /// initialized ticks: gross liquidity must be non-zero and net liquidity
+    /// must fit within gross liquidity. Invalid snapshots fail before returning
+    /// partially trusted storage to callers.
+    pub fn from_snapshot<I>(
+        tick_spacing: TickSpacing,
+        ticks: BTreeMap<TickIndex, I>,
+    ) -> Result<Self, SwapSimError>
+    where
+        I: Into<TickInfoSnapshot>,
+    {
+        let mut slab = Self::new(tick_spacing).expect("valid TickSpacing must build a TickSlab");
+
+        for (tick_idx, info) in ticks {
+            let info = info.into();
+            if !tick_idx.for_spacing(tick_spacing) {
+                return Err(SwapSimError::InvalidTick);
+            }
+
+            if info.liquidity_gross.is_zero()
+                || info.liquidity_net.unsigned_abs() > info.liquidity_gross.value()
+            {
+                return Err(SwapSimError::InvalidTick);
+            }
+
+            if info.liquidity_gross > slab.max_liquidity_per_tick {
+                return Err(SwapSimError::LiquidityOverflow);
+            }
+
+            let indexer = slab.indexer(tick_idx);
+            slab.insert(indexer, info.into_tick_info(tick_idx))?;
+        }
+
+        Ok(slab)
     }
 }
 
@@ -468,7 +538,7 @@ mod tests {
 
     fn info(liquidity_gross: u128) -> TickInfo {
         TickInfo {
-            liquidity_gross,
+            liquidity_gross: Liquidity::new(liquidity_gross),
             ..TickInfo::DEFAULT
         }
     }
@@ -478,7 +548,7 @@ mod tests {
     }
 
     fn cache_tick(cache_index: u16) -> TickIndex {
-        tick(cache_index as i32 * 16)
+        TickSlabIndexer::from_parts(cache_index, 0).to_tick(TICK_SPACING.as_u32())
     }
 
     fn assert_page_links(
@@ -536,7 +606,7 @@ mod tests {
 
     #[test]
     fn cache_capacity_covers_spacing_compressed_protocol_range() {
-        let cases = [(1, 55_455), (10, 5_546), (32_767, 2)];
+        let cases = [(1, 60_496), (10, 6_869), (32_767, 3)];
 
         for (raw_spacing, expected_capacity) in cases {
             let tick_spacing = TickSpacing::new(raw_spacing).unwrap();
@@ -581,15 +651,15 @@ mod tests {
     fn is_empty_tracks_initialized_page_lifecycle() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let first = slab.indexer(tick(0));
-        let second = slab.indexer(tick(-1));
+        let second = slab.indexer(tick(1));
         assert_eq!(first.cache_index(), second.cache_index());
 
         assert!(slab.is_empty());
 
-        slab.insert(first, info(100));
+        slab.insert(first, info(100)).unwrap();
         assert!(!slab.is_empty());
 
-        slab.insert(second, info(200));
+        slab.insert(second, info(200)).unwrap();
         assert!(!slab.is_empty());
 
         slab.remove(first);
@@ -607,9 +677,9 @@ mod tests {
         let zero = slab.indexer(tick(0));
         let max = slab.indexer(TickIndex::MAX);
 
-        slab.insert(min, info(1));
-        slab.insert(zero, info(2));
-        slab.insert(max, info(3));
+        slab.insert(min, info(1)).unwrap();
+        slab.insert(zero, info(2)).unwrap();
+        slab.insert(max, info(3)).unwrap();
 
         assert_eq!(slab.get(min).copied(), Some(info(1)));
         assert_eq!(slab.get(zero).copied(), Some(info(2)));
@@ -622,7 +692,7 @@ mod tests {
         let compressed_tick = slab.indexer(tick(160));
         let neighboring_tick = slab.indexer(tick(150));
 
-        slab.insert(compressed_tick, info(42));
+        slab.insert(compressed_tick, info(42)).unwrap();
 
         assert_eq!(slab.get(compressed_tick).copied(), Some(info(42)));
         assert_eq!(slab.get(neighboring_tick), None);
@@ -635,7 +705,7 @@ mod tests {
         let aligned_tick = slab.indexer(tick(10));
         let unaligned_tick_in_same_bucket = slab.indexer(tick(19));
 
-        slab.insert(aligned_tick, info(100));
+        slab.insert(aligned_tick, info(100)).unwrap();
 
         assert_eq!(aligned_tick, unaligned_tick_in_same_bucket);
         assert_eq!(
@@ -649,10 +719,23 @@ mod tests {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let indexer = slab.indexer(tick(0));
 
-        slab.insert(indexer, TickInfo::DEFAULT);
+        slab.insert(indexer, TickInfo::DEFAULT).unwrap();
 
         assert_eq!(slab.get(indexer).copied(), Some(TickInfo::DEFAULT));
         assert_eq!(slab.values.len(), 1);
+    }
+
+    #[test]
+    fn insert_rejects_indexer_outside_slab_cache_range() {
+        let source = TickSlab::new(TICK_SPACING).unwrap();
+        let mut target = TickSlab::new(TickSpacing::MAX).unwrap();
+        let foreign_indexer = source.indexer(TickIndex::MAX);
+
+        assert_eq!(
+            target.insert(foreign_indexer, info(100)).err(),
+            Some(SwapSimError::InvalidTick)
+        );
+        assert!(target.is_empty());
     }
 
     #[test]
@@ -660,8 +743,8 @@ mod tests {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let indexer = slab.indexer(tick(7));
 
-        slab.insert(indexer, info(100));
-        slab.insert(indexer, info(250));
+        slab.insert(indexer, info(100)).unwrap();
+        slab.insert(indexer, info(250)).unwrap();
 
         assert_eq!(slab.get(indexer).copied(), Some(info(250)));
         assert_eq!(slab.values.len(), 1);
@@ -679,50 +762,50 @@ mod tests {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let indexer = slab.indexer(tick(7));
 
-        slab.insert(indexer, info(100));
+        slab.insert(indexer, info(100)).unwrap();
 
         let updated = slab.update_initialized_tick(indexer, |tick_info| {
-            tick_info.liquidity_gross = 250;
-            true
+            tick_info.liquidity_gross = Liquidity::new(250);
+            Ok(true)
         });
 
-        assert!(updated);
+        assert_eq!(updated, Ok(true));
         assert_eq!(slab.get(indexer).copied(), Some(info(250)));
     }
 
     #[test]
-    fn update_initialized_tick_returns_false_for_absent_tick() {
+    fn update_initialized_tick_returns_error_for_absent_tick() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let indexer = slab.indexer(tick(7));
         let mut called = false;
 
         let updated = slab.update_initialized_tick(indexer, |_| {
             called = true;
-            true
+            Ok(true)
         });
 
-        assert!(!updated);
+        assert_eq!(updated, Err(SwapSimError::MissingInitializedTick));
         assert!(!called);
         assert_eq!(slab.get(indexer), None);
     }
 
     #[test]
-    fn update_initialized_tick_returns_false_for_missing_slot_inside_existing_page() {
+    fn update_initialized_tick_returns_error_for_missing_slot_inside_existing_page() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let initialized = slab.indexer(tick(0));
-        let missing = slab.indexer(tick(-1));
+        let missing = slab.indexer(tick(1));
         let mut called = false;
         assert_eq!(initialized.cache_index(), missing.cache_index());
         assert_ne!(initialized, missing);
 
-        slab.insert(initialized, info(100));
+        slab.insert(initialized, info(100)).unwrap();
 
         let updated = slab.update_initialized_tick(missing, |_| {
             called = true;
-            true
+            Ok(true)
         });
 
-        assert!(!updated);
+        assert_eq!(updated, Err(SwapSimError::MissingInitializedTick));
         assert!(!called);
         assert_eq!(slab.get(initialized).copied(), Some(info(100)));
         assert_eq!(slab.get(missing), None);
@@ -739,11 +822,11 @@ mod tests {
     fn removing_one_tick_keeps_other_ticks_in_the_same_page() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let first = slab.indexer(tick(0));
-        let second = slab.indexer(tick(-1));
+        let second = slab.indexer(tick(1));
         assert_eq!(first.cache_index(), second.cache_index());
 
-        slab.insert(first, info(100));
-        slab.insert(second, info(200));
+        slab.insert(first, info(100)).unwrap();
+        slab.insert(second, info(200)).unwrap();
         slab.remove(first);
 
         assert_eq!(slab.get(first), None);
@@ -762,11 +845,11 @@ mod tests {
     fn removing_missing_slot_inside_existing_page_is_noop() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
         let initialized = slab.indexer(tick(0));
-        let missing = slab.indexer(tick(-1));
+        let missing = slab.indexer(tick(1));
         assert_eq!(initialized.cache_index(), missing.cache_index());
         assert_ne!(initialized, missing);
 
-        slab.insert(initialized, info(100));
+        slab.insert(initialized, info(100)).unwrap();
         slab.remove(missing);
 
         assert_eq!(slab.get(initialized).copied(), Some(info(100)));
@@ -787,7 +870,7 @@ mod tests {
         let indexer = slab.indexer(tick(16));
         let cache_index = indexer.cache_index();
 
-        slab.insert(indexer, info(100));
+        slab.insert(indexer, info(100)).unwrap();
         slab.remove(indexer);
 
         assert_eq!(slab.get(indexer), None);
@@ -801,9 +884,9 @@ mod tests {
         let indexer = slab.indexer(tick(16));
         let cache_index = indexer.cache_index();
 
-        slab.insert(indexer, info(100));
+        slab.insert(indexer, info(100)).unwrap();
         slab.remove(indexer);
-        slab.insert(indexer, info(300));
+        slab.insert(indexer, info(300)).unwrap();
 
         assert_eq!(slab.get(indexer).copied(), Some(info(300)));
         assert_eq!(slab.values.len(), 1);
@@ -815,50 +898,50 @@ mod tests {
     fn pages_are_linked_in_cache_order_regardless_of_insert_order() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
 
-        for cache_index in [5, 1, 3] {
+        for cache_index in [32_771, 32_767, 32_769] {
             let indexer = slab.indexer(cache_tick(cache_index));
-            slab.insert(indexer, info(cache_index as u128));
+            slab.insert(indexer, info(cache_index as u128)).unwrap();
         }
 
-        assert_page_links(&slab, 1, None, Some(3));
-        assert_page_links(&slab, 3, Some(1), Some(5));
-        assert_page_links(&slab, 5, Some(3), None);
+        assert_page_links(&slab, 32_767, None, Some(32_769));
+        assert_page_links(&slab, 32_769, Some(32_767), Some(32_771));
+        assert_page_links(&slab, 32_771, Some(32_769), None);
     }
 
     #[test]
     fn removing_middle_page_rewires_neighbor_pages() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
 
-        for cache_index in [1, 3, 5] {
+        for cache_index in [32_767, 32_769, 32_771] {
             let indexer = slab.indexer(cache_tick(cache_index));
-            slab.insert(indexer, info(cache_index as u128));
+            slab.insert(indexer, info(cache_index as u128)).unwrap();
         }
 
-        let middle = slab.indexer(cache_tick(3));
+        let middle = slab.indexer(cache_tick(32_769));
         slab.remove(middle);
 
-        assert_page_absent(&slab, 3);
-        assert_page_links(&slab, 1, None, Some(5));
-        assert_page_links(&slab, 5, Some(1), None);
+        assert_page_absent(&slab, 32_769);
+        assert_page_links(&slab, 32_767, None, Some(32_771));
+        assert_page_links(&slab, 32_771, Some(32_767), None);
     }
 
     #[test]
     fn removing_head_and_tail_pages_preserves_remaining_chain() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
 
-        for cache_index in [1, 3, 5] {
+        for cache_index in [32_767, 32_769, 32_771] {
             let indexer = slab.indexer(cache_tick(cache_index));
-            slab.insert(indexer, info(cache_index as u128));
+            slab.insert(indexer, info(cache_index as u128)).unwrap();
         }
 
-        slab.remove(slab.indexer(cache_tick(1)));
-        assert_page_absent(&slab, 1);
-        assert_page_links(&slab, 3, None, Some(5));
-        assert_page_links(&slab, 5, Some(3), None);
+        slab.remove(slab.indexer(cache_tick(32_767)));
+        assert_page_absent(&slab, 32_767);
+        assert_page_links(&slab, 32_769, None, Some(32_771));
+        assert_page_links(&slab, 32_771, Some(32_769), None);
 
-        slab.remove(slab.indexer(cache_tick(5)));
-        assert_page_absent(&slab, 5);
-        assert_page_links(&slab, 3, None, None);
+        slab.remove(slab.indexer(cache_tick(32_771)));
+        assert_page_absent(&slab, 32_771);
+        assert_page_links(&slab, 32_769, None, None);
     }
 
     #[test]
@@ -866,12 +949,12 @@ mod tests {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
 
         let slot_0 = slab.indexer(tick(0));
-        let slot_1 = slab.indexer(tick(-1));
+        let slot_1 = slab.indexer(tick(1));
         let slot_4 = slab.indexer(tick(2));
 
-        slab.insert(slot_0, info(10));
-        slab.insert(slot_1, info(20));
-        slab.insert(slot_4, info(40));
+        slab.insert(slot_0, info(10)).unwrap();
+        slab.insert(slot_1, info(20)).unwrap();
+        slab.insert(slot_4, info(40)).unwrap();
 
         assert_eq!(next_result(&slab, slot_0), Some((slot_1, info(20))));
         assert_eq!(next_result(&slab, slot_1), Some((slot_4, info(40))));
@@ -887,9 +970,9 @@ mod tests {
         let page_1_first = slab.indexer(tick(16));
         let page_3_first = slab.indexer(tick(48));
 
-        slab.insert(page_0_last, info(31));
-        slab.insert(page_1_first, info(100));
-        slab.insert(page_3_first, info(300));
+        slab.insert(page_0_last, info(31)).unwrap();
+        slab.insert(page_1_first, info(100)).unwrap();
+        slab.insert(page_3_first, info(300)).unwrap();
 
         assert_eq!(
             next_result(&slab, page_0_last),
@@ -913,16 +996,16 @@ mod tests {
     }
 
     #[test]
-    fn next_initialized_tick_delegates_to_directional_neighbor_lookup() {
+    fn next_initialized_tick_returns_protocol_order_boundary_for_swap_direction() {
         let mut slab = TickSlab::new(TICK_SPACING).unwrap();
 
         let page_0_last = slab.indexer(tick(-16));
         let page_1_first = slab.indexer(tick(16));
         let page_3_first = slab.indexer(tick(48));
 
-        slab.insert(page_0_last, info(31));
-        slab.insert(page_1_first, info(100));
-        slab.insert(page_3_first, info(300));
+        slab.insert(page_0_last, info(31)).unwrap();
+        slab.insert(page_1_first, info(100)).unwrap();
+        slab.insert(page_3_first, info(300)).unwrap();
 
         assert_eq!(
             slab.next_initialized_tick(page_1_first, true)
@@ -944,8 +1027,8 @@ mod tests {
         let absent_page_2_first = slab.indexer(tick(32));
         let page_3_first = slab.indexer(tick(48));
 
-        slab.insert(page_1_first, info(100));
-        slab.insert(page_3_first, info(300));
+        slab.insert(page_1_first, info(100)).unwrap();
+        slab.insert(page_3_first, info(300)).unwrap();
 
         assert_eq!(
             next_result(&slab, absent_page_2_first),
@@ -980,7 +1063,7 @@ mod tests {
 
             match maybe_info {
                 Some(tick_info) => {
-                    slab.insert(indexer, tick_info);
+                    slab.insert(indexer, tick_info).unwrap();
                     model.insert(raw_tick, tick_info);
                 }
                 None => {
@@ -1012,7 +1095,8 @@ mod tests {
         ]);
 
         for (&tick_idx, &tick_info) in &ticks {
-            slab.insert(slab.indexer(tick_idx), tick_info.into_tick_info(tick_idx));
+            slab.insert(slab.indexer(tick_idx), tick_info.into_tick_info(tick_idx))
+                .unwrap();
         }
 
         assert_eq!(slab.snapshot(), ticks);
@@ -1025,8 +1109,8 @@ mod tests {
         let lower = tick(-20);
         let upper = tick(30);
 
-        slab.insert(slab.indexer(lower), info(200));
-        slab.insert(slab.indexer(upper), info(300));
+        slab.insert(slab.indexer(lower), info(200)).unwrap();
+        slab.insert(slab.indexer(upper), info(300)).unwrap();
 
         let snapshot = slab.owned_snapshot();
 
@@ -1079,7 +1163,7 @@ mod tests {
         let ticks = BTreeMap::from([(
             tick(10),
             TickInfoSnapshot {
-                liquidity_gross: 100,
+                liquidity_gross: Liquidity::new(100),
                 liquidity_net: 101,
                 ..TickInfoSnapshot::DEFAULT
             },
@@ -1088,6 +1172,23 @@ mod tests {
         assert_eq!(
             TickSlab::from_snapshot(TICK_SPACING, ticks).err(),
             Some(SwapSimError::InvalidTick)
+        );
+    }
+
+    #[test]
+    fn from_snapshot_rejects_liquidity_gross_above_tick_cap() {
+        let ticks = BTreeMap::from([(
+            tick(10),
+            TickInfoSnapshot {
+                liquidity_gross: Liquidity::MAX,
+                liquidity_net: 0,
+                ..TickInfoSnapshot::DEFAULT
+            },
+        )]);
+
+        assert_eq!(
+            TickSlab::from_snapshot(TICK_SPACING, ticks).err(),
+            Some(SwapSimError::LiquidityOverflow)
         );
     }
 
@@ -1111,7 +1212,8 @@ mod tests {
         ]);
 
         for (&tick_idx, &tick_info) in &ticks {
-            slab.insert(slab.indexer(tick_idx), tick_info.into_tick_info(tick_idx));
+            slab.insert(slab.indexer(tick_idx), tick_info.into_tick_info(tick_idx))
+                .unwrap();
         }
 
         let json = serde_json::to_string(&slab).unwrap();

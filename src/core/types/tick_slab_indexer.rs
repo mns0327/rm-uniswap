@@ -1,31 +1,62 @@
 use crate::core::types::tick::TickIndex;
 
-/// A compact, cache-friendly encoding of a `TickIndex` used to index into
-/// the tick slab storage.
+/// A compact, order-preserving key for addressing tick slab storage.
 ///
-/// The signed tick value is remapped to an unsigned `u32` via zigzag
-/// encoding, so that ticks with small absolute magnitude (the common case,
-/// close to the current price) map to small unsigned values. This keeps
-/// related ticks physically close together in the slab, which improves
-/// cache locality and lets the encoded value be split into a `cache_index`
-/// (which slab page/bucket) and a `slot_index` (which slot within that
-/// bucket).
+/// Ticks are first compressed by the pool's tick spacing, then projected into
+/// a bounded unsigned range by flipping the sign bit inside the minimum bit width
+/// needed for the compressed protocol tick range. That keeps signed tick order
+/// intact in the slab key space: lower ticks have lower keys, higher ticks have
+/// higher keys, and zero sits in the middle of the range.
+///
+/// The encoded key is then split into a `cache_index` identifying the 32-slot
+/// slab page and a `slot_index` identifying the page-local slot. This gives the
+/// tick store stable page/slot addressing while keeping traversal logic aligned
+/// with protocol tick order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickSlabIndexer(u32);
 
 impl TickSlabIndexer {
-    /// Encodes a `TickIndex` into its zigzag `u32` representation.
+    /// Builds a slab indexer from a protocol tick and pool tick spacing.
     ///
-    /// The tick is first normalized by `tick_spacing` (via `div_euclid`,
-    /// so it rounds toward negative infinity rather than toward zero),
-    /// then zigzag-encoded so that values with small absolute magnitude —
-    /// positive or negative — map to small unsigned values, e.g.
-    /// `0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...`.
+    /// The tick is normalized with Euclidean division so negative unaligned
+    /// ticks land in the same compressed bucket as protocol spacing checks.
+    /// The compressed value is then encoded by flipping the sign bit of its
+    /// spacing-adjusted representation. For `tick_spacing = 1`, this places
+    /// `TickIndex::MIN` near the start of the key space, `0` at the midpoint,
+    /// and `TickIndex::MAX` near the end.
     pub(crate) const fn from_tick(tick_idx: TickIndex, tick_spacing: u32) -> Self {
         let compressed = tick_idx.value().div_euclid(tick_spacing as i32);
+        let x = compressed as u32;
 
-        let zigzag = ((compressed << 1) ^ (compressed >> 31)) as u32;
-        Self(zigzag)
+        // Use only the bits required for the compressed protocol tick range.
+        let spacing_bits = 31 - tick_spacing.leading_zeros();
+        let bits = TickIndex::MAX_BITS - spacing_bits;
+
+        let mask = u32::MAX >> (32 - bits);
+        let sign = 1u32 << (bits - 1);
+
+        Self((x & mask) ^ sign)
+    }
+
+    /// Decodes this slab indexer back into the protocol tick it represents.
+    ///
+    /// This is the inverse of [`Self::from_tick`] for indexes created with the
+    /// same tick spacing. Callers must use the pool spacing associated with the
+    /// slab; using a different spacing would decode the page/slot key in the
+    /// wrong coordinate system.
+    pub(crate) const fn to_tick(self, tick_spacing: u32) -> TickIndex {
+        let spacing_bits = 31 - tick_spacing.leading_zeros();
+        let bits = TickIndex::MAX_BITS - spacing_bits;
+
+        let sign = 1u32 << (bits - 1);
+
+        // Undo the order-preserving sign-bit flip from `from_tick`.
+        let raw = self.0 ^ sign;
+
+        // Restore the signed compressed tick from the spacing-adjusted width.
+        let compressed = ((raw << (32 - bits)) as i32) >> (32 - bits);
+
+        unsafe { TickIndex::new_unchecked(compressed * tick_spacing as i32) }
     }
 
     /// Builds an indexer from its slab page and page-local slot components.
@@ -34,24 +65,25 @@ impl TickSlabIndexer {
         Self(((cache_index as u32) << 5) | ((slot_index as u32) & 0x1F))
     }
 
-    /// Returns the raw zigzag-encoded `u32` value.
-    #[inline(always)]
-    pub(crate) fn value(&self) -> u32 {
-        self.0
-    }
-
     /// Returns bits `0..5` of the encoded value (range `0..32`), identifying
     /// the slot within a slab bucket.
     #[inline(always)]
-    pub(crate) fn slot_index(&self) -> u8 {
+    pub(crate) const fn slot_index(&self) -> u8 {
         (self.0 & 0x1F) as u8
     }
 
     /// Returns bits `5..21` of the encoded value (range `0..65536`),
     /// identifying which slab bucket/page this tick belongs to.
     #[inline(always)]
-    pub(crate) fn cache_index(&self) -> u16 {
+    pub(crate) const fn cache_index(&self) -> u16 {
         ((self.0 >> 5) & 0xFFFF) as u16
+    }
+}
+
+#[cfg(test)]
+impl TickSlabIndexer {
+    pub(crate) const fn value(&self) -> u32 {
+        self.0
     }
 }
 
@@ -60,6 +92,7 @@ mod tests {
     use super::*;
 
     const TICK_SPACING: u32 = 1;
+    const SIGN_BIT: u32 = 1 << (TickIndex::MAX_BITS - 1);
 
     /// Helper to build a `TickIndex` from a raw `i32`.
     fn tick(value: i32) -> TickIndex {
@@ -71,27 +104,26 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Zigzag encoding correctness
+    // Order-preserving encoding correctness
     // ---------------------------------------------------------------
 
     #[test]
-    fn zigzag_zero_maps_to_zero() {
-        assert_eq!(make_indexer(0).value(), 0);
+    fn zero_maps_to_signed_range_midpoint() {
+        assert_eq!(make_indexer(0).value(), SIGN_BIT);
     }
 
     #[test]
-    fn zigzag_small_values_match_known_sequence() {
-        // 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4, -3 -> 5 ...
+    fn small_values_match_sign_bit_flip_sequence() {
         let cases = [
-            (0, 0u32),
-            (-1, 1),
-            (1, 2),
-            (-2, 3),
-            (2, 4),
-            (-3, 5),
-            (3, 6),
-            (-4, 7),
-            (4, 8),
+            (-4, SIGN_BIT - 4),
+            (-3, SIGN_BIT - 3),
+            (-2, SIGN_BIT - 2),
+            (-1, SIGN_BIT - 1),
+            (0, SIGN_BIT),
+            (1, SIGN_BIT + 1),
+            (2, SIGN_BIT + 2),
+            (3, SIGN_BIT + 3),
+            (4, SIGN_BIT + 4),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -103,16 +135,18 @@ mod tests {
     }
 
     #[test]
-    fn tick_spacing_normalizes_before_zigzag_encoding() {
+    fn tick_spacing_normalizes_before_sign_bit_encoding() {
+        const SPACING_SIGN_BIT: u32 = 1 << (TickIndex::MAX_BITS - 4);
+
         let cases = [
-            (0, 10, 0u32), // 0 / 10 = 0, zigzag(0) = 0
-            (9, 10, 0),    // 9 / 10 = 0, zigzag(0) = 0
-            (10, 10, 2),   // 10 / 10 = 1, zigzag(1) = 2
-            (20, 10, 4),   // 20 / 10 = 2, zigzag(2) = 4
-            (-1, 10, 1),   // -1 div_euclid 10 = -1, zigzag(-1) = 1
-            (-10, 10, 1),  // -10 / 10 = -1, zigzag(-1) = 1
-            (-11, 10, 3),  // -11 div_euclid 10 = -2, zigzag(-2) = 3
-            (-20, 10, 3),  // -20 / 10 = -2, zigzag(-2) = 3
+            (0, 10, SPACING_SIGN_BIT),
+            (9, 10, SPACING_SIGN_BIT),
+            (10, 10, SPACING_SIGN_BIT + 1),
+            (20, 10, SPACING_SIGN_BIT + 2),
+            (-1, 10, SPACING_SIGN_BIT - 1),
+            (-10, 10, SPACING_SIGN_BIT - 1),
+            (-11, 10, SPACING_SIGN_BIT - 2),
+            (-20, 10, SPACING_SIGN_BIT - 2),
         ];
 
         for (input, tick_spacing, expected) in cases {
@@ -125,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn zigzag_is_injective_for_small_range() {
+    fn sign_bit_encoding_is_injective_for_small_range() {
         // No two distinct inputs in a reasonable range should collide.
         use std::collections::HashSet;
         let mut seen = HashSet::new();
@@ -136,35 +170,25 @@ mod tests {
     }
 
     #[test]
-    fn zigzag_protocol_extremes_match_known_values() {
+    fn protocol_extremes_match_known_values() {
         let min_encoded = TickSlabIndexer::from_tick(TickIndex::MIN, TICK_SPACING).value();
         let max_encoded = TickSlabIndexer::from_tick(TickIndex::MAX, TICK_SPACING).value();
 
         // TickIndex is bounded by the Uniswap tick range, not by i32::MIN/MAX.
-        assert_eq!(max_encoded, 1_774_544);
-        assert_eq!(min_encoded, 1_774_543);
+        assert_eq!(min_encoded, 161_304);
+        assert_eq!(max_encoded, 1_935_848);
     }
 
     #[test]
-    fn zigzag_preserves_sign_alternation_pattern() {
-        // For any n >= 0: encode(n) is even, encode(-n-1) is odd.
-        for n in 0..500i32 {
-            let pos = make_indexer(n).value();
-            assert_eq!(
-                pos % 2,
-                0,
-                "positive tick {n} should encode to an even value"
+    fn sign_bit_encoding_preserves_tick_order() {
+        for n in -500i32..500 {
+            let lower = make_indexer(n).value();
+            let higher = make_indexer(n + 1).value();
+            assert!(
+                lower < higher,
+                "tick {n} should encode before tick {}",
+                n + 1
             );
-
-            if n < i32::MAX {
-                let neg = make_indexer(-(n + 1)).value();
-                assert_eq!(
-                    neg % 2,
-                    1,
-                    "negative tick {} should encode to an odd value",
-                    -(n + 1)
-                );
-            }
         }
     }
 
@@ -176,13 +200,13 @@ mod tests {
     fn slot_index_matches_known_encoded_boundaries() {
         let cases = [
             (0, 0),
-            (-1, 1),
-            (15, 30),
-            (-16, 31),
-            (16, 0),
-            (-17, 1),
-            (*TickIndex::MIN, 15),
-            (*TickIndex::MAX, 16),
+            (-1, 31),
+            (15, 15),
+            (-16, 16),
+            (16, 16),
+            (-17, 15),
+            (*TickIndex::MIN, 24),
+            (*TickIndex::MAX, 8),
         ];
 
         for (input, expected_slot) in cases {
@@ -198,16 +222,16 @@ mod tests {
     #[test]
     fn cache_index_matches_known_bucket_boundaries() {
         let cases = [
-            (0, 0),
-            (-16, 0),
-            (16, 1),
-            (-17, 1),
-            (31, 1),
-            (-32, 1),
-            (32, 2),
-            (-33, 2),
-            (*TickIndex::MIN, 55_454),
-            (*TickIndex::MAX, 55_454),
+            (0, 32_768),
+            (-16, 32_767),
+            (16, 32_768),
+            (-17, 32_767),
+            (31, 32_768),
+            (-32, 32_767),
+            (32, 32_769),
+            (-33, 32_766),
+            (*TickIndex::MIN, 5_040),
+            (*TickIndex::MAX, 60_495),
         ];
 
         for (input, expected_cache) in cases {
@@ -233,27 +257,22 @@ mod tests {
 
     #[test]
     fn slot_index_zero_and_max_boundary() {
-        // value = 0b11111 (31) -> slot_index 31, cache_index 0
-        // We can't directly construct a TickSlabIndexer from a raw u32
-        // (private field), so instead pick tick inputs whose zigzag
-        // encoding lands on known boundary values.
-        // zigzag(15) = 30 (0b11110) -> slot 30
-        let indexer = make_indexer(15);
-        assert_eq!(indexer.value(), 30);
-        assert_eq!(indexer.slot_index(), 30);
-        assert_eq!(indexer.cache_index(), 0);
-
-        // zigzag(-16) = 31 (0b11111) -> slot 31
-        let indexer = make_indexer(-16);
-        assert_eq!(indexer.value(), 31);
-        assert_eq!(indexer.slot_index(), 31);
-        assert_eq!(indexer.cache_index(), 0);
-
-        // zigzag(16) = 32 (0b100000) -> slot 0, cache_index 1
-        let indexer = make_indexer(16);
-        assert_eq!(indexer.value(), 32);
+        // Pick tick inputs whose encoded values land on known page/slot
+        // boundaries without constructing a raw private indexer.
+        let indexer = make_indexer(-32);
+        assert_eq!(indexer.value(), SIGN_BIT - 32);
         assert_eq!(indexer.slot_index(), 0);
-        assert_eq!(indexer.cache_index(), 1);
+        assert_eq!(indexer.cache_index(), 32_767);
+
+        let indexer = make_indexer(-16);
+        assert_eq!(indexer.value(), SIGN_BIT - 16);
+        assert_eq!(indexer.slot_index(), 16);
+        assert_eq!(indexer.cache_index(), 32_767);
+
+        let indexer = make_indexer(16);
+        assert_eq!(indexer.value(), SIGN_BIT + 16);
+        assert_eq!(indexer.slot_index(), 16);
+        assert_eq!(indexer.cache_index(), 32_768);
     }
 
     #[test]

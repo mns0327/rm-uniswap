@@ -1,4 +1,6 @@
-use crate::core::types::{liquidity::Liquidity, tick::TickIndex};
+use crate::core::types::{
+    liquidity::Liquidity, tick::TickIndex, tick_slab_indexer::TickSlabIndexer,
+};
 use serde::{Deserialize, Serialize};
 
 use std::ops::Deref;
@@ -62,12 +64,10 @@ impl TickSpacing {
     }
 }
 
-/// Calculates the number of page buckets required to cover the protocol tick range.
+/// Calculates the number of page buckets required by `TickSlabIndexer`.
 #[inline(always)]
-pub(crate) fn calculate_cache_cap(tick_spacing: TickSpacing) -> u16 {
-    (((TickIndex::MAX.value() - TickIndex::MIN.value()) as usize / tick_spacing.as_u32() as usize)
-        >> 5) as u16
-        + 1
+pub(crate) const fn calculate_cache_cap(tick_spacing: TickSpacing) -> u16 {
+    TickSlabIndexer::from_tick(TickIndex::MAX, tick_spacing.as_u32()).cache_index() + 1
 }
 
 /// Constructs a `TickSpacing` from a literal/expression, panicking if the value
@@ -80,7 +80,7 @@ pub(crate) fn calculate_cache_cap(tick_spacing: TickSpacing) -> u16 {
 #[macro_export]
 macro_rules! tick_spacing {
     ($val:expr) => {{
-        $crate::core::types::tick_spacing::TickSpacing::new($val)
+        $crate::v4::TickSpacing::new($val)
             .unwrap_or_else(|| panic!("invalid TickSpacing value: {}", $val))
     }};
 }
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn cache_capacity_covers_spacing_compressed_protocol_range() {
-        let cases = [(1, 55_455), (10, 5_546), (32_767, 2)];
+        let cases = [(1, 60_496), (10, 6_869), (32_767, 3)];
 
         for (raw_spacing, expected_capacity) in cases {
             let spacing = TickSpacing::new(raw_spacing).unwrap();

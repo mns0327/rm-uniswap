@@ -88,14 +88,23 @@ impl Liquidity {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```
 /// # use rm_uniswap::liquidity;
 /// let liquidity = liquidity!(1_000_000u128);
 /// assert_eq!(liquidity.value(), 1_000_000);
 /// ```
 #[macro_export]
 macro_rules! liquidity {
-    ($val:expr) => {{ $crate::core::types::liquidity::Liquidity::new($val) }};
+    ($val:expr) => {{
+        $crate::v4::Liquidity::new($val)
+    }};
+}
+
+impl From<u128> for Liquidity {
+    #[inline(always)]
+    fn from(value: u128) -> Self {
+        Self::new(value)
+    }
 }
 
 /// Allows `Liquidity` to be transparently dereferenced to `&u128`,

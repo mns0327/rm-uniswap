@@ -1,6 +1,10 @@
+use alloy::primitives::I256;
 use ruint::aliases::U256;
 
-use crate::v4::{BalanceDelta, Liquidity, SignedAmount, SqrtPriceX96, TickCrossInfo, TickIndex};
+use crate::{
+    core::types::tick_slab_indexer::TickSlabIndexer,
+    v4::{BalanceDelta, Fee, Liquidity, SqrtPriceX96, TickIndex, TickInfo},
+};
 
 /// Parameters for a single simulated swap.
 ///
@@ -15,7 +19,7 @@ pub struct SwapParams {
     ///
     /// * negative → exact-input; absolute value is the input amount.
     /// * positive → exact-output; absolute value is the desired output amount.
-    pub amount: SignedAmount,
+    pub amount: I256,
 
     /// Worst-acceptable sqrt price after the swap, in Q64.96.
     ///
@@ -30,7 +34,7 @@ pub struct SwapParams {
 
 impl SwapParams {
     /// Construct a swap with no price limit (uses the loosest valid limit).
-    pub fn new(zero_for_one: bool, amount: SignedAmount) -> Self {
+    pub fn new(zero_for_one: bool, amount: I256) -> Self {
         Self {
             zero_for_one,
             amount,
@@ -55,44 +59,26 @@ pub struct ModifyLiquidityParams {
     pub liquidity_delta: i128,
 }
 
-impl ModifyLiquidityParams {
-    pub fn new(tick_lower: TickIndex, tick_upper: TickIndex, liquidity_delta: i128) -> Self {
-        Self {
-            tick_lower,
-            tick_upper,
-            liquidity_delta,
-        }
-    }
-}
-
 /// Output of a liquidity position update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifyLiquidityResult {
-    /// Token deltas for the pool's token balances from the liquidity change.
-    ///
-    /// Positive → pool receives tokens from the LP.
-    /// Negative → pool sends tokens back to the LP.
     pub delta: BalanceDelta,
-
-    /// Active pool liquidity after the update.
-    pub liquidity: Liquidity,
-
-    /// Whether the lower tick flipped initialized/uninitialized state.
-    pub flipped_lower: bool,
-
-    /// Whether the upper tick flipped initialized/uninitialized state.
-    pub flipped_upper: bool,
-
-    /// Fee growth inside the position range after the position update.
-    pub fee_growth_inside0_x128: U256,
-
-    /// Fee growth inside the position range after the position update.
-    pub fee_growth_inside1_x128: U256,
+    pub fee_delta: BalanceDelta,
 }
 
 /// Output of a successful simulated swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FullSwapResult {
+pub struct SwapResult {
+    /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
+    ///
+    /// Use [`delta_amount_in`] / [`delta_amount_out`] for
+    /// direction-aware unsigned magnitudes.
+    pub swap_delta: BalanceDelta,
+
+    pub amount_to_protocol: U256,
+
+    pub swap_fee: Fee,
+
     /// Pool sqrt price after the swap, in Q64.96.
     pub sqrt_price_x96: SqrtPriceX96,
 
@@ -102,25 +88,41 @@ pub struct FullSwapResult {
     /// Active liquidity after the swap. May differ from the input value
     /// if tick boundaries were crossed.
     pub liquidity: Liquidity,
+}
 
-    pub fee_growth_global0_x128: U256,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StepComputations {
+    // the price at the beginning of the step
+    pub sqrt_price_start_x96: SqrtPriceX96,
+    // the next tick to swap to from the current tick in the swap direction
+    pub next_tick_info: TickInfo,
+    pub next_tick_indexer: TickSlabIndexer,
+    // whether tickNext is initialized or not
+    pub initialized: bool,
+    // sqrt(price) for the next tick (1/0)
+    pub sqrt_price_next_x96: SqrtPriceX96,
+    // how much is being swapped in in this step
+    pub amount_in: U256,
+    pub amount_out: U256,
+    pub fee_amount: U256,
+    // how much is being swapped out
+    // how much fee is being paid in
+    // the global fee growth of the input token. updated in storage at the end of swap
+    pub fee_growth_global_x128: U256,
+}
 
-    pub fee_growth_global1_x128: U256,
-
-    /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
-    ///
-    /// Use [`delta_amount_in`] / [`delta_amount_out`] for
-    /// direction-aware unsigned magnitudes.
-    pub delta: BalanceDelta,
-
-    pub crossings: Vec<TickCrossInfo>,
-
-    /// Protocol fee collected in the input token, in raw token units.
-    ///
-    /// Only present when compiled with `feature = "protocol-fee"`. Matches
-    /// Uniswap V4's `uint128` type for the protocol fee amount.
-    #[cfg(feature = "protocol-fee")]
-    pub protocol_fee_amount: u128,
+impl StepComputations {
+    pub const DEFAULT: Self = StepComputations {
+        sqrt_price_start_x96: SqrtPriceX96::MIN,
+        next_tick_info: TickInfo::DEFAULT,
+        next_tick_indexer: TickSlabIndexer::from_tick(TickIndex::MIN, 1),
+        initialized: false,
+        sqrt_price_next_x96: SqrtPriceX96::MIN,
+        amount_in: U256::ZERO,
+        amount_out: U256::ZERO,
+        fee_amount: U256::ZERO,
+        fee_growth_global_x128: U256::ZERO,
+    };
 }
 
 /// Lightweight swap simulation result used by the hot quote path.
@@ -149,21 +151,4 @@ pub struct SwapSimulationResult {
     /// Protocol fee collected in the input token, in raw token units.
     #[cfg(feature = "protocol-fee")]
     pub protocol_fee_amount: u128,
-}
-
-impl SwapSimulationResult {
-    #[inline]
-    pub fn into_full(self, crossings: Vec<TickCrossInfo>) -> FullSwapResult {
-        FullSwapResult {
-            sqrt_price_x96: self.sqrt_price_x96,
-            tick: self.tick,
-            liquidity: self.liquidity,
-            fee_growth_global0_x128: self.fee_growth_global0_x128,
-            fee_growth_global1_x128: self.fee_growth_global1_x128,
-            delta: self.delta,
-            crossings,
-            #[cfg(feature = "protocol-fee")]
-            protocol_fee_amount: self.protocol_fee_amount,
-        }
-    }
 }

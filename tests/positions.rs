@@ -1,9 +1,9 @@
 #![cfg(feature = "positions")]
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, I256};
 use rm_uniswap::v4::{
-    Fee, Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex,
-    TickSpacing, positions::PositionManager,
+    Fee, Liquidity, Pool, PoolTicks, SqrtPriceX96, SwapParams, TickIndex, TickSpacing,
+    positions::PositionManager,
 };
 use ruint::aliases::U256;
 #[cfg(feature = "v4-hooks")]
@@ -51,7 +51,7 @@ fn returns_fee_delta_separately_from_principal() {
         .pool()
         .swap(SwapParams::new(
             false,
-            SignedAmount::negative(U256::from(1_000_000_000u64)),
+            -I256::from(U256::from(1_000_000_000u64)),
         ))
         .unwrap();
 
@@ -67,6 +67,49 @@ fn returns_fee_delta_separately_from_principal() {
 }
 
 #[test]
+fn newly_minted_position_does_not_collect_prior_fees() {
+    let early_owner = Address::repeat_byte(0x23);
+    let late_owner = Address::repeat_byte(0x24);
+    let manager = PositionManager::new(empty_pool());
+
+    manager
+        .mint(
+            early_owner,
+            tick(-120),
+            tick(120),
+            1_000_000_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
+        .unwrap();
+
+    manager
+        .pool()
+        .swap(SwapParams::new(
+            false,
+            -I256::from(U256::from(1_000_000_000u64)),
+        ))
+        .unwrap();
+
+    let late_position = manager
+        .mint(
+            late_owner,
+            tick(-120),
+            tick(120),
+            1_000_000_000_000,
+            u128::MAX,
+            u128::MAX,
+        )
+        .unwrap();
+
+    let collected = manager
+        .collect_fees(late_owner, late_position.token_id)
+        .unwrap();
+    assert_eq!(collected.fee_delta.amount0, 0);
+    assert_eq!(collected.fee_delta.amount1, 0);
+}
+
+#[test]
 fn slippage_failure_does_not_mutate_pool() {
     let owner = Address::repeat_byte(0x33);
     let manager = PositionManager::new(empty_pool());
@@ -79,7 +122,7 @@ fn slippage_failure_does_not_mutate_pool() {
     );
     let after = *manager.pool().state.read();
     assert_eq!(before.liquidity, after.liquidity);
-    assert!(manager.pool().ticks.read().is_empty());
+    assert!(manager.pool().ticks.is_empty());
 }
 
 #[test]
@@ -111,7 +154,7 @@ fn fee_growth_outside_assigns_post_cross_fees_to_the_active_range() {
         .pool()
         .swap(SwapParams::new(
             true,
-            SignedAmount::negative(U256::from(1_000_000_000u64)),
+            -I256::from(U256::from(1_000_000_000u64)),
         ))
         .unwrap();
 
@@ -154,7 +197,7 @@ fn v4_hook_failure_rolls_back_before_pool_mutation() {
             .is_err()
     );
     assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
-    assert!(manager.pool().ticks.read().is_empty());
+    assert!(manager.pool().ticks.is_empty());
 }
 
 #[cfg(feature = "v4-hooks")]
@@ -188,7 +231,7 @@ fn before_hook_failure_rolls_back_before_pool_mutation() {
         Error::Unauthorized
     );
     assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
-    assert!(manager.pool().ticks.read().is_empty());
+    assert!(manager.pool().ticks.is_empty());
 }
 
 #[cfg(feature = "v4-hooks")]
@@ -217,7 +260,7 @@ fn hooks_run_in_before_then_after_order() {
         ) -> Result<BalanceDelta, rm_uniswap::Error> {
             assert_eq!(result.liquidity, 1_000_000);
             self.0.lock().push("after");
-            Ok(BalanceDelta::default())
+            Ok(BalanceDelta::DEFAULT)
         }
     }
 
@@ -325,7 +368,7 @@ fn hook_delta_overflow_fails_before_pool_or_position_mutation() {
                     amount1: i128::MAX,
                 }
             } else {
-                BalanceDelta::default()
+                BalanceDelta::DEFAULT
             })
         }
     }
@@ -346,7 +389,7 @@ fn hook_delta_overflow_fails_before_pool_or_position_mutation() {
         .pool()
         .swap(SwapParams::new(
             false,
-            SignedAmount::negative(U256::from(1_000_000_000u64)),
+            -I256::from(U256::from(1_000_000_000u64)),
         ))
         .unwrap();
 

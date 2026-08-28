@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use rm_uniswap::v4::Fee;
+use alloy::primitives::I256;
 use rm_uniswap::{
     Error,
     v4::{
-        Liquidity, Pool, PoolTicks, SignedAmount, SqrtPriceX96, SwapParams, TickIndex, TickInfo,
+        Fee, Liquidity, Pool, PoolTicks, SqrtPriceX96, SwapParams, TickIndex, TickInfo,
         TickSpacing, tick_math,
     },
 };
@@ -25,6 +25,10 @@ fn sqrt_price_1_1() -> SqrtPriceX96 {
     SqrtPriceX96::from_u256(U256::ONE << 96).unwrap()
 }
 
+fn exact_input(raw: u64) -> I256 {
+    -I256::from(U256::from(raw))
+}
+
 fn valid_pool() -> Pool {
     let ticks = PoolTicks::from_snapshot(
         tick_spacing_60(),
@@ -33,7 +37,7 @@ fn valid_pool() -> Pool {
                 tick(-60),
                 TickInfo {
                     liquidity_net: LIQUIDITY as i128,
-                    liquidity_gross: LIQUIDITY,
+                    liquidity_gross: Liquidity::new(LIQUIDITY),
                     ..TickInfo::default()
                 },
             ),
@@ -41,7 +45,7 @@ fn valid_pool() -> Pool {
                 tick(60),
                 TickInfo {
                     liquidity_net: -(LIQUIDITY as i128),
-                    liquidity_gross: LIQUIDITY,
+                    liquidity_gross: Liquidity::new(LIQUIDITY),
                     ..TickInfo::default()
                 },
             ),
@@ -109,42 +113,85 @@ fn serde_rejects_untrusted_invalid_pool_snapshot() {
 }
 
 #[test]
-fn shared_handle_and_fork_have_distinct_state_semantics() {
+fn quote_swap_matches_committed_swap_without_mutating_source_pool() {
     let pool = valid_pool();
-    let shared = pool.shared_handle();
-    let fork = pool.try_fork().unwrap();
+    let before = pool.snapshot();
+    let params = SwapParams::new(false, exact_input(1_000_000));
 
-    pool.swap(SwapParams::new(
-        false,
-        SignedAmount::negative(U256::from(1_000_000u64)),
-    ))
-    .unwrap();
+    let quote = pool.quote_swap(params).unwrap();
+    assert_eq!(pool.snapshot(), before, "quote must be read-only");
 
-    assert_eq!(*pool.state.read(), *shared.state.read());
-    assert_ne!(*pool.state.read(), *fork.state.read());
+    let mut fork = pool.try_fork().unwrap();
+    let committed = fork.swap(params).unwrap();
+
+    assert_eq!(quote, committed);
+    assert_eq!(
+        pool.snapshot(),
+        before,
+        "committed fork must not touch source"
+    );
+    assert_ne!(
+        fork.snapshot(),
+        before,
+        "committed swap must update its pool"
+    );
 }
 
 #[test]
-fn mutating_swap_refreshes_scoring_price_cache() {
-    let pool = valid_pool();
-    let before = pool.spot_price_with_fee(false);
+fn mutating_swap_commits_state_and_refreshes_scoring_price_cache() {
+    let mut pool = valid_pool();
+    let before = pool.snapshot();
+    let before_cached = pool.spot_price_with_fee(false);
 
     let result = pool
-        .swap(SwapParams::new(
-            false,
-            SignedAmount::negative(U256::from(1_000_000u64)),
-        ))
+        .swap(SwapParams::new(false, exact_input(1_000_000)))
         .unwrap();
 
-    let after = pool.spot_price_with_fee(false);
-    let expected_raw = {
-        let sqrt = result.sqrt_price_x96.value().to::<u128>() as f64 / 2f64.powi(96);
-        1.0 / (sqrt * sqrt)
-    };
-    let expected_with_fee = expected_raw * (1.0 - FEE.pips() as f64 / 1_000_000.0);
+    let after = pool.snapshot();
+    assert_ne!(after.state.sqrt_price_x96, before.state.sqrt_price_x96);
+    assert_eq!(after.state.sqrt_price_x96, result.sqrt_price_x96);
+    assert_eq!(after.state.tick, result.tick);
+    assert_eq!(after.state.liquidity, result.liquidity);
 
-    assert!(after < before);
-    assert!((after - expected_with_fee).abs() < 1e-12);
+    let after_cached = pool.spot_price_with_fee(false);
+    let sqrt = result.sqrt_price_x96.value().to::<u128>() as f64 / 2f64.powi(96);
+    let expected = (1.0 / (sqrt * sqrt)) * (1.0 - FEE.pips() as f64 / 1_000_000.0);
+
+    assert!(after_cached < before_cached);
+    assert!((after_cached - expected).abs() < 1e-12);
+}
+
+#[test]
+fn crossing_quote_is_read_only_but_committed_swap_updates_fee_growth_outside() {
+    let pool = valid_pool();
+    let params = SwapParams {
+        zero_for_one: true,
+        amount: -I256::from(U256::from(1_000_000_000_000_000u64)),
+        sqrt_price_limit_x96: tick(-60).sqrt_price_x96(),
+        #[cfg(feature = "protocol-fee")]
+        protocol_fee: None,
+    };
+
+    let quote = pool.quote_swap(params).unwrap();
+    let quoted_snapshot = pool.snapshot();
+    let quoted_lower = quoted_snapshot.ticks.inner.get(&tick(-60)).unwrap();
+    assert_eq!(quoted_lower.fee_growth_outside0_x128, U256::ZERO);
+
+    let mut committed_pool = pool.try_fork().unwrap();
+    let committed = committed_pool.swap(params).unwrap();
+    let committed_snapshot = committed_pool.snapshot();
+    let committed_lower = committed_snapshot.ticks.inner.get(&tick(-60)).unwrap();
+
+    assert_eq!(quote, committed);
+    assert_eq!(committed.tick, tick(-61));
+    assert_eq!(committed.liquidity, Liquidity::ZERO);
+    assert!(committed.swap_delta.amount_in(true) > 0);
+    assert!(committed.swap_delta.amount_out(true) > 0);
+    assert!(committed_snapshot.state.fee_growth_global0_x128 > U256::ZERO);
+    assert_eq!(
+        committed_lower.fee_growth_outside0_x128,
+        committed_snapshot.state.fee_growth_global0_x128
+    );
 }
 
 #[test]
@@ -156,67 +203,25 @@ fn sample_pool_snapshot_is_still_accepted() {
     assert_eq!(derived_tick, pool.state.read().tick);
 }
 
-#[test]
-fn concurrent_quotes_and_swaps_keep_a_valid_shared_state() {
-    let pool = valid_pool();
-    let writer = pool.shared_handle();
-    let writer_thread = std::thread::spawn(move || {
-        for _ in 0..50 {
-            writer
-                .swap(SwapParams::new(
-                    false,
-                    SignedAmount::negative(U256::from(1_000u64)),
-                ))
-                .unwrap();
-        }
-    });
-
-    let readers = (0..4)
-        .map(|_| {
-            let reader = pool.shared_handle();
-            std::thread::spawn(move || {
-                for _ in 0..100 {
-                    reader
-                        .simulate_swap(SwapParams::new(
-                            true,
-                            SignedAmount::negative(U256::from(500u64)),
-                        ))
-                        .unwrap();
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    writer_thread.join().unwrap();
-    for reader in readers {
-        reader.join().unwrap();
-    }
-
-    pool.snapshot().validate().unwrap();
-}
-
 #[cfg(feature = "protocol-fee")]
 #[test]
-fn protocol_fee_is_collected_and_light_full_results_match() {
+fn protocol_fee_changes_effective_swap_fee_for_quotes() {
     let pool = valid_pool();
-    let mut params = SwapParams::new(false, SignedAmount::negative(U256::from(100_000_000u64)));
+    let mut params = SwapParams::new(false, exact_input(100_000_000));
     params.protocol_fee = Some(500);
 
-    let light = pool.simulate_swap(params).unwrap();
-    let full = pool.simulate_swap_full(params).unwrap();
+    let result = pool.quote_swap(params).unwrap();
 
-    assert!(light.protocol_fee_amount > 0);
-    assert_eq!(light.protocol_fee_amount, full.protocol_fee_amount);
-    assert_eq!(light.delta, full.delta);
-    assert_eq!(light.sqrt_price_x96, full.sqrt_price_x96);
+    assert!(result.swap_fee.pips() > FEE.pips());
+    assert!(result.amount_to_protocol > U256::ZERO);
 }
 
 #[cfg(feature = "protocol-fee")]
 #[test]
 fn protocol_fee_above_v4_maximum_is_rejected() {
     let pool = valid_pool();
-    let mut params = SwapParams::new(true, SignedAmount::negative(U256::from(1_000_000u64)));
+    let mut params = SwapParams::new(true, exact_input(1_000_000));
     params.protocol_fee = Some(1_001);
 
-    assert_eq!(pool.simulate_swap(params).unwrap_err(), Error::FeeTooLarge);
+    assert_eq!(pool.quote_swap(params).unwrap_err(), Error::FeeTooLarge);
 }
