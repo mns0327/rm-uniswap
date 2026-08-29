@@ -187,7 +187,10 @@ fn bench_tick_slab(c: &mut Criterion) {
                 for &key in &SPARSE_KEYS {
                     let indexer = slab.indexer(tick(key));
                     black_box(slab.remove(black_box(indexer)));
-                    black_box(slab.insert(black_box(indexer), black_box(info(key))).unwrap());
+                    black_box(
+                        slab.insert(black_box(indexer), black_box(info(key)))
+                            .unwrap(),
+                    );
                 }
                 black_box(slab)
             },

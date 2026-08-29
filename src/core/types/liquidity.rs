@@ -95,9 +95,7 @@ impl Liquidity {
 /// ```
 #[macro_export]
 macro_rules! liquidity {
-    ($val:expr) => {{
-        $crate::v4::Liquidity::new($val)
-    }};
+    ($val:expr) => {{ $crate::v4::Liquidity::new($val) }};
 }
 
 impl From<u128> for Liquidity {

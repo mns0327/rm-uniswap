@@ -1,6 +1,7 @@
 use ruint::{
+    ParseError,
     aliases::{U160, U256},
-    uint, ParseError,
+    uint,
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, ops::Deref};

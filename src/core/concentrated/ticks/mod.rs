@@ -10,9 +10,9 @@
 use ruint::aliases::U256;
 
 use crate::{
+    Error,
     core::types::tick_slab_indexer::TickSlabIndexer,
     v4::{TickIndex, TickInfo},
-    Error,
 };
 
 use slab::TickSlab;
