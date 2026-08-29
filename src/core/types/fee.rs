@@ -27,8 +27,9 @@ impl Fee {
     /// Attempts to construct a `Fee` from raw pips.
     ///
     /// Returns `None` if `fee_pips` is greater than `MAX_FEE`. A value equal
-    /// to `MAX_FEE` is valid for exact-input swaps, but exact-output callers
-    /// must reject it with `validate_swap_fee_for_exactness`.
+    /// to `MAX_FEE` is valid for exact-input swaps, but exact-output swaps
+    /// reject it at the pool layer because no finite input can both pay a
+    /// 100% fee and deliver output.
     #[inline(always)]
     pub const fn new(fee_pips: u32) -> Option<Self> {
         if fee_pips > MAX_FEE {
@@ -91,76 +92,5 @@ impl<'de> Deserialize<'de> for Fee {
     {
         let pips = u32::deserialize(deserializer)?;
         Self::new(pips).ok_or(serde::de::Error::custom("invalid fee pips"))
-    }
-}
-
-/// Validates the swap fee against the swap exactness.
-///
-/// V4 allows a 100% fee for exact-input swaps: the entire caller input can be
-/// consumed as fee and produce no output. Exact-output swaps must reject 100%
-/// fees because no finite input can both pay the fee and deliver output.
-#[inline]
-pub(crate) fn validate_swap_fee_for_exactness(
-    fee: Fee,
-    exact_in: bool,
-) -> Result<(), crate::Error> {
-    if !exact_in && fee.is_max() {
-        Err(crate::Error::FeeTooLarge)
-    } else {
-        Ok(())
-    }
-}
-
-/// Helpers for combining the pool LP fee with an optional V4 protocol fee.
-///
-/// Protocol fees are configured per swap and are applied before LP fee growth
-/// accounting. The combined effective fee follows V4's overlap formula rather
-/// than simply adding both percentages.
-#[cfg(feature = "protocol-fee")]
-pub(crate) mod protocol {
-    use super::Fee;
-
-    /// `ProtocolFeeLibrary.MAX_PROTOCOL_FEE` = 1 000 (0.1%).
-    pub(crate) const MAX_PROTOCOL_FEE: u32 = 1_000;
-    /// `ProtocolFeeLibrary.PIPS_DENOMINATOR` = 1 000 000.
-    pub(crate) const PIPS_DENOMINATOR: u32 = 1_000_000;
-
-    /// Calculates the effective swap fee from protocol and LP fees.
-    ///
-    /// When no protocol fee is supplied, this returns the pool LP fee. When a
-    /// protocol fee is present, V4 combines the two fees as:
-    ///
-    /// ```text
-    /// protocolFee + lpFee - floor(protocolFee * lpFee / PIPS_DENOMINATOR)
-    /// ```
-    ///
-    /// The subtraction removes the overlap between the two percentages so the
-    /// combined fee still represents one effective percentage of the input.
-    pub(crate) fn calculate_swap_fee(
-        protocol_fee: Option<u32>,
-        lp_fee: Fee,
-    ) -> Result<Fee, crate::Error> {
-        let Some(protocol_fee) = protocol_fee else {
-            return Ok(lp_fee);
-        };
-
-        if protocol_fee > MAX_PROTOCOL_FEE {
-            return Err(crate::Error::FeeTooLarge);
-        }
-        if protocol_fee == 0 {
-            return Ok(lp_fee);
-        }
-
-        // V4's `calculateSwapFee`:
-        //   protocolFee + lpFee - floor(protocolFee * lpFee / PIPS_DENOMINATOR)
-        let overlap =
-            (u64::from(protocol_fee) * u64::from(lp_fee.pips)) / u64::from(PIPS_DENOMINATOR);
-        let combined = u64::from(protocol_fee) + u64::from(lp_fee.pips) - overlap;
-
-        if combined > u64::from(PIPS_DENOMINATOR) {
-            return Err(crate::Error::FeeTooLarge);
-        }
-
-        Fee::new(combined as u32).ok_or(crate::Error::FeeTooLarge)
     }
 }

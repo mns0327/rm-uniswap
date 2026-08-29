@@ -520,7 +520,7 @@ pub fn get_amount0_delta_signed(
             get_amount0_delta(
                 sqrt_ratio_a_x96,
                 sqrt_ratio_b_x96,
-                Liquidity::new(liquidity.abs() as u128),
+                Liquidity::new(liquidity.unsigned_abs()),
                 false,
             )?
             .0,
@@ -642,7 +642,7 @@ pub fn get_amount1_delta_signed(
             get_amount1_delta(
                 sqrt_ratio_a_x96,
                 sqrt_ratio_b_x96,
-                Liquidity::new(liquidity.abs() as u128),
+                Liquidity::new(liquidity.unsigned_abs()),
                 false,
             )?
             .0,

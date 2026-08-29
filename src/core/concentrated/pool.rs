@@ -23,15 +23,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::Error as SwapSimError;
 use crate::core::concentrated::ticks::TickAccess;
 use crate::core::concentrated::ticks::slab::TickSlab;
-#[cfg(feature = "protocol-fee")]
-use crate::core::types::fee::protocol::{PIPS_DENOMINATOR, calculate_swap_fee};
-use crate::core::types::fee::{Fee, validate_swap_fee_for_exactness};
+use crate::core::types::fee::Fee;
 use crate::core::types::liquidity::Liquidity;
 use crate::core::types::nonzero::NonZeroLiquidity;
 use crate::core::types::params::{
     ModifyLiquidityParams, ModifyLiquidityResult, StepComputations, SwapParams, SwapResult,
 };
 use crate::core::types::pool_state::{PoolState, StateAccess};
+use crate::core::types::protocol_fee::{PIPS_DENOMINATOR, ProtocolFee};
 use crate::core::types::sqrt_price::SqrtPriceX96;
 use crate::core::types::tick::TickIndex;
 use crate::core::types::tick_spacing::TickSpacing;
@@ -40,8 +39,6 @@ use crate::core::{
     types::{PoolTicksSnapshot, TickInfo, delta::BalanceDelta},
 };
 use crate::v4::swap_math::compute_swap_step;
-
-use super::price::{PriceCache, sqrt_price_x96_to_price};
 
 /// Complete V4 pool state required for a full tick-crossing simulation.
 ///
@@ -60,13 +57,14 @@ pub struct Pool {
     /// Fee tier in pips (e.g. `3_000` = 0.30 %). Must be `<= 1_000_000`.
     pub fee: Fee,
 
+    /// Directional protocol fee configuration applied on top of the LP fee.
+    pub protocol_fee: ProtocolFee,
+
     /// Tick spacing from `PoolKey.tickSpacing`.
     pub tick_spacing: TickSpacing,
 
     /// Initialized ticks keyed by `tick_idx` in an ordered map behind a lock.
     pub ticks: TickSlab,
-
-    pub price_cache: Arc<PriceCache>,
 }
 
 impl Serialize for Pool {
@@ -93,6 +91,10 @@ impl PoolSnapshot {
     pub fn validate(&self) -> Result<(), SwapSimError> {
         if self.ticks.tick_spacing != self.tick_spacing {
             return Err(SwapSimError::InvalidTickSpacing);
+        }
+
+        if !self.protocol_fee.is_valid() {
+            return Err(SwapSimError::FeeTooLarge);
         }
 
         if get_tick_at_sqrt_price(&self.state.sqrt_price_x96) != self.state.tick {
@@ -141,6 +143,8 @@ impl PoolSnapshot {
 pub struct PoolSnapshot {
     pub state: PoolState,
     pub fee: Fee,
+    #[serde(default)]
+    pub protocol_fee: ProtocolFee,
     pub tick_spacing: TickSpacing,
     pub ticks: PoolTicksSnapshot,
 }
@@ -152,18 +156,14 @@ impl TryFrom<PoolSnapshot> for Pool {
         snapshot.validate()?;
 
         let ticks = TickSlab::from_snapshot(snapshot.ticks.tick_spacing, snapshot.ticks.inner)?;
-        let sqrt_price_x96 = snapshot.state.sqrt_price_x96;
         let fee = snapshot.fee;
 
         Ok(Self {
             state: Arc::new(RwLock::new(snapshot.state)),
             fee,
+            protocol_fee: snapshot.protocol_fee,
             tick_spacing: snapshot.tick_spacing,
             ticks,
-            price_cache: Arc::new(PriceCache::new(
-                sqrt_price_x96_to_price(sqrt_price_x96),
-                fee,
-            )),
         })
     }
 }
@@ -200,6 +200,7 @@ impl Pool {
                 fee_growth_global1_x128: U256::ZERO,
             },
             fee,
+            protocol_fee: ProtocolFee::ZERO,
             tick_spacing,
             ticks: ticks.owned_snapshot(),
         }
@@ -214,6 +215,7 @@ impl Pool {
         tick: TickIndex,
         liquidity: Liquidity,
         fee: Fee,
+        protocol_fee: ProtocolFee,
         tick_spacing: TickSpacing,
         ticks: TickSlab,
     ) -> Self {
@@ -226,12 +228,9 @@ impl Pool {
                 fee_growth_global1_x128: U256::ZERO,
             })),
             fee,
+            protocol_fee,
             tick_spacing,
-            ticks: ticks,
-            price_cache: Arc::new(PriceCache::new(
-                sqrt_price_x96_to_price(sqrt_price_x96),
-                fee,
-            )),
+            ticks,
         }
     }
 
@@ -244,6 +243,7 @@ impl Pool {
         PoolSnapshot {
             state,
             fee: self.fee,
+            protocol_fee: self.protocol_fee,
             tick_spacing: self.tick_spacing,
             ticks: PoolTicksSnapshot {
                 tick_spacing: self.ticks.tick_spacing(),
@@ -255,15 +255,6 @@ impl Pool {
     /// Create an independent pool with fresh locks and caches.
     pub fn try_fork(&self) -> Result<Self, SwapSimError> {
         Self::try_from(self.snapshot())
-    }
-
-    /// Return the fee-adjusted spot price used for route scoring.
-    ///
-    /// Exact swap accounting never uses this `f64` cache.
-    #[inline]
-    #[must_use]
-    pub fn spot_price_with_fee(&self, zero_for_one: bool) -> f64 {
-        self.price_cache.get_price_with_fee(zero_for_one)
     }
 
     /// Apply a liquidity change and commit it to pool state.
@@ -461,17 +452,22 @@ impl Pool {
     pub fn swap(&mut self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
         let result = {
             let mut state = self.state.write();
-            swap_inner(&mut *state, &mut self.ticks, self.fee, params)?
+            swap_inner(
+                &mut *state,
+                &mut self.ticks,
+                &self.fee,
+                &self.protocol_fee,
+                &params,
+            )?
         };
-        self.price_cache
-            .update_price(sqrt_price_x96_to_price(result.sqrt_price_x96));
+
         Ok(result)
     }
 
     pub fn quote_swap(&self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
         let state = self.state.read();
 
-        swap_inner(&*state, &self.ticks, self.fee, params)
+        swap_inner(&*state, &self.ticks, &self.fee, &self.protocol_fee, &params)
     }
 }
 
@@ -483,15 +479,17 @@ impl Pool {
 fn swap_inner<T: TickAccess, S: StateAccess>(
     mut state: S,
     mut ticks: T,
-    fee: Fee,
-    params: SwapParams,
+    fee: &Fee,
+    protocol_fee: &ProtocolFee,
+    params: &SwapParams,
 ) -> Result<SwapResult, SwapSimError> {
     let exact_in = params.amount.is_negative();
-    #[cfg(feature = "protocol-fee")]
-    let swap_fee = calculate_swap_fee(params.protocol_fee, fee)?;
-    #[cfg(not(feature = "protocol-fee"))]
-    let swap_fee = fee;
-    validate_swap_fee_for_exactness(swap_fee, exact_in)?;
+
+    let swap_fee = protocol_fee.calculate_swap_fee(params.zero_for_one, fee)?;
+
+    if swap_fee.is_max() && !exact_in {
+        return Err(SwapSimError::FeeTooLarge);
+    }
 
     let zero_for_one = params.zero_for_one;
 
@@ -550,14 +548,12 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         if let Some(tick_info) =
             ticks.next_initialized_tick(ticks.indexer(result.tick), zero_for_one)
         {
-            step.next_tick_indexer = tick_info.0.clone();
-            step.next_tick_info = tick_info.1.clone();
+            step.next_tick_indexer = tick_info.0;
+            step.next_tick_info = *tick_info.1;
+        } else if zero_for_one {
+            step.next_tick_info.sqrt_price_x96 = SqrtPriceX96::MIN;
         } else {
-            if zero_for_one {
-                step.next_tick_info.sqrt_price_x96 = SqrtPriceX96::MIN;
-            } else {
-                step.next_tick_info.sqrt_price_x96 = SqrtPriceX96::MAX;
-            }
+            step.next_tick_info.sqrt_price_x96 = SqrtPriceX96::MAX;
         };
 
         step.sqrt_price_next_x96 = get_sqrt_price_target(
@@ -617,15 +613,16 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
                 .ok_or(SwapSimError::AmountOverflow)?;
         }
 
-        #[cfg(feature = "protocol-fee")]
-        if let Some(protocol_fee) = params.protocol_fee.filter(|protocol_fee| *protocol_fee > 0) {
-            let protocol_delta = if swap_fee.pips() == protocol_fee {
+        let protocol_fee_pips = protocol_fee.pips(zero_for_one) as u32;
+
+        if protocol_fee_pips != 0 {
+            let protocol_delta = if swap_fee.pips() == protocol_fee_pips {
                 step.fee_amount
             } else {
                 step.amount_in
                     .checked_add(step.fee_amount)
                     .ok_or(SwapSimError::AmountOverflow)?
-                    .checked_mul(U256::from(protocol_fee))
+                    .checked_mul(U256::from(protocol_fee_pips))
                     .ok_or(SwapSimError::AmountOverflow)?
                     / U256::from(PIPS_DENOMINATOR)
             };
@@ -859,6 +856,7 @@ mod tests {
         tick: i32,
         liquidity: u128,
         fee: u32,
+        protocol_fee: ProtocolFee,
         tick_spacing: TickSpacing,
         ticks: impl IntoIterator<Item = (TickIndex, TickInfo)>,
     ) -> Pool {
@@ -872,6 +870,7 @@ mod tests {
             self::tick(tick),
             Liquidity::new(liquidity),
             fee,
+            protocol_fee,
             tick_spacing,
             tick_map,
         )
@@ -887,6 +886,7 @@ mod tests {
             0,
             1_000_000_000_000_000_000u128,
             3_000,
+            ProtocolFee::ZERO,
             tick_spacing_60(),
             ticks.iter().copied(),
         )
@@ -901,8 +901,6 @@ mod tests {
             zero_for_one,
             amount,
             sqrt_price_limit_x96,
-            #[cfg(feature = "protocol-fee")]
-            protocol_fee: None,
         }
     }
 
@@ -1212,6 +1210,7 @@ mod tests {
             0,
             liq,
             3_000,
+            ProtocolFee::ZERO,
             tick_spacing_60(),
             [
                 tick_info(-120, liq as i128, liq),
@@ -1256,7 +1255,15 @@ mod tests {
 
     #[test]
     fn add_liquidity_inside_range() {
-        let mut pool = make_pool(sqrt_price_1_1(), 0, 0, 3_000, tick_spacing_60(), []);
+        let mut pool = make_pool(
+            sqrt_price_1_1(),
+            0,
+            0,
+            3_000,
+            ProtocolFee::ZERO,
+            tick_spacing_60(),
+            [],
+        );
         let liq = 1_000_000_000_000u128;
 
         let result = pool
@@ -1285,7 +1292,15 @@ mod tests {
 
     #[test]
     fn add_liquidity_below_range_only_token0() {
-        let mut pool = make_pool(sqrt_at(-240), -240, 0, 3_000, tick_spacing_60(), []);
+        let mut pool = make_pool(
+            sqrt_at(-240),
+            -240,
+            0,
+            3_000,
+            ProtocolFee::ZERO,
+            tick_spacing_60(),
+            [],
+        );
 
         let result = pool
             .modify_liquidity(ModifyLiquidityParams {
@@ -1308,7 +1323,15 @@ mod tests {
 
     #[test]
     fn remove_liquidity_clears_ticks() {
-        let mut pool = make_pool(sqrt_price_1_1(), 0, 0, 3_000, tick_spacing_60(), []);
+        let mut pool = make_pool(
+            sqrt_price_1_1(),
+            0,
+            0,
+            3_000,
+            ProtocolFee::ZERO,
+            tick_spacing_60(),
+            [],
+        );
         let liq = 1_000_000_000_000i128;
 
         pool.modify_liquidity(ModifyLiquidityParams {
@@ -1382,6 +1405,37 @@ mod tests {
     }
 
     #[test]
+    fn protocol_fee_changes_effective_swap_fee_for_quotes() {
+        let ticks = basic_ticks();
+        let pool = make_pool(
+            sqrt_price_1_1(),
+            0,
+            1_000_000_000_000_000_000u128,
+            3_000,
+            ProtocolFee::new(0, 500).unwrap(),
+            tick_spacing_60(),
+            ticks,
+        );
+
+        let result = pool
+            .quote_swap(make_params(
+                false,
+                exact_in(U256::from(100_000_000u128)),
+                sqrt_at(120),
+            ))
+            .unwrap();
+
+        assert!(result.swap_fee.pips() > pool.fee.pips());
+        assert!(result.amount_to_protocol > U256::ZERO);
+    }
+
+    #[test]
+    fn protocol_fee_above_v4_maximum_is_rejected_at_construction() {
+        assert!(ProtocolFee::new(1_001, 0).is_none());
+        assert!(ProtocolFee::new(0, 1_001).is_none());
+    }
+
+    #[test]
     fn rejects_limit_wrong_side_for_zero_for_one() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
@@ -1437,7 +1491,15 @@ mod tests {
                 tick_info(-600, liq as i128, liq),
                 tick_info(600, -(liq as i128), liq),
             ];
-            let mut pool = make_pool(sqrt_at(0), 0, liq, fee, tick_spacing_60(), ticks);
+            let mut pool = make_pool(
+                sqrt_at(0),
+                0,
+                liq,
+                fee,
+                ProtocolFee::ZERO,
+                tick_spacing_60(),
+                ticks,
+            );
 
             let limit_tick = if zero_for_one { -limit_tick_offset } else { limit_tick_offset };
             let limit = sqrt_at(limit_tick);
@@ -1471,7 +1533,15 @@ mod tests {
                 tick_info(-600, liq as i128, liq),
                 tick_info(600, -(liq as i128), liq),
             ];
-            let mut pool = make_pool(sqrt_at(0), 0, liq, 3_000, tick_spacing_60(), ticks);
+            let mut pool = make_pool(
+                sqrt_at(0),
+                0,
+                liq,
+                3_000,
+                ProtocolFee::ZERO,
+                tick_spacing_60(),
+                ticks,
+            );
 
             let result = pool
                 .swap(make_params(
@@ -1508,7 +1578,15 @@ mod tests {
                 tick_info(-600, liq as i128, liq),
                 tick_info(600, -(liq as i128), liq),
             ];
-            let mut pool = make_pool(sqrt_at(0), 0, liq, 3_000, tick_spacing_60(), ticks);
+            let mut pool = make_pool(
+                sqrt_at(0),
+                0,
+                liq,
+                3_000,
+                ProtocolFee::ZERO,
+                tick_spacing_60(),
+                ticks,
+            );
 
             let result = pool
                 .swap(make_params(

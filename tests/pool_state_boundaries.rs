@@ -4,8 +4,8 @@ use alloy::primitives::I256;
 use rm_uniswap::{
     Error,
     v4::{
-        Fee, Liquidity, Pool, PoolTicks, SqrtPriceX96, SwapParams, TickIndex, TickInfo,
-        TickSpacing, tick_math,
+        Fee, Liquidity, Pool, PoolTicks, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
+        TickInfo, TickSpacing, tick_math,
     },
 };
 use ruint::aliases::U256;
@@ -138,10 +138,26 @@ fn quote_swap_matches_committed_swap_without_mutating_source_pool() {
 }
 
 #[test]
-fn mutating_swap_commits_state_and_refreshes_scoring_price_cache() {
+fn snapshot_and_fork_preserve_protocol_fee() {
+    let mut pool = valid_pool();
+    pool.protocol_fee = ProtocolFee::new(123, 456).unwrap();
+    let params = SwapParams::new(false, exact_input(1_000_000));
+
+    let snapshot = pool.snapshot();
+    assert_eq!(snapshot.protocol_fee, pool.protocol_fee);
+
+    let fork = pool.try_fork().unwrap();
+    assert_eq!(fork.protocol_fee, pool.protocol_fee);
+    assert_eq!(
+        fork.quote_swap(params).unwrap(),
+        pool.quote_swap(params).unwrap()
+    );
+}
+
+#[test]
+fn mutating_swap_commits_result_state_and_fee_growth() {
     let mut pool = valid_pool();
     let before = pool.snapshot();
-    let before_cached = pool.spot_price_with_fee(false);
 
     let result = pool
         .swap(SwapParams::new(false, exact_input(1_000_000)))
@@ -152,13 +168,32 @@ fn mutating_swap_commits_state_and_refreshes_scoring_price_cache() {
     assert_eq!(after.state.sqrt_price_x96, result.sqrt_price_x96);
     assert_eq!(after.state.tick, result.tick);
     assert_eq!(after.state.liquidity, result.liquidity);
+    assert_eq!(result.swap_fee, FEE);
+    assert_eq!(result.amount_to_protocol, U256::ZERO);
+    assert_eq!(after.state.fee_growth_global0_x128, U256::ZERO);
+    assert!(after.state.fee_growth_global1_x128 > before.state.fee_growth_global1_x128);
+}
 
-    let after_cached = pool.spot_price_with_fee(false);
-    let sqrt = result.sqrt_price_x96.value().to::<u128>() as f64 / 2f64.powi(96);
-    let expected = (1.0 / (sqrt * sqrt)) * (1.0 - FEE.pips() as f64 / 1_000_000.0);
+#[test]
+fn quote_swap_uses_protocol_fee_in_effective_swap_fee() {
+    let mut pool = valid_pool();
+    let params = SwapParams::new(false, exact_input(1_000_000));
 
-    assert!(after_cached < before_cached);
-    assert!((after_cached - expected).abs() < 1e-12);
+    let without_protocol_fee = pool.quote_swap(params).unwrap();
+
+    pool.protocol_fee = ProtocolFee::new(0, 500).unwrap();
+    let with_protocol_fee = pool.quote_swap(params).unwrap();
+
+    let effective_fee = 500 + FEE.pips() - (500 * FEE.pips() / 1_000_000);
+
+    assert_eq!(without_protocol_fee.swap_fee, FEE);
+    assert_eq!(without_protocol_fee.amount_to_protocol, U256::ZERO);
+    assert_eq!(with_protocol_fee.swap_fee, Fee::new(effective_fee).unwrap());
+    assert!(with_protocol_fee.amount_to_protocol > U256::ZERO);
+    assert!(
+        with_protocol_fee.swap_delta.amount_out(false)
+            < without_protocol_fee.swap_delta.amount_out(false)
+    );
 }
 
 #[test]
@@ -168,8 +203,6 @@ fn crossing_quote_is_read_only_but_committed_swap_updates_fee_growth_outside() {
         zero_for_one: true,
         amount: -I256::from(U256::from(1_000_000_000_000_000u64)),
         sqrt_price_limit_x96: tick(-60).sqrt_price_x96(),
-        #[cfg(feature = "protocol-fee")]
-        protocol_fee: None,
     };
 
     let quote = pool.quote_swap(params).unwrap();
@@ -201,27 +234,17 @@ fn sample_pool_snapshot_is_still_accepted() {
 
     let derived_tick = tick_math::get_tick_at_sqrt_price(&pool.state.read().sqrt_price_x96);
     assert_eq!(derived_tick, pool.state.read().tick);
+    assert_eq!(pool.protocol_fee, ProtocolFee::ZERO);
 }
 
-#[cfg(feature = "protocol-fee")]
 #[test]
-fn protocol_fee_changes_effective_swap_fee_for_quotes() {
-    let pool = valid_pool();
-    let mut params = SwapParams::new(false, exact_input(100_000_000));
-    params.protocol_fee = Some(500);
+fn serde_rejects_invalid_protocol_fee_snapshot() {
+    let mut value = serde_json::to_value(valid_pool().snapshot()).unwrap();
+    value["protocol_fee"] = serde_json::json!({
+        "zero_for_one_fee": 1_001,
+        "one_for_zero_fee": 0
+    });
 
-    let result = pool.quote_swap(params).unwrap();
-
-    assert!(result.swap_fee.pips() > FEE.pips());
-    assert!(result.amount_to_protocol > U256::ZERO);
-}
-
-#[cfg(feature = "protocol-fee")]
-#[test]
-fn protocol_fee_above_v4_maximum_is_rejected() {
-    let pool = valid_pool();
-    let mut params = SwapParams::new(true, exact_input(1_000_000));
-    params.protocol_fee = Some(1_001);
-
-    assert_eq!(pool.quote_swap(params).unwrap_err(), Error::FeeTooLarge);
+    let decoded = serde_json::from_value::<Pool>(value);
+    assert!(decoded.is_err());
 }

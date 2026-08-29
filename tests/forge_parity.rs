@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 
 use alloy::primitives::{Address, I256};
 use rm_uniswap::v4::{
-    BalanceDelta, Pool, PoolSnapshot, SqrtPriceX96, SwapParams, TickIndex,
+    BalanceDelta, Pool, PoolSnapshot, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
     positions::{MintResult, ModifyResult, PositionManager},
 };
 use ruint::aliases::U256;
@@ -62,7 +62,6 @@ enum Operation {
         exact: Exactness,
         amount: U256,
         sqrt_price_limit_x96: Option<U256>,
-        #[cfg(feature = "protocol-fee")]
         protocol_fee: Option<u32>,
         expect: Option<ExpectedSwap>,
     },
@@ -116,7 +115,6 @@ struct ExpectedSwap {
     liquidity: u128,
     fee_growth_global0_x128: U256,
     fee_growth_global1_x128: U256,
-    #[cfg(feature = "protocol-fee")]
     #[serde(default, deserialize_with = "deserialize_option_u128_lossless")]
     protocol_fee_amount: Option<u128>,
 }
@@ -183,7 +181,6 @@ where
     deserializer.deserialize_any(U128Visitor)
 }
 
-#[cfg(feature = "protocol-fee")]
 fn deserialize_option_u128_lossless<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
 where
     D: Deserializer<'de>,
@@ -191,7 +188,6 @@ where
     Option::<LosslessU128>::deserialize(deserializer).map(|value| value.map(|value| value.0))
 }
 
-#[cfg(feature = "protocol-fee")]
 #[derive(Deserialize)]
 #[serde(transparent)]
 struct LosslessU128(#[serde(deserialize_with = "deserialize_u128_lossless")] u128);
@@ -322,30 +318,18 @@ fn run_fixture_file(name: &str, json: &str) {
 }
 
 fn run_fixture_value(name: &str, value: Value) {
-    #[cfg(not(feature = "protocol-fee"))]
-    if fixture_has_protocol_fee(&value) {
-        return;
-    }
+    let final_pool_has_protocol_fee = value
+        .get("final_pool")
+        .and_then(Value::as_object)
+        .is_some_and(|pool| pool.contains_key("protocol_fee"));
 
     let fixture: ForgeParityFixture = serde_json::from_value(value).unwrap_or_else(|error| {
         panic!("fixture {name} JSON must match forge parity schema: {error}")
     });
-    run_fixture(name, fixture);
+    run_fixture(name, fixture, final_pool_has_protocol_fee);
 }
 
-#[cfg(not(feature = "protocol-fee"))]
-fn fixture_has_protocol_fee(value: &Value) -> bool {
-    value
-        .get("operations")
-        .and_then(Value::as_array)
-        .is_some_and(|operations| {
-            operations
-                .iter()
-                .any(|operation| operation.get("protocol_fee").is_some())
-        })
-}
-
-fn run_fixture(name: &str, fixture: ForgeParityFixture) {
+fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_fee: bool) {
     fixture
         .initial_pool
         .validate()
@@ -424,7 +408,6 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 exact,
                 amount,
                 sqrt_price_limit_x96,
-                #[cfg(feature = "protocol-fee")]
                 protocol_fee,
                 expect,
             } => {
@@ -439,9 +422,24 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 if let Some(limit) = sqrt_price_limit_x96 {
                     params.sqrt_price_limit_x96 = sqrt_price(limit);
                 }
-                #[cfg(feature = "protocol-fee")]
                 {
-                    params.protocol_fee = protocol_fee;
+                    let protocol_fee = protocol_fee
+                        .map(|protocol_fee| {
+                            u16::try_from(protocol_fee).unwrap_or_else(|error| {
+                                panic!(
+                                    "fixture {name} operation {idx} protocol_fee must fit u16: {error}"
+                                )
+                            })
+                        })
+                        .unwrap_or(0);
+                    manager.pool().protocol_fee = if zero_for_one {
+                        ProtocolFee::new(protocol_fee, 0)
+                    } else {
+                        ProtocolFee::new(0, protocol_fee)
+                    }
+                    .unwrap_or_else(|| {
+                        panic!("fixture {name} operation {idx} protocol_fee must fit v4 maximum")
+                    });
                 }
 
                 let result = manager.pool().swap(params).unwrap_or_else(|error| {
@@ -477,7 +475,6 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         pool_state.fee_growth_global1_x128, expect.fee_growth_global1_x128,
                         "fixture {name} operation {idx} fee_growth_global1_x128"
                     );
-                    #[cfg(feature = "protocol-fee")]
                     if let Some(protocol_fee_amount) = expect.protocol_fee_amount {
                         assert_eq!(
                             result.amount_to_protocol,
@@ -537,13 +534,16 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
         }
     }
 
-    if let Some(expected_final_pool) = fixture.final_pool {
+    if let Some(mut expected_final_pool) = fixture.final_pool {
         expected_final_pool
             .validate()
             .unwrap_or_else(|error| panic!("fixture {name} final snapshot invalid: {error}"));
+        let actual_final_pool = manager.pool().snapshot();
+        if !final_pool_has_protocol_fee {
+            expected_final_pool.protocol_fee = actual_final_pool.protocol_fee;
+        }
         assert_eq!(
-            manager.pool().snapshot(),
-            expected_final_pool,
+            actual_final_pool, expected_final_pool,
             "fixture {name} final pool"
         );
     }

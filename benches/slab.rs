@@ -186,7 +186,8 @@ fn bench_tick_slab(c: &mut Criterion) {
             |mut slab| {
                 for &key in &SPARSE_KEYS {
                     let indexer = slab.indexer(tick(key));
-                    black_box(slab.remove(black_box(indexer)));
+                    slab.remove(black_box(indexer));
+                    black_box(());
                     black_box(
                         slab.insert(black_box(indexer), black_box(info(key)))
                             .unwrap(),
@@ -242,7 +243,7 @@ fn bench_btree_map(c: &mut Criterion) {
         b.iter(|| {
             let mut misses = 0usize;
             for &key in &dense_keys {
-                misses += dense_map.get(&black_box(key + 1)).is_none() as usize;
+                misses += (!dense_map.contains_key(&black_box(key + 1))) as usize;
             }
             black_box(misses)
         })

@@ -354,16 +354,16 @@ impl TickSlab {
         cache_index: u16,
         mut tick_slab: TickSlabValue,
     ) -> (u16, &mut TickSlabValue) {
-        if let Some(key) = self.cache.get(cache_index as usize).cloned() {
-            if key != INITIAL_CACHE_VALUE {
-                let slab = self
-                    .get_slab_mut(cache_index)
-                    .map(|(_, slab)| slab)
-                    .expect("slab should exist");
+        if let Some(key) = self.cache.get(cache_index as usize).cloned()
+            && key != INITIAL_CACHE_VALUE
+        {
+            let slab = self
+                .get_slab_mut(cache_index)
+                .map(|(_, slab)| slab)
+                .expect("slab should exist");
 
-                *slab = tick_slab;
-                return (key, slab);
-            }
+            *slab = tick_slab;
+            return (key, slab);
         }
 
         let prev_idx = self.bitmap.prev(cache_index);

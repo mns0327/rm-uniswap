@@ -79,8 +79,7 @@ impl TickAccess for &TickSlab {
         _: U256,
         _: U256,
     ) -> Result<i128, Error> {
-        (&**self)
-            .get(tick_indexer)
+        self.get(tick_indexer)
             .map(|tick_info| tick_info.liquidity_net)
             .ok_or(Error::InvalidTick)
     }

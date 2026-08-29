@@ -26,10 +26,6 @@ pub struct SwapParams {
     /// * `zero_for_one = true`  → must be in `(MIN_SQRT_PRICE, current_sqrt_price)`.
     /// * `zero_for_one = false` → must be in `(current_sqrt_price, MAX_SQRT_PRICE)`.
     pub sqrt_price_limit_x96: SqrtPriceX96,
-
-    /// Per-swap protocol fee in pips. Only meaningful with `feature = "protocol-fee"`.
-    #[cfg(feature = "protocol-fee")]
-    pub protocol_fee: Option<u32>,
 }
 
 impl SwapParams {
@@ -39,8 +35,6 @@ impl SwapParams {
             zero_for_one,
             amount,
             sqrt_price_limit_x96: SqrtPriceX96::extreme_price_limit(zero_for_one),
-            #[cfg(feature = "protocol-fee")]
-            protocol_fee: None,
         }
     }
 }
@@ -94,13 +88,18 @@ pub struct SwapResult {
 pub(crate) struct StepComputations {
     // the price at the beginning of the step
     pub sqrt_price_start_x96: SqrtPriceX96,
+
     // the next tick to swap to from the current tick in the swap direction
     pub next_tick_info: TickInfo,
+
     pub next_tick_indexer: TickSlabIndexer,
+
     // whether tickNext is initialized or not
     pub initialized: bool,
+
     // sqrt(price) for the next tick (1/0)
     pub sqrt_price_next_x96: SqrtPriceX96,
+
     // how much is being swapped in in this step
     pub amount_in: U256,
     pub amount_out: U256,
@@ -149,6 +148,5 @@ pub struct SwapSimulationResult {
     pub delta: BalanceDelta,
 
     /// Protocol fee collected in the input token, in raw token units.
-    #[cfg(feature = "protocol-fee")]
     pub protocol_fee_amount: u128,
 }

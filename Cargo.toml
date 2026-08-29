@@ -7,7 +7,7 @@ edition = "2024"
 positions = []
 protocol-fee = []
 v4-hooks = ["positions"]
-full-v4 = ["positions", "protocol-fee", "v4-hooks"]
+full-v4 = ["positions", "v4-hooks"]
 
 [dependencies]
 alloy = "2.1.0"

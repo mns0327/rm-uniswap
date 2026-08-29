@@ -22,7 +22,7 @@ fn tick_spacing_60() -> TickSpacing {
 }
 
 fn empty_pool() -> Pool {
-    Pool::new(
+    Pool::try_new(
         sqrt_price_1_1(),
         tick(0),
         Liquidity::ZERO,
@@ -30,6 +30,7 @@ fn empty_pool() -> Pool {
         tick_spacing_60(),
         PoolTicks::new(tick_spacing_60()).unwrap(),
     )
+    .unwrap()
 }
 
 #[test]
