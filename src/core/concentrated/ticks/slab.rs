@@ -76,18 +76,18 @@ impl TickSlab {
     ///
     /// A zero spacing cannot represent a valid pool configuration, so callers get
     /// `None` instead of storage with invalid indexing semantics.
-    pub fn new(tick_spacing: TickSpacing) -> Option<Self> {
+    pub fn new(tick_spacing: TickSpacing) -> Self {
         let cache_cap = calculate_cache_cap(tick_spacing);
 
         let max_liquidity_per_tick = tick_spacing.max_liquidity_per_tick();
 
-        Some(Self {
+        Self {
             bitmap: HierBitmap::new(cache_cap),
             cache: vec![INITIAL_CACHE_VALUE; cache_cap as usize],
             values: Slab::new(),
             tick_spacing,
             max_liquidity_per_tick,
-        })
+        }
     }
 
     /// Returns the pool tick spacing this slab was indexed against.
@@ -499,7 +499,7 @@ impl TickSlab {
     where
         I: Into<TickInfoSnapshot>,
     {
-        let mut slab = Self::new(tick_spacing).expect("valid TickSpacing must build a TickSlab");
+        let mut slab = Self::new(tick_spacing);
 
         for (tick_idx, info) in ticks {
             let info = info.into();
@@ -610,7 +610,7 @@ mod tests {
 
         for (raw_spacing, expected_capacity) in cases {
             let tick_spacing = TickSpacing::new(raw_spacing).unwrap();
-            let slab = TickSlab::new(tick_spacing).unwrap();
+            let slab = TickSlab::new(tick_spacing);
             assert_eq!(calculate_cache_cap(tick_spacing), expected_capacity);
             assert_eq!(slab.cache.len(), expected_capacity as usize);
 
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn empty_slab_reads_as_uninitialized_and_remove_is_noop() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(0));
 
         assert_eq!(slab.get(indexer), None);
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn is_empty_tracks_initialized_page_lifecycle() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let first = slab.indexer(tick(0));
         let second = slab.indexer(tick(1));
         assert_eq!(first.cache_index(), second.cache_index());
@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_roundtrips_protocol_boundary_ticks() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         let min = slab.indexer(TickIndex::MIN);
         let zero = slab.indexer(tick(0));
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn tick_spacing_compresses_ticks_into_pool_pages() {
-        let mut slab = TickSlab::new(TickSpacing::new(10).unwrap()).unwrap();
+        let mut slab = TickSlab::new(TickSpacing::new(10).unwrap());
         let compressed_tick = slab.indexer(tick(160));
         let neighboring_tick = slab.indexer(tick(150));
 
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn unaligned_ticks_follow_the_same_spacing_compression_as_indexer() {
-        let mut slab = TickSlab::new(TickSpacing::new(10).unwrap()).unwrap();
+        let mut slab = TickSlab::new(TickSpacing::new(10).unwrap());
         let aligned_tick = slab.indexer(tick(10));
         let unaligned_tick_in_same_bucket = slab.indexer(tick(19));
 
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn inserting_default_tick_info_still_marks_tick_as_present() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(0));
 
         slab.insert(indexer, TickInfo::DEFAULT).unwrap();
@@ -727,8 +727,8 @@ mod tests {
 
     #[test]
     fn insert_rejects_indexer_outside_slab_cache_range() {
-        let source = TickSlab::new(TICK_SPACING).unwrap();
-        let mut target = TickSlab::new(TickSpacing::MAX).unwrap();
+        let source = TickSlab::new(TICK_SPACING);
+        let mut target = TickSlab::new(TickSpacing::MAX);
         let foreign_indexer = source.indexer(TickIndex::MAX);
 
         assert_eq!(
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn replacing_existing_tick_updates_value_without_allocating_another_page() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(7));
 
         slab.insert(indexer, info(100)).unwrap();
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn update_initialized_tick_mutates_existing_tick() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(7));
 
         slab.insert(indexer, info(100)).unwrap();
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn update_initialized_tick_returns_error_for_absent_tick() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(7));
         let mut called = false;
 
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn update_initialized_tick_returns_error_for_missing_slot_inside_existing_page() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let initialized = slab.indexer(tick(0));
         let missing = slab.indexer(tick(1));
         let mut called = false;
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn removing_one_tick_keeps_other_ticks_in_the_same_page() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let first = slab.indexer(tick(0));
         let second = slab.indexer(tick(1));
         assert_eq!(first.cache_index(), second.cache_index());
@@ -843,7 +843,7 @@ mod tests {
 
     #[test]
     fn removing_missing_slot_inside_existing_page_is_noop() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let initialized = slab.indexer(tick(0));
         let missing = slab.indexer(tick(1));
         assert_eq!(initialized.cache_index(), missing.cache_index());
@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn removing_last_tick_frees_page_from_cache_bitmap_and_storage() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(16));
         let cache_index = indexer.cache_index();
 
@@ -880,7 +880,7 @@ mod tests {
 
     #[test]
     fn page_can_be_reinserted_after_being_freed() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let indexer = slab.indexer(tick(16));
         let cache_index = indexer.cache_index();
 
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn pages_are_linked_in_cache_order_regardless_of_insert_order() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         for cache_index in [32_771, 32_767, 32_769] {
             let indexer = slab.indexer(cache_tick(cache_index));
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn removing_middle_page_rewires_neighbor_pages() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         for cache_index in [32_767, 32_769, 32_771] {
             let indexer = slab.indexer(cache_tick(cache_index));
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn removing_head_and_tail_pages_preserves_remaining_chain() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         for cache_index in [32_767, 32_769, 32_771] {
             let indexer = slab.indexer(cache_tick(cache_index));
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn next_and_prev_find_neighbors_inside_the_same_page() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         let slot_0 = slab.indexer(tick(0));
         let slot_1 = slab.indexer(tick(1));
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn next_and_prev_cross_page_links() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         let page_0_last = slab.indexer(tick(-16));
         let page_1_first = slab.indexer(tick(16));
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn next_initialized_tick_returns_protocol_order_boundary_for_swap_direction() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         let page_0_last = slab.indexer(tick(-16));
         let page_1_first = slab.indexer(tick(16));
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn next_and_prev_skip_from_absent_pages() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
 
         let page_1_first = slab.indexer(tick(16));
         let absent_page_2_first = slab.indexer(tick(32));
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn sparse_page_storage_matches_reference_model_for_mixed_operations() {
-        let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+        let mut slab = TickSlab::new(TICK_SPACING);
         let mut model = BTreeMap::new();
 
         let operations = [
@@ -1086,7 +1086,7 @@ mod tests {
     #[test]
     fn snapshot_decodes_negative_and_positive_ticks_for_tick_spacing() {
         let tick_spacing = TickSpacing::new(10).unwrap();
-        let mut slab = TickSlab::new(tick_spacing).unwrap();
+        let mut slab = TickSlab::new(tick_spacing);
         let ticks = BTreeMap::from([
             (tick(-40), snapshot_info(400)),
             (tick(-10), snapshot_info(100)),
@@ -1105,7 +1105,7 @@ mod tests {
     #[test]
     fn owned_snapshot_returns_independent_tick_map() {
         let tick_spacing = TickSpacing::new(10).unwrap();
-        let mut slab = TickSlab::new(tick_spacing).unwrap();
+        let mut slab = TickSlab::new(tick_spacing);
         let lower = tick(-20);
         let upper = tick(30);
 
@@ -1205,7 +1205,7 @@ mod tests {
     #[test]
     fn serde_roundtrips_through_pool_ticks_snapshot() {
         let tick_spacing = TickSpacing::new(10).unwrap();
-        let mut slab = TickSlab::new(tick_spacing).unwrap();
+        let mut slab = TickSlab::new(tick_spacing);
         let ticks = BTreeMap::from([
             (tick(-20), snapshot_info(200)),
             (tick(30), snapshot_info(300)),

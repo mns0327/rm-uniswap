@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub mod protocol_fee;
+pub mod swap_fee;
+
 /// Maximum swap fee accepted by Uniswap swap math.
 ///
 /// Fees are expressed in pips, also called hundredths of a bip:

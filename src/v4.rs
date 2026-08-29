@@ -15,13 +15,14 @@ pub use crate::core::math::{
 };
 pub use crate::core::types::delta::BalanceDelta;
 pub use crate::core::types::fee::Fee;
+pub use crate::core::types::fee::protocol_fee::ProtocolFee;
+pub use crate::core::types::fee::swap_fee::SwapFee;
 pub use crate::core::types::liquidity::Liquidity;
 pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::params::{
     ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapResult, SwapSimulationResult,
 };
 pub use crate::core::types::pool_state::PoolState;
-pub use crate::core::types::protocol_fee::ProtocolFee;
 pub use crate::core::types::sqrt_price::SqrtPriceX96;
 pub use crate::core::types::tick::TickIndex;
 pub use crate::core::types::tick_spacing::TickSpacing;

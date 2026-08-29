@@ -24,13 +24,14 @@ use crate::Error as SwapSimError;
 use crate::core::concentrated::ticks::TickAccess;
 use crate::core::concentrated::ticks::slab::TickSlab;
 use crate::core::types::fee::Fee;
+use crate::core::types::fee::protocol_fee::{PIPS_DENOMINATOR, ProtocolFee};
+use crate::core::types::fee::swap_fee::SwapFee;
 use crate::core::types::liquidity::Liquidity;
 use crate::core::types::nonzero::NonZeroLiquidity;
 use crate::core::types::params::{
     ModifyLiquidityParams, ModifyLiquidityResult, StepComputations, SwapParams, SwapResult,
 };
 use crate::core::types::pool_state::{PoolState, StateAccess};
-use crate::core::types::protocol_fee::{PIPS_DENOMINATOR, ProtocolFee};
 use crate::core::types::sqrt_price::SqrtPriceX96;
 use crate::core::types::tick::TickIndex;
 use crate::core::types::tick_spacing::TickSpacing;
@@ -54,11 +55,7 @@ use crate::v4::swap_math::compute_swap_step;
 pub struct Pool {
     pub state: Arc<RwLock<PoolState>>,
 
-    /// Fee tier in pips (e.g. `3_000` = 0.30 %). Must be `<= 1_000_000`.
-    pub fee: Fee,
-
-    /// Directional protocol fee configuration applied on top of the LP fee.
-    pub protocol_fee: ProtocolFee,
+    pub swap_fee: SwapFee,
 
     /// Tick spacing from `PoolKey.tickSpacing`.
     pub tick_spacing: TickSpacing,
@@ -156,12 +153,11 @@ impl TryFrom<PoolSnapshot> for Pool {
         snapshot.validate()?;
 
         let ticks = TickSlab::from_snapshot(snapshot.ticks.tick_spacing, snapshot.ticks.inner)?;
-        let fee = snapshot.fee;
+        let swap_fee = SwapFee::new(snapshot.fee, snapshot.protocol_fee)?;
 
         Ok(Self {
             state: Arc::new(RwLock::new(snapshot.state)),
-            fee,
-            protocol_fee: snapshot.protocol_fee,
+            swap_fee,
             tick_spacing: snapshot.tick_spacing,
             ticks,
         })
@@ -182,7 +178,7 @@ impl Pool {
     ///
     /// Use this for external or dynamically assembled state. The legacy
     /// [`Pool::new`] constructor remains available for trusted, already
-    /// validated state.
+    /// validated state with empty tick storage.
     pub fn try_new(
         sqrt_price_x96: SqrtPriceX96,
         tick: TickIndex,
@@ -214,10 +210,8 @@ impl Pool {
         sqrt_price_x96: SqrtPriceX96,
         tick: TickIndex,
         liquidity: Liquidity,
-        fee: Fee,
-        protocol_fee: ProtocolFee,
+        swap_fee: SwapFee,
         tick_spacing: TickSpacing,
-        ticks: TickSlab,
     ) -> Self {
         Pool {
             state: Arc::new(RwLock::new(PoolState {
@@ -227,11 +221,15 @@ impl Pool {
                 fee_growth_global0_x128: U256::ZERO,
                 fee_growth_global1_x128: U256::ZERO,
             })),
-            fee,
-            protocol_fee,
+            swap_fee,
             tick_spacing,
-            ticks,
+            ticks: TickSlab::new(tick_spacing),
         }
+    }
+
+    #[inline(always)]
+    pub fn set_protocol_fee(&mut self, protocol_fee: ProtocolFee) -> Result<(), crate::Error> {
+        self.swap_fee.set_protocol_fee(protocol_fee)
     }
 
     /// Capture an owned, internally consistent snapshot.
@@ -242,8 +240,8 @@ impl Pool {
 
         PoolSnapshot {
             state,
-            fee: self.fee,
-            protocol_fee: self.protocol_fee,
+            fee: *self.swap_fee.lp_fee(),
+            protocol_fee: *self.swap_fee.protocol_fee(),
             tick_spacing: self.tick_spacing,
             ticks: PoolTicksSnapshot {
                 tick_spacing: self.ticks.tick_spacing(),
@@ -452,13 +450,7 @@ impl Pool {
     pub fn swap(&mut self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
         let result = {
             let mut state = self.state.write();
-            swap_inner(
-                &mut *state,
-                &mut self.ticks,
-                &self.fee,
-                &self.protocol_fee,
-                &params,
-            )?
+            swap_inner(&mut *state, &mut self.ticks, &self.swap_fee, &params)?
         };
 
         Ok(result)
@@ -467,7 +459,7 @@ impl Pool {
     pub fn quote_swap(&self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
         let state = self.state.read();
 
-        swap_inner(&*state, &self.ticks, &self.fee, &self.protocol_fee, &params)
+        swap_inner(&*state, &self.ticks, &self.swap_fee, &params)
     }
 }
 
@@ -479,17 +471,10 @@ impl Pool {
 fn swap_inner<T: TickAccess, S: StateAccess>(
     mut state: S,
     mut ticks: T,
-    fee: &Fee,
-    protocol_fee: &ProtocolFee,
+    swap_fee: &SwapFee,
     params: &SwapParams,
 ) -> Result<SwapResult, SwapSimError> {
     let exact_in = params.amount.is_negative();
-
-    let swap_fee = protocol_fee.calculate_swap_fee(params.zero_for_one, fee)?;
-
-    if swap_fee.is_max() && !exact_in {
-        return Err(SwapSimError::FeeTooLarge);
-    }
 
     let zero_for_one = params.zero_for_one;
 
@@ -498,7 +483,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
     let mut result = SwapResult {
         swap_delta: BalanceDelta::DEFAULT,
         amount_to_protocol: U256::ZERO,
-        swap_fee,
+        swap_fee: *swap_fee.swap_fee(zero_for_one),
         sqrt_price_x96: pool_state.sqrt_price_x96,
         tick: pool_state.tick,
         liquidity: pool_state.liquidity,
@@ -567,7 +552,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
             step.sqrt_price_next_x96,
             unsafe { NonZeroLiquidity::new_unchecked(result.liquidity) },
             amount_specified_remaining,
-            swap_fee,
+            result.swap_fee,
         )?;
 
         result.sqrt_price_x96 = swap_step.sqrt_ratio_next_x96;
@@ -613,10 +598,10 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
                 .ok_or(SwapSimError::AmountOverflow)?;
         }
 
-        let protocol_fee_pips = protocol_fee.pips(zero_for_one) as u32;
+        let protocol_fee_pips = swap_fee.protocol_fee().pips(zero_for_one) as u32;
 
         if protocol_fee_pips != 0 {
-            let protocol_delta = if swap_fee.pips() == protocol_fee_pips {
+            let protocol_delta = if result.swap_fee.pips() == protocol_fee_pips {
                 step.fee_amount
             } else {
                 step.amount_in
@@ -860,20 +845,27 @@ mod tests {
         tick_spacing: TickSpacing,
         ticks: impl IntoIterator<Item = (TickIndex, TickInfo)>,
     ) -> Pool {
+        let tick = TickIndex::new(tick).unwrap();
+        let liquidity = Liquidity::new(liquidity);
         let fee = Fee::new(fee).expect("fee out of range");
         let tick_map =
             TickSlab::from_snapshot(tick_spacing, ticks.into_iter().collect::<BTreeMap<_, _>>())
                 .expect("valid ticks");
 
-        Pool::new(
-            sqrt_price_x96,
-            self::tick(tick),
-            Liquidity::new(liquidity),
-            fee,
-            protocol_fee,
+        let swap_fee = SwapFee::new(fee, protocol_fee).expect("swap fee out of range");
+
+        Pool {
+            state: Arc::new(RwLock::new(PoolState {
+                sqrt_price_x96,
+                tick,
+                liquidity,
+                fee_growth_global0_x128: U256::ZERO,
+                fee_growth_global1_x128: U256::ZERO,
+            })),
+            swap_fee,
             tick_spacing,
-            tick_map,
-        )
+            ticks: tick_map,
+        }
     }
 
     fn read_pool_state(pool: &Pool) -> PoolState {
@@ -1373,7 +1365,7 @@ mod tests {
     fn exact_input_allows_100_percent_fee() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        pool.fee = Fee::new(1_000_000).unwrap();
+        pool.swap_fee = SwapFee::new(Fee::new(1_000_000).unwrap(), ProtocolFee::ZERO).unwrap();
 
         let result = pool
             .swap(make_params(true, exact_in(ether(1)), sqrt_at(-60)))
@@ -1391,7 +1383,7 @@ mod tests {
     fn exact_output_rejects_100_percent_fee() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        pool.fee = Fee::new(1_000_000).unwrap();
+        pool.swap_fee = SwapFee::new(Fee::new(1_000_000).unwrap(), ProtocolFee::ZERO).unwrap();
 
         assert_eq!(
             pool.swap(make_params(
@@ -1400,7 +1392,7 @@ mod tests {
                 sqrt_at(-60),
             ))
             .unwrap_err(),
-            SwapSimError::FeeTooLarge
+            SwapSimError::MaxFeeExactOut
         );
     }
 
@@ -1425,7 +1417,7 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(result.swap_fee.pips() > pool.fee.pips());
+        assert!(result.swap_fee.pips() > pool.swap_fee.lp_fee().pips());
         assert!(result.amount_to_protocol > U256::ZERO);
     }
 

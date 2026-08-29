@@ -140,14 +140,15 @@ fn quote_swap_matches_committed_swap_without_mutating_source_pool() {
 #[test]
 fn snapshot_and_fork_preserve_protocol_fee() {
     let mut pool = valid_pool();
-    pool.protocol_fee = ProtocolFee::new(123, 456).unwrap();
+    let protocol_fee = ProtocolFee::new(123, 456).unwrap();
+    pool.set_protocol_fee(protocol_fee).unwrap();
     let params = SwapParams::new(false, exact_input(1_000_000));
 
     let snapshot = pool.snapshot();
-    assert_eq!(snapshot.protocol_fee, pool.protocol_fee);
+    assert_eq!(snapshot.protocol_fee, protocol_fee);
 
     let fork = pool.try_fork().unwrap();
-    assert_eq!(fork.protocol_fee, pool.protocol_fee);
+    assert_eq!(*fork.swap_fee.protocol_fee(), protocol_fee);
     assert_eq!(
         fork.quote_swap(params).unwrap(),
         pool.quote_swap(params).unwrap()
@@ -181,7 +182,8 @@ fn quote_swap_uses_protocol_fee_in_effective_swap_fee() {
 
     let without_protocol_fee = pool.quote_swap(params).unwrap();
 
-    pool.protocol_fee = ProtocolFee::new(0, 500).unwrap();
+    pool.set_protocol_fee(ProtocolFee::new(0, 500).unwrap())
+        .unwrap();
     let with_protocol_fee = pool.quote_swap(params).unwrap();
 
     let effective_fee = 500 + FEE.pips() - (500 * FEE.pips() / 1_000_000);
@@ -234,7 +236,7 @@ fn sample_pool_snapshot_is_still_accepted() {
 
     let derived_tick = tick_math::get_tick_at_sqrt_price(&pool.state.read().sqrt_price_x96);
     assert_eq!(derived_tick, pool.state.read().tick);
-    assert_eq!(pool.protocol_fee, ProtocolFee::ZERO);
+    assert_eq!(*pool.swap_fee.protocol_fee(), ProtocolFee::ZERO);
 }
 
 #[test]

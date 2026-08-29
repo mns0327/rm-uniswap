@@ -58,7 +58,7 @@ fn build_dense_keys() -> Vec<i32> {
 }
 
 fn build_sparse_slab() -> TickSlab {
-    let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+    let mut slab = TickSlab::new(TICK_SPACING);
     for key in SPARSE_KEYS {
         slab.insert(slab.indexer(tick(key)), info(key)).unwrap();
     }
@@ -74,7 +74,7 @@ fn build_sparse_btree_map() -> BTreeMap<i32, TickInfo> {
 
 fn build_dense_slab() -> (TickSlab, Vec<i32>) {
     let keys = build_dense_keys();
-    let mut slab = TickSlab::new(TICK_SPACING).unwrap();
+    let mut slab = TickSlab::new(TICK_SPACING);
     for &key in &keys {
         slab.insert(slab.indexer(tick(key)), info(key)).unwrap();
     }
@@ -101,13 +101,13 @@ fn bench_tick_slab(c: &mut Criterion) {
     let mut group = c.benchmark_group("tick_slab");
 
     group.bench_function("new_tick_spacing_1", |b| {
-        b.iter(|| black_box(TickSlab::new(black_box(TICK_SPACING)).unwrap()))
+        b.iter(|| black_box(TickSlab::new(black_box(TICK_SPACING))))
     });
 
     let dense_keys = build_dense_keys();
     group.bench_function("insert_dense_keys", |b| {
         b.iter_batched(
-            || TickSlab::new(TICK_SPACING).unwrap(),
+            || TickSlab::new(TICK_SPACING),
             |mut slab| {
                 for &key in &dense_keys {
                     black_box(

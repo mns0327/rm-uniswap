@@ -432,7 +432,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                             })
                         })
                         .unwrap_or(0);
-                    manager.pool().protocol_fee = if zero_for_one {
+                    let protocol_fee = if zero_for_one {
                         ProtocolFee::new(protocol_fee, 0)
                     } else {
                         ProtocolFee::new(0, protocol_fee)
@@ -440,6 +440,8 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                     .unwrap_or_else(|| {
                         panic!("fixture {name} operation {idx} protocol_fee must fit v4 maximum")
                     });
+
+                    manager.pool().set_protocol_fee(protocol_fee).unwrap();
                 }
 
                 let result = manager.pool().swap(params).unwrap_or_else(|error| {

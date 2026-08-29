@@ -28,7 +28,7 @@ fn empty_pool() -> Pool {
         Liquidity::ZERO,
         Fee::new(3_000).unwrap(),
         tick_spacing_60(),
-        PoolTicks::new(tick_spacing_60()).unwrap(),
+        PoolTicks::new(tick_spacing_60()),
     )
     .unwrap()
 }
