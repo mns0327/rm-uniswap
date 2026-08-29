@@ -10,63 +10,37 @@
 //! - Exact-input partial-fill accounting preserves V4-style semantics:
 //!   if target is not reached, amount_in is the full fee-adjusted input.
 
+use alloy::primitives::I256;
 use ruint::aliases::U256;
 
-use crate::core::types::signed::I256 as SignedAmount;
+use crate::core::types::fee::{Fee, MAX_FEE};
+use crate::core::types::nonzero::NonZeroLiquidity;
+use crate::core::types::sqrt_price::SqrtPriceX96;
 
 use super::full::MathError;
 use super::small_ratio::{mul_div_u32_ceil, mul_div_u32_floor};
 use super::sqrt_price::{
-    get_amount0_delta, get_amount1_delta, get_next_sqrt_price_from_input,
+    get_amount0_delta, get_amount0_delta_with_liquidity_delta, get_amount1_delta,
+    get_amount1_delta_with_liquidity_delta, get_next_sqrt_price_from_input,
     get_next_sqrt_price_from_output,
 };
-
-/// Maximum swap fee: 100%, expressed in hundredths of a bip.
-pub const MAX_SWAP_FEE: u32 = 1_000_000;
 
 /// Backward-compatible name for the crate-wide compact error code.
 pub type SwapMathError = crate::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapStep {
-    pub sqrt_ratio_next_x96: U256,
+    pub sqrt_ratio_next_x96: SqrtPriceX96,
     pub amount_in: U256,
     pub amount_out: U256,
     pub fee_amount: U256,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FeeParams {
-    pips: u32,
-    complement: u32,
-}
-
-impl FeeParams {
-    #[inline(always)]
-    fn new(fee_pips: u32) -> Result<Self, SwapMathError> {
-        if fee_pips > MAX_SWAP_FEE {
-            return Err(SwapMathError::FeeTooLarge);
-        }
-
-        Ok(Self {
-            pips: fee_pips,
-            complement: MAX_SWAP_FEE - fee_pips,
-        })
-    }
-
-    #[inline(always)]
-    fn is_zero(self) -> bool {
-        self.pips == 0
-    }
-
-    #[inline(always)]
-    fn is_max(self) -> bool {
-        self.pips == MAX_SWAP_FEE
-    }
-}
-
 #[inline(always)]
-fn amount_less_fee_exact_in(amount_remaining: U256, fee: FeeParams) -> Result<U256, MathError> {
+pub(crate) fn amount_less_fee_exact_in(
+    amount_remaining: U256,
+    fee: Fee,
+) -> Result<U256, MathError> {
     if fee.is_zero() {
         return Ok(amount_remaining);
     }
@@ -75,11 +49,11 @@ fn amount_less_fee_exact_in(amount_remaining: U256, fee: FeeParams) -> Result<U2
         return Ok(U256::ZERO);
     }
 
-    mul_div_u32_floor(amount_remaining, fee.complement, MAX_SWAP_FEE)
+    mul_div_u32_floor(amount_remaining, fee.complement(), MAX_FEE)
 }
 
 #[inline(always)]
-fn fee_on_exact_input(amount_in: U256, fee: FeeParams) -> Result<U256, MathError> {
+pub(crate) fn fee_on_exact_input(amount_in: U256, fee: Fee) -> Result<U256, MathError> {
     if amount_in.is_zero() || fee.is_zero() {
         return Ok(U256::ZERO);
     }
@@ -89,15 +63,15 @@ fn fee_on_exact_input(amount_in: U256, fee: FeeParams) -> Result<U256, MathError
     }
 
     // fee = ceil(amount_in * fee_pips / (MAX_SWAP_FEE - fee_pips))
-    mul_div_u32_ceil(amount_in, fee.pips, fee.complement)
+    mul_div_u32_ceil(amount_in, fee.pips(), fee.complement())
 }
 
 #[inline(always)]
 pub fn get_sqrt_price_target(
     zero_for_one: bool,
-    sqrt_price_next_x96: U256,
-    sqrt_price_limit_x96: U256,
-) -> U256 {
+    sqrt_price_next_x96: SqrtPriceX96,
+    sqrt_price_limit_x96: SqrtPriceX96,
+) -> SqrtPriceX96 {
     if zero_for_one {
         sqrt_price_next_x96.max(sqrt_price_limit_x96)
     } else {
@@ -108,14 +82,12 @@ pub fn get_sqrt_price_target(
 #[inline]
 #[must_use = "discarding a swap step result silently drops errors"]
 pub fn compute_swap_step(
-    sqrt_ratio_current_x96: U256,
-    sqrt_ratio_target_x96: U256,
-    liquidity: u128,
-    amount: SignedAmount,
-    fee_pips: u32,
+    sqrt_ratio_current_x96: SqrtPriceX96,
+    sqrt_ratio_target_x96: SqrtPriceX96,
+    liquidity: NonZeroLiquidity,
+    amount: I256,
+    fee: Fee,
 ) -> Result<SwapStep, SwapMathError> {
-    let fee = FeeParams::new(fee_pips)?;
-
     // Keep original behavior: fee is validated before zero-amount no-op.
     if amount.is_zero() {
         return Ok(SwapStep {
@@ -133,8 +105,7 @@ pub fn compute_swap_step(
     }
 
     let zero_for_one = sqrt_ratio_current_x96 >= sqrt_ratio_target_x96;
-    let liquidity = U256::from(liquidity);
-    let amount_remaining = amount.abs();
+    let amount_remaining = amount.unsigned_abs();
 
     if exact_in {
         compute_exact_in(
@@ -159,27 +130,27 @@ pub fn compute_swap_step(
 
 #[inline]
 fn compute_exact_in(
-    sqrt_ratio_current_x96: U256,
-    sqrt_ratio_target_x96: U256,
-    liquidity: U256,
+    sqrt_ratio_current_x96: SqrtPriceX96,
+    sqrt_ratio_target_x96: SqrtPriceX96,
+    liquidity: NonZeroLiquidity,
     amount_remaining: U256,
-    fee: FeeParams,
+    fee: Fee,
     zero_for_one: bool,
 ) -> Result<SwapStep, SwapMathError> {
     let amount_remaining_less_fee = amount_less_fee_exact_in(amount_remaining, fee)?;
 
-    let max_amount_in = if zero_for_one {
+    let (max_amount_in, liquidity_delta_sqrt) = if zero_for_one {
         get_amount0_delta(
             sqrt_ratio_target_x96,
             sqrt_ratio_current_x96,
-            liquidity,
+            liquidity.unwrap(),
             true,
         )?
     } else {
         get_amount1_delta(
             sqrt_ratio_current_x96,
             sqrt_ratio_target_x96,
-            liquidity,
+            liquidity.unwrap(),
             true,
         )?
     };
@@ -202,20 +173,32 @@ fn compute_exact_in(
         (next, amount_remaining_less_fee)
     };
 
-    let amount_out = if zero_for_one {
-        get_amount1_delta(
-            sqrt_ratio_next_x96,
+    let amount_out = match (zero_for_one, reached_target) {
+        (true, true) => get_amount1_delta_with_liquidity_delta(liquidity_delta_sqrt, false),
+        (true, false) => {
+            let (amount_out, _) = get_amount1_delta(
+                sqrt_ratio_next_x96,
+                sqrt_ratio_current_x96,
+                liquidity.unwrap(),
+                false,
+            )?;
+            amount_out
+        }
+        (false, true) => get_amount0_delta_with_liquidity_delta(
             sqrt_ratio_current_x96,
-            liquidity,
+            sqrt_ratio_target_x96,
+            liquidity_delta_sqrt,
             false,
-        )?
-    } else {
-        get_amount0_delta(
-            sqrt_ratio_current_x96,
-            sqrt_ratio_next_x96,
-            liquidity,
-            false,
-        )?
+        )?,
+        (false, false) => {
+            let (amount_out, _) = get_amount0_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_next_x96,
+                liquidity.unwrap(),
+                false,
+            )?;
+            amount_out
+        }
     };
 
     let fee_amount = if reached_target {
@@ -235,27 +218,27 @@ fn compute_exact_in(
 
 #[inline]
 fn compute_exact_out(
-    sqrt_ratio_current_x96: U256,
-    sqrt_ratio_target_x96: U256,
-    liquidity: U256,
+    sqrt_ratio_current_x96: SqrtPriceX96,
+    sqrt_ratio_target_x96: SqrtPriceX96,
+    liquidity: NonZeroLiquidity,
     amount_remaining: U256,
-    fee: FeeParams,
+    fee: Fee,
     zero_for_one: bool,
 ) -> Result<SwapStep, SwapMathError> {
     debug_assert!(!fee.is_max());
 
-    let max_amount_out = if zero_for_one {
+    let (max_amount_out, liquidity_delta_sqrt) = if zero_for_one {
         get_amount1_delta(
             sqrt_ratio_target_x96,
             sqrt_ratio_current_x96,
-            liquidity,
+            liquidity.unwrap(),
             false,
         )?
     } else {
         get_amount0_delta(
             sqrt_ratio_current_x96,
             sqrt_ratio_target_x96,
-            liquidity,
+            liquidity.unwrap(),
             false,
         )?
     };
@@ -273,10 +256,34 @@ fn compute_exact_out(
         (next, amount_remaining)
     };
 
-    let amount_in = if zero_for_one {
-        get_amount0_delta(sqrt_ratio_next_x96, sqrt_ratio_current_x96, liquidity, true)?
-    } else {
-        get_amount1_delta(sqrt_ratio_current_x96, sqrt_ratio_next_x96, liquidity, true)?
+    let reached_target = amount_remaining >= max_amount_out;
+
+    let amount_in = match (zero_for_one, reached_target) {
+        (true, true) => get_amount0_delta_with_liquidity_delta(
+            sqrt_ratio_target_x96,
+            sqrt_ratio_current_x96,
+            liquidity_delta_sqrt,
+            true,
+        )?,
+        (true, false) => {
+            let (amount_in, _) = get_amount0_delta(
+                sqrt_ratio_next_x96,
+                sqrt_ratio_current_x96,
+                liquidity.unwrap(),
+                true,
+            )?;
+            amount_in
+        }
+        (false, true) => get_amount1_delta_with_liquidity_delta(liquidity_delta_sqrt, true),
+        (false, false) => {
+            let (amount_in, _) = get_amount1_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_next_x96,
+                liquidity.unwrap(),
+                true,
+            )?;
+            amount_in
+        }
     };
 
     let fee_amount = fee_on_exact_input(amount_in, fee)?;
@@ -292,8 +299,9 @@ fn compute_exact_out(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::Sign;
     use proptest::prelude::*;
-    use ruint::aliases::U256;
+    use ruint::aliases::{U160, U256};
 
     fn u256(s: &str) -> U256 {
         U256::from_str_radix(s, 10).unwrap()
@@ -303,28 +311,48 @@ mod tests {
         U256::from(n) * U256::from(1_000_000_000_000_000_000u128)
     }
 
-    fn liq(n: u128) -> u128 {
-        n
+    fn sqrt_price_unchecked(value: U256) -> SqrtPriceX96 {
+        unsafe { SqrtPriceX96::new_unchecked(value.to::<U160>()) }
+    }
+
+    fn sqrt_price(s: &str) -> SqrtPriceX96 {
+        sqrt_price_unchecked(u256(s))
+    }
+
+    fn liq(n: u128) -> NonZeroLiquidity {
+        NonZeroLiquidity::new(n).unwrap()
+    }
+
+    fn fee(pips: u32) -> Fee {
+        Fee::new(pips).unwrap()
+    }
+
+    fn exact_in(amount: U256) -> I256 {
+        I256::checked_from_sign_and_abs(Sign::Negative, amount).unwrap()
+    }
+
+    fn exact_out(amount: U256) -> I256 {
+        I256::checked_from_sign_and_abs(Sign::Positive, amount).unwrap()
     }
 
     /// √(1/1) · 2^96
-    fn sqrt_price_1_1() -> U256 {
-        U256::ONE << 96
+    fn sqrt_price_1_1() -> SqrtPriceX96 {
+        sqrt_price_unchecked(U256::ONE << 96)
     }
 
     /// √(101/100) · 2^96
-    fn sqrt_price_101_100() -> U256 {
-        u256("79623317895830914510639640423")
+    fn sqrt_price_101_100() -> SqrtPriceX96 {
+        sqrt_price("79623317895830914510639640423")
     }
 
     /// √(1000/100) · 2^96 — well above sqrt_price_1_1; used as upper target
-    fn sqrt_price_1000_100() -> U256 {
-        u256("250541448375047925191586663628")
+    fn sqrt_price_1000_100() -> SqrtPriceX96 {
+        sqrt_price("250541448375047925191586663628")
     }
 
     /// √(10000/100) · 2^96 — far above sqrt_price_1_1; used as upper target
-    fn sqrt_price_10000_100() -> U256 {
-        u256("792281625142643375935439503360")
+    fn sqrt_price_10000_100() -> SqrtPriceX96 {
+        sqrt_price("792281625142643375935439503360")
     }
 
     /// √(1/4) · 2^96
@@ -333,17 +361,23 @@ mod tests {
     }
 
     /// Non-zero U160 — valid range for Uniswap V4 sqrt prices.
-    fn arb_sqrt_price() -> impl Strategy<Value = U256> {
+    fn arb_sqrt_price() -> impl Strategy<Value = SqrtPriceX96> {
         any::<[u64; 3]>()
             .prop_map(|limbs| {
                 let top = limbs[2] & 0xFFFF_FFFF;
                 U256::from_limbs([limbs[0], limbs[1], top, 0])
             })
-            .prop_filter("price must be > 0", |v| !v.is_zero())
+            .prop_filter_map("price must be in protocol range", SqrtPriceX96::from_u256)
     }
 
     fn arb_u256() -> impl Strategy<Value = U256> {
         any::<[u64; 4]>().prop_map(U256::from_limbs)
+    }
+
+    fn arb_i256_magnitude() -> impl Strategy<Value = U256> {
+        arb_u256().prop_filter("amount must fit int256", |amount| {
+            I256::checked_from_sign_and_abs(Sign::Positive, *amount).is_some()
+        })
     }
 
     proptest! {
@@ -360,15 +394,8 @@ mod tests {
     }
 
     #[test]
-    fn fee_too_large_returns_error() {
-        let err = compute_swap_step(
-            sqrt_price_1_1(),
-            sqrt_price_101_100(),
-            liq(1_000_000),
-            SignedAmount::negative(ether(1)),
-            MAX_SWAP_FEE + 1,
-        );
-        assert_eq!(err, Err(SwapMathError::FeeTooLarge));
+    fn fee_too_large_is_rejected_by_fee_type() {
+        assert_eq!(Fee::new(MAX_FEE + 1), None);
     }
 
     #[test]
@@ -377,8 +404,8 @@ mod tests {
             sqrt_price_1_1(),
             sqrt_price_101_100(),
             liq(1_000_000),
-            SignedAmount::positive(ether(1)),
-            MAX_SWAP_FEE,
+            exact_out(ether(1)),
+            fee(MAX_FEE),
         );
         assert_eq!(err, Err(SwapMathError::MaxFeeExactOut));
     }
@@ -389,8 +416,8 @@ mod tests {
             sqrt_price_1_1(),
             sqrt_price_101_100(),
             liq(1_000_000),
-            SignedAmount::negative(ether(1)),
-            MAX_SWAP_FEE,
+            exact_in(ether(1)),
+            fee(MAX_FEE),
         )
         .unwrap();
 
@@ -408,8 +435,8 @@ mod tests {
             sqrt_price_1_1(),
             sqrt_price_101_100(),
             liq(2_000_000_000_000_000_000),
-            SignedAmount::negative(ether(1)),
-            600,
+            exact_in(ether(1)),
+            fee(600),
         )
         .unwrap();
 
@@ -428,8 +455,8 @@ mod tests {
             sqrt_price_1_1(),
             sqrt_price_101_100(),
             liq(2_000_000_000_000_000_000),
-            SignedAmount::positive(ether(1)),
-            600,
+            exact_out(ether(1)),
+            fee(600),
         )
         .unwrap();
 
@@ -447,8 +474,8 @@ mod tests {
             sqrt_price_1_1(),
             sqrt_price_1000_100(),
             liq(2_000_000_000_000_000_000),
-            SignedAmount::negative(ether(1)),
-            600,
+            exact_in(ether(1)),
+            fee(600),
         )
         .unwrap();
 
@@ -467,8 +494,8 @@ mod tests {
             sqrt_price_1_1(),
             sqrt_price_10000_100(),
             liq(2_000_000_000_000_000_000),
-            SignedAmount::positive(ether(1)),
-            600,
+            exact_out(ether(1)),
+            fee(600),
         )
         .unwrap();
 
@@ -481,11 +508,11 @@ mod tests {
     #[test]
     fn amount_out_capped_at_desired() {
         let step = compute_swap_step(
-            u256("417332158212080721273783715441582"),
-            u256("1452870262520218020823638996"),
-            159344665391607089467575320103u128,
-            SignedAmount::positive(U256::ONE),
-            1,
+            sqrt_price("417332158212080721273783715441582"),
+            sqrt_price_unchecked(u256("1452870262520218020823638996")),
+            liq(159344665391607089467575320103u128),
+            exact_out(U256::ONE),
+            fee(1),
         )
         .unwrap();
 
@@ -493,7 +520,7 @@ mod tests {
         assert_eq!(step.fee_amount, U256::ONE);
         assert_eq!(step.amount_out, U256::ONE);
         assert_eq!(
-            step.sqrt_ratio_next_x96,
+            step.sqrt_ratio_next_x96.as_u256(),
             u256("417332158212080721273783715441581")
         );
     }
@@ -503,11 +530,11 @@ mod tests {
         // An extremely small target price of 1.
         let amount = u256("3915081100057732413702495386755767");
         let step = compute_swap_step(
-            U256::from(2u64),
-            U256::ONE,
+            sqrt_price_unchecked(U256::from(2u64)),
+            sqrt_price_unchecked(U256::ONE),
             liq(1),
-            SignedAmount::negative(amount),
-            1,
+            exact_in(amount),
+            fee(1),
         )
         .unwrap();
 
@@ -515,40 +542,42 @@ mod tests {
         assert_eq!(step.fee_amount, u256("39614120871253040049813"));
         assert!(step.amount_in + step.fee_amount <= amount);
         assert_eq!(step.amount_out, U256::ZERO);
-        assert_eq!(step.sqrt_ratio_next_x96, U256::ONE);
+        assert_eq!(step.sqrt_ratio_next_x96.as_u256(), U256::ONE);
     }
 
     #[test]
     fn not_entire_input_taken_as_fee() {
+        let current = sqrt_price_1_1();
         let step = compute_swap_step(
-            U256::from(2413u64),
-            u256("79887613182836312"),
-            1985041575832132834610021537970u128,
-            SignedAmount::negative(U256::from(10u64)),
-            1872,
+            current,
+            sqrt_price_101_100(),
+            liq(1985041575832132834610021537970u128),
+            exact_in(U256::from(10u64)),
+            fee(1872),
         )
         .unwrap();
 
         assert_eq!(step.amount_in, U256::from(9u64));
         assert_eq!(step.fee_amount, U256::ONE);
         assert_eq!(step.amount_out, U256::ZERO);
-        assert_eq!(step.sqrt_ratio_next_x96, U256::from(2413u64));
+        assert_eq!(step.sqrt_ratio_next_x96, current);
     }
 
     #[test]
     fn zero_for_one_insufficient_liquidity_exact_out() {
         // zero_for_one: current > target  →  price moves DOWN.
-        let sqrt_p = u256("20282409603651670423947251286016");
+        let sqrt_p_raw = u256("20282409603651670423947251286016");
+        let sqrt_p = sqrt_price_unchecked(sqrt_p_raw);
         // Target is 10 % below current; liq=1024 can only deliver ≈ 26,214 token1
         // across this range, so requesting 100_000 triggers the "step hits target" path.
-        let sqrt_p_target = sqrt_p * U256::from(9u64) / U256::from(10u64);
+        let sqrt_p_target = sqrt_price_unchecked(sqrt_p_raw * U256::from(9u64) / U256::from(10u64));
 
         let step = compute_swap_step(
             sqrt_p,
             sqrt_p_target,
             liq(1024),
-            SignedAmount::positive(U256::from(100_000u64)), // > max_available ≈ 26,214
-            3000,
+            exact_out(U256::from(100_000u64)), // > max_available ≈ 26,214
+            fee(3000),
         )
         .unwrap();
 
@@ -561,16 +590,18 @@ mod tests {
     #[test]
     fn one_for_zero_insufficient_liquidity_exact_out() {
         // one_for_zero: current < target (price moves UP).
-        let sqrt_p = u256("20282409603651670423947251286016");
+        let sqrt_p_raw = u256("20282409603651670423947251286016");
+        let sqrt_p = sqrt_price_unchecked(sqrt_p_raw);
         // The target is above the current price for one_for_zero.
-        let sqrt_p_target = sqrt_p * U256::from(11u64) / U256::from(10u64);
+        let sqrt_p_target =
+            sqrt_price_unchecked(sqrt_p_raw * U256::from(11u64) / U256::from(10u64));
 
         let step = compute_swap_step(
             sqrt_p,
             sqrt_p_target,
             liq(1024),
-            SignedAmount::positive(U256::from(263000u64)),
-            3000,
+            exact_out(U256::from(263000u64)),
+            fee(3000),
         )
         .unwrap();
 
@@ -591,15 +622,15 @@ mod tests {
             sqrt_price        in arb_sqrt_price(),
             sqrt_price_target in arb_sqrt_price(),
             liquidity         in 1u128..=u128::MAX,
-            amount_remaining  in arb_u256(),
-            fee_pips          in 0u32..=MAX_SWAP_FEE,
+            amount_remaining  in arb_i256_magnitude(),
+            fee_pips          in 0u32..=MAX_FEE,
         ) {
             let result = compute_swap_step(
                 sqrt_price,
                 sqrt_price_target,
-                liquidity,
-                SignedAmount::negative(amount_remaining),
-                fee_pips,
+                NonZeroLiquidity::new(liquidity).unwrap(),
+                exact_in(amount_remaining),
+                fee(fee_pips),
             );
 
             // Skip arithmetic errors (tested separately).
@@ -657,15 +688,15 @@ mod tests {
             sqrt_price        in arb_sqrt_price(),
             sqrt_price_target in arb_sqrt_price(),
             liquidity         in 1u128..=u128::MAX,
-            amount_remaining  in arb_u256(),
-            fee_pips          in 0u32..MAX_SWAP_FEE, // strict: MAX_SWAP_FEE excluded for exact-out
+            amount_remaining  in arb_i256_magnitude(),
+            fee_pips          in 0u32..MAX_FEE, // strict: MAX_SWAP_FEE excluded for exact-out
         ) {
             let result = compute_swap_step(
                 sqrt_price,
                 sqrt_price_target,
-                liquidity,
-                SignedAmount::positive(amount_remaining),
-                fee_pips,
+                NonZeroLiquidity::new(liquidity).unwrap(),
+                exact_out(amount_remaining),
+                fee(fee_pips),
             );
 
             let step = match result {

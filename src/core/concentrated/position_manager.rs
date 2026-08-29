@@ -11,12 +11,12 @@ use std::{
 use crate::{
     Error,
     core::{
-        concentrated::pool::{ModifyLiquidityParams, Pool as ConcentratedPool},
-        types::delta::BalanceDelta,
+        concentrated::pool::Pool as ConcentratedPool,
+        types::{delta::BalanceDelta, params::ModifyLiquidityParams, tick::TickIndex},
     },
 };
 use alloy::primitives::{Address, B256};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use ruint::aliases::U256;
 
 pub use super::position::PositionState;
@@ -26,8 +26,8 @@ const I128_POSITIVE_MASK: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PositionInfo {
     pub owner: Address,
-    pub tick_lower: i32,
-    pub tick_upper: i32,
+    pub tick_lower: TickIndex,
+    pub tick_upper: TickIndex,
     pub salt: B256,
     pub state: PositionState,
 }
@@ -80,7 +80,7 @@ pub trait LiquidityHook: Send + Sync {
         _request: &ModifyRequest,
         _result: &ModifyResult,
     ) -> Result<BalanceDelta, Error> {
-        Ok(BalanceDelta::default())
+        Ok(BalanceDelta::DEFAULT)
     }
 }
 
@@ -89,9 +89,8 @@ pub trait LiquidityHook: Send + Sync {
 /// Manager-owned mutations are serialized. User hooks run without the
 /// position-map lock, so read-only inspection remains available while a hook
 /// executes. Recursive position mutation from a hook is not supported.
-#[derive(Clone)]
 pub struct PositionManager {
-    pool: ConcentratedPool,
+    pool: Mutex<ConcentratedPool>,
     positions: Arc<RwLock<BTreeMap<u64, PositionInfo>>>,
     next_token_id: Arc<AtomicU64>,
     /// Serializes manager-owned mutations without holding the position map
@@ -104,7 +103,7 @@ pub struct PositionManager {
 impl PositionManager {
     pub fn new(pool: ConcentratedPool) -> Self {
         Self {
-            pool,
+            pool: Mutex::new(pool),
             positions: Arc::new(RwLock::new(BTreeMap::new())),
             next_token_id: Arc::new(AtomicU64::new(1)),
             mutation_lock: Arc::new(Mutex::new(())),
@@ -120,8 +119,8 @@ impl PositionManager {
         manager
     }
 
-    pub fn pool(&self) -> &ConcentratedPool {
-        &self.pool
+    pub fn pool(&self) -> MutexGuard<'_, ConcentratedPool> {
+        self.pool.lock()
     }
 
     pub fn position(&self, token_id: u64) -> Option<PositionInfo> {
@@ -131,8 +130,8 @@ impl PositionManager {
     pub fn mint(
         &self,
         owner: Address,
-        tick_lower: i32,
-        tick_upper: i32,
+        tick_lower: TickIndex,
+        tick_upper: TickIndex,
         liquidity: u128,
         amount0_max: u128,
         amount1_max: u128,
@@ -259,8 +258,8 @@ impl PositionManager {
         let request = ModifyRequest {
             token_id,
             owner: snapshot.owner,
-            tick_lower: snapshot.tick_lower,
-            tick_upper: snapshot.tick_upper,
+            tick_lower: snapshot.tick_lower.value(),
+            tick_upper: snapshot.tick_upper.value(),
             liquidity_delta,
         };
         #[cfg(feature = "v4-hooks")]
@@ -268,13 +267,24 @@ impl PositionManager {
             hook.before_modify_liquidity(&request)?;
         }
 
-        let quoted = self
-            .pool
-            .quote_modify_liquidity(ModifyLiquidityParams::new(
-                snapshot.tick_lower,
-                snapshot.tick_upper,
-                liquidity_delta,
-            ))?;
+        let params = ModifyLiquidityParams {
+            tick_lower: snapshot.tick_lower,
+            tick_upper: snapshot.tick_upper,
+            liquidity_delta,
+        };
+        let (quoted, growth0, growth1) = {
+            let pool = self.pool();
+            let quoted = pool.quote_modify_liquidity(params)?;
+            let growth = if liquidity_delta > 0 {
+                let mut fork = pool.try_fork()?;
+                fork.modify_liquidity(params)?;
+                fork.fee_growth_inside(snapshot.tick_lower, snapshot.tick_upper)?
+            } else {
+                pool.fee_growth_inside(snapshot.tick_lower, snapshot.tick_upper)?
+            };
+
+            (quoted, growth.0, growth.1)
+        };
         validate_slippage(
             quoted,
             liquidity_delta,
@@ -284,9 +294,6 @@ impl PositionManager {
             amount1_min,
         )?;
 
-        let (growth0, growth1) = self
-            .pool
-            .fee_growth_inside(snapshot.tick_lower, snapshot.tick_upper)?;
         let mut predicted_state = snapshot.state;
         let (predicted_fees0, predicted_fees1) =
             predicted_state.update(liquidity_delta, growth0, growth1)?;
@@ -306,7 +313,7 @@ impl PositionManager {
             let hook_delta = if let Some(hook) = &self.hook {
                 hook.after_modify_liquidity(&request, &predicted)?
             } else {
-                BalanceDelta::default()
+                BalanceDelta::DEFAULT
             };
 
             apply_hook_delta(predicted, hook_delta)?
@@ -321,11 +328,7 @@ impl PositionManager {
             liquidity: predicted_state.liquidity,
         };
 
-        let pool_result = self.pool.modify_liquidity(ModifyLiquidityParams::new(
-            snapshot.tick_lower,
-            snapshot.tick_upper,
-            liquidity_delta,
-        ))?;
+        let pool_result = self.pool().modify_liquidity(params)?;
 
         // All fallible manager-side calculations, including hooks and hook
         // delta overflow checks, completed before pool mutation. Committing the
@@ -334,10 +337,6 @@ impl PositionManager {
             principal_delta: pool_result.delta,
             ..result
         };
-        if snapshot.state.liquidity == 0 && liquidity_delta > 0 {
-            predicted_state.fee_growth_inside0_last_x128 = pool_result.fee_growth_inside0_x128;
-            predicted_state.fee_growth_inside1_last_x128 = pool_result.fee_growth_inside1_x128;
-        }
 
         self.positions.write().insert(
             token_id,

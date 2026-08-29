@@ -3183,6 +3183,7 @@ dependencies = [
  "ruint",
  "serde",
  "serde_json",
+ "slab",
  "tracing",
 ]
 

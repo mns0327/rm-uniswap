@@ -2,9 +2,9 @@
 
 use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, I256};
 use rm_uniswap::v4::{
-    BalanceDelta, Pool, PoolSnapshot, SignedAmount, SwapParams,
+    BalanceDelta, Pool, PoolSnapshot, SqrtPriceX96, SwapParams, TickIndex,
     positions::{MintResult, ModifyResult, PositionManager},
 };
 use ruint::aliases::U256;
@@ -280,6 +280,14 @@ fn parse_i128_lossless(value: &str) -> Result<i128, String> {
     }
 }
 
+fn tick(index: i32) -> TickIndex {
+    TickIndex::new(index).unwrap()
+}
+
+fn sqrt_price(value: U256) -> SqrtPriceX96 {
+    SqrtPriceX96::from_u256(value).unwrap()
+}
+
 #[test]
 fn committed_forge_fixtures_match_rust() {
     run_fixture_file("committed", include_str!("../forge/fixtures/parity.json"));
@@ -363,8 +371,8 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 let result = manager
                     .mint(
                         owner,
-                        tick_lower,
-                        tick_upper,
+                        tick(tick_lower),
+                        tick(tick_upper),
                         liquidity,
                         amount0_max,
                         amount1_max,
@@ -384,7 +392,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result.result,
                         &expect.result,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
                 minted_tokens.insert(result.token_id, result);
@@ -407,7 +415,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
             }
@@ -420,13 +428,16 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 protocol_fee,
                 expect,
             } => {
+                let signed_amount = I256::try_from(amount).unwrap_or_else(|error| {
+                    panic!("fixture {name} operation {idx} amount must fit int256: {error}")
+                });
                 let signed_amount = match exact {
-                    Exactness::Input => SignedAmount::negative(amount),
-                    Exactness::Output => SignedAmount::positive(amount),
+                    Exactness::Input => -signed_amount,
+                    Exactness::Output => signed_amount,
                 };
                 let mut params = SwapParams::new(zero_for_one, signed_amount);
                 if let Some(limit) = sqrt_price_limit_x96 {
-                    params.sqrt_price_limit_x96 = limit;
+                    params.sqrt_price_limit_x96 = sqrt_price(limit);
                 }
                 #[cfg(feature = "protocol-fee")]
                 {
@@ -438,34 +449,39 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                 });
                 if let Some(expect) = expect {
                     assert_eq!(
-                        result.delta,
+                        result.swap_delta,
                         expect.delta.into(),
                         "fixture {name} operation {idx} delta"
                     );
                     assert_eq!(
-                        result.sqrt_price_x96, expect.sqrt_price_x96,
+                        result.sqrt_price_x96,
+                        sqrt_price(expect.sqrt_price_x96),
                         "fixture {name} operation {idx} sqrt_price_x96"
                     );
                     assert_eq!(
-                        result.tick, expect.tick,
+                        result.tick,
+                        tick(expect.tick),
                         "fixture {name} operation {idx} tick"
                     );
                     assert_eq!(
-                        result.liquidity, expect.liquidity,
+                        result.liquidity.value(),
+                        expect.liquidity,
                         "fixture {name} operation {idx} liquidity"
                     );
+                    let pool_state = manager.pool().snapshot().state;
                     assert_eq!(
-                        result.fee_growth_global0_x128, expect.fee_growth_global0_x128,
+                        pool_state.fee_growth_global0_x128, expect.fee_growth_global0_x128,
                         "fixture {name} operation {idx} fee_growth_global0_x128"
                     );
                     assert_eq!(
-                        result.fee_growth_global1_x128, expect.fee_growth_global1_x128,
+                        pool_state.fee_growth_global1_x128, expect.fee_growth_global1_x128,
                         "fixture {name} operation {idx} fee_growth_global1_x128"
                     );
                     #[cfg(feature = "protocol-fee")]
                     if let Some(protocol_fee_amount) = expect.protocol_fee_amount {
                         assert_eq!(
-                            result.protocol_fee_amount, protocol_fee_amount,
+                            result.amount_to_protocol,
+                            U256::from(protocol_fee_amount),
                             "fixture {name} operation {idx} protocol_fee_amount"
                         );
                     }
@@ -483,7 +499,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
             }
@@ -505,7 +521,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture) {
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity,
+                        manager.pool().snapshot().state.liquidity.value(),
                     );
                 }
             }

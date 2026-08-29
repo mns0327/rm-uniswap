@@ -15,6 +15,7 @@ dashmap = "6.2.1"
 parking_lot = "0.12.5"
 ruint = "1.18.0"
 serde = "1.0.228"
+slab = "0.4.12"
 tracing = "0.1.44"
 
 [dev-dependencies]
@@ -23,5 +24,33 @@ criterion = "0.5"
 serde_json = "1.0.150"
 
 [[bench]]
-name = "benchmark"
+name = "small_ratio"
+harness = false
+
+[[bench]]
+name = "bitmap"
+harness = false
+
+[[bench]]
+name = "slab"
+harness = false
+
+[[bench]]
+name = "full_math"
+harness = false
+
+[[bench]]
+name = "sqrt_price"
+harness = false
+
+[[bench]]
+name = "tick"
+harness = false
+
+[[bench]]
+name = "swap"
+harness = false
+
+[[bench]]
+name = "pool"
 harness = false

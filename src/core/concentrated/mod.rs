@@ -1,4 +1,3 @@
-pub(crate) mod cache;
 pub(crate) mod pool;
 #[cfg(feature = "positions")]
 pub(crate) mod position;

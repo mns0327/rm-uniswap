@@ -1,6 +1,6 @@
-use alloy::primitives::U256;
+use ruint::aliases::U256;
 
-use crate::core::types::atomic_f64::AtomicF64;
+use crate::core::types::{atomic_f64::AtomicF64, fee::Fee, sqrt_price::SqrtPriceX96};
 
 /// Fee denominator used by Uniswap-style fee pips.
 ///
@@ -67,8 +67,8 @@ impl PriceCache {
     /// - `10_000` = `1.00%`
     ///
     /// Both swap directions are precomputed and stored as fee-adjusted prices.
-    pub fn new(zero_for_one_price: f64, fee: u32) -> Self {
-        let fee = (FEE_DENOMINATOR - fee as f64) / FEE_DENOMINATOR;
+    pub fn new(zero_for_one_price: f64, fee: Fee) -> Self {
+        let fee = (FEE_DENOMINATOR - fee.pips() as f64) / FEE_DENOMINATOR;
         let one_for_zero_price = 1.0 / zero_for_one_price;
 
         let zero_for_one_price_with_fee = zero_for_one_price * fee;
@@ -138,8 +138,8 @@ fn u256_to_f64(v: U256) -> f64 {
 }
 
 #[inline]
-pub fn sqrt_price_x96_to_price(sqrt_price_x96: U256) -> f64 {
-    let sqrt_price = u256_to_f64(sqrt_price_x96) / Q96_F64;
+pub fn sqrt_price_x96_to_price(sqrt_price_x96: SqrtPriceX96) -> f64 {
+    let sqrt_price = u256_to_f64(sqrt_price_x96.as_u256()) / Q96_F64;
 
     sqrt_price * sqrt_price
 }
