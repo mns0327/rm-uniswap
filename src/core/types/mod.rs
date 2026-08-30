@@ -3,6 +3,7 @@ pub(crate) mod fee;
 pub(crate) mod liquidity;
 pub(crate) mod nonzero;
 pub mod params;
+pub mod pool_key;
 pub(crate) mod pool_state;
 pub(crate) mod sqrt_price;
 pub(crate) mod tick;

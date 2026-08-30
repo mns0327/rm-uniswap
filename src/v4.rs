@@ -22,6 +22,7 @@ pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::params::{
     ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapResult, SwapSimulationResult,
 };
+pub use crate::core::types::pool_key::{PoolId, PoolKey};
 pub use crate::core::types::pool_state::PoolState;
 pub use crate::core::types::sqrt_price::SqrtPriceX96;
 pub use crate::core::types::tick::TickIndex;
