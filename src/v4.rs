@@ -17,6 +17,7 @@ pub use crate::core::types::delta::BalanceDelta;
 pub use crate::core::types::fee::Fee;
 pub use crate::core::types::fee::protocol_fee::ProtocolFee;
 pub use crate::core::types::fee::swap_fee::SwapFee;
+pub use crate::core::types::hooks::Hooks;
 pub use crate::core::types::liquidity::Liquidity;
 pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::params::{

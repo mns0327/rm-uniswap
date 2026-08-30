@@ -1,5 +1,6 @@
 pub(crate) mod delta;
 pub(crate) mod fee;
+pub mod hooks;
 pub(crate) mod liquidity;
 pub(crate) mod nonzero;
 pub mod params;
