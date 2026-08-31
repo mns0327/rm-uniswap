@@ -203,7 +203,7 @@ fn crossing_quote_is_read_only_but_committed_swap_updates_fee_growth_outside() {
     let pool = valid_pool();
     let params = SwapParams {
         zero_for_one: true,
-        amount: -I256::from(U256::from(1_000_000_000_000_000u64)),
+        amount_specified: -I256::from(U256::from(1_000_000_000_000_000u64)),
         sqrt_price_limit_x96: tick(-60).sqrt_price_x96(),
     };
 

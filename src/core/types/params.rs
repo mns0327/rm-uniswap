@@ -1,4 +1,4 @@
-use alloy::primitives::I256;
+use alloy::primitives::{Address, FixedBytes, I256};
 use ruint::aliases::U256;
 
 use crate::{
@@ -6,22 +6,23 @@ use crate::{
     v4::{BalanceDelta, Fee, Liquidity, SqrtPriceX96, TickIndex, TickInfo},
 };
 
-/// Parameters for a single simulated swap.
+/// Parameters for one Uniswap v4-style swap.
 ///
-/// Mirrors Uniswap V4's `IPoolManager.SwapParams` struct.
+/// Mirrors `IPoolManager.SwapParams`: direction, signed input/output amount,
+/// and the caller's sqrt-price safety limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapParams {
     /// `true`  → sell token0, buy token1 (price moves **down**).
     /// `false` → sell token1, buy token0 (price moves **up**).
     pub zero_for_one: bool,
 
-    /// Signed amount and exactness, mirroring V4's `amountSpecified`:
+    /// Signed swap amount, matching v4 `amountSpecified` semantics.
     ///
     /// * negative → exact-input; absolute value is the input amount.
     /// * positive → exact-output; absolute value is the desired output amount.
-    pub amount: I256,
+    pub amount_specified: I256,
 
-    /// Worst-acceptable sqrt price after the swap, in Q64.96.
+    /// Worst acceptable sqrt price after the swap, in Q64.96.
     ///
     /// * `zero_for_one = true`  → must be in `(MIN_SQRT_PRICE, current_sqrt_price)`.
     /// * `zero_for_one = false` → must be in `(current_sqrt_price, MAX_SQRT_PRICE)`.
@@ -29,34 +30,60 @@ pub struct SwapParams {
 }
 
 impl SwapParams {
-    /// Construct a swap with no price limit (uses the loosest valid limit).
+    /// Constructs a swap with the loosest valid price limit for the direction.
     pub fn new(zero_for_one: bool, amount: I256) -> Self {
         Self {
             zero_for_one,
-            amount,
+            amount_specified: amount,
             sqrt_price_limit_x96: SqrtPriceX96::extreme_price_limit(zero_for_one),
         }
     }
 }
 
-/// Parameters for a liquidity position update.
+/// Parameters for a Uniswap v4-style liquidity update.
 ///
-/// Mirrors Uniswap V4's `IPoolManager.ModifyLiquidityParams`, minus owner/salt
-/// and position-fee accounting (not implemented at the pool-simulator layer).
+/// Mirrors the pool-facing portion of `IPoolManager.ModifyLiquidityParams`.
+/// `info` carries the owner/salt pair only when the caller wants position-level
+/// fee accounting in addition to the pool-level liquidity change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifyLiquidityParams {
-    /// Lower tick of the position range.
+    /// Inclusive lower tick of the liquidity range.
     pub tick_lower: TickIndex,
-    /// Upper tick of the position range.
+
+    /// Exclusive upper tick of the liquidity range.
     pub tick_upper: TickIndex,
+
     /// Signed liquidity delta. Positive adds liquidity, negative removes it.
     pub liquidity_delta: i128,
+
+    /// Optional position identity used for fee-growth checkpoint accounting.
+    ///
+    /// `None` keeps the operation at the pool/tick layer, which is useful for
+    /// quote-only paths or callers that do not maintain a position store.
+    pub info: Option<PositionInfo>,
+}
+
+/// Position identity for liquidity updates that touch position accounting.
+///
+/// The pair maps directly to Uniswap v4's owner and salt fields. Together with
+/// the lower and upper ticks from [`ModifyLiquidityParams`], it forms the
+/// position key used for fee-growth checkpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositionInfo {
+    /// Account or manager address that owns the position.
+    pub owner: Address,
+
+    /// User-provided discriminator for otherwise identical owner/range pairs.
+    pub salt: FixedBytes<32>,
 }
 
 /// Output of a liquidity position update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifyLiquidityResult {
+    /// Principal token delta produced by the liquidity change.
     pub delta: BalanceDelta,
+
+    /// Fees realized from position accounting during the update.
     pub fee_delta: BalanceDelta,
 }
 
@@ -65,12 +92,14 @@ pub struct ModifyLiquidityResult {
 pub struct SwapResult {
     /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
     ///
-    /// Use [`delta_amount_in`] / [`delta_amount_out`] for
+    /// Use [`BalanceDelta::amount_in`] / [`BalanceDelta::amount_out`] for
     /// direction-aware unsigned magnitudes.
     pub swap_delta: BalanceDelta,
 
+    /// Protocol fee collected from the input token, in raw token units.
     pub amount_to_protocol: U256,
 
+    /// Effective swap fee used for this direction, including protocol fee.
     pub swap_fee: Fee,
 
     /// Pool sqrt price after the swap, in Q64.96.
@@ -86,27 +115,31 @@ pub struct SwapResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StepComputations {
-    // the price at the beginning of the step
+    /// Pool sqrt price at the beginning of the current step.
     pub sqrt_price_start_x96: SqrtPriceX96,
 
-    // the next tick to swap to from the current tick in the swap direction
+    /// Next initialized tick payload in the swap direction.
     pub next_tick_info: TickInfo,
 
+    /// Slab indexer for `next_tick_info`.
     pub next_tick_indexer: TickSlabIndexer,
 
-    // whether tickNext is initialized or not
+    /// Whether the next step target is an initialized tick boundary.
     pub initialized: bool,
 
-    // sqrt(price) for the next tick (1/0)
+    /// Sqrt price target for the next step, bounded by the caller's price limit.
     pub sqrt_price_next_x96: SqrtPriceX96,
 
-    // how much is being swapped in in this step
+    /// Input amount consumed during this step, before protocol-fee splitting.
     pub amount_in: U256,
+
+    /// Output amount produced during this step.
     pub amount_out: U256,
+
+    /// LP fee amount retained after subtracting any protocol fee.
     pub fee_amount: U256,
-    // how much is being swapped out
-    // how much fee is being paid in
-    // the global fee growth of the input token. updated in storage at the end of swap
+
+    /// Fee-growth accumulator for the input token, updated as the swap advances.
     pub fee_growth_global_x128: U256,
 }
 
@@ -124,11 +157,11 @@ impl StepComputations {
     };
 }
 
-/// Lightweight swap simulation result used by the hot quote path.
+/// Compact swap simulation result for callers that only need final swap state.
 ///
-/// This intentionally omits `crossings` so the default read-only simulator does
-/// not allocate or record debug-only crossing metadata. Use
-/// [`Pool::simulate_swap_full`] when you need crossing details.
+/// This result shape keeps the hot quote path focused on final pool state,
+/// token deltas, fee growth, and protocol fee collection, without carrying
+/// debug-only crossing metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapSimulationResult {
     /// Pool sqrt price after the simulated swap, in Q64.96.
@@ -140,8 +173,10 @@ pub struct SwapSimulationResult {
     /// Active liquidity after the simulated swap.
     pub liquidity: Liquidity,
 
+    /// All-time LP fee growth per unit of liquidity in token0 after the swap.
     pub fee_growth_global0_x128: U256,
 
+    /// All-time LP fee growth per unit of liquidity in token1 after the swap.
     pub fee_growth_global1_x128: U256,
 
     /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.

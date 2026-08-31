@@ -54,6 +54,13 @@ impl BalanceDelta {
         Self { amount0, amount1 }
     }
 
+    pub(crate) fn from_u256(amount0: U256, amount1: U256) -> Result<Self, crate::Error> {
+        Ok(Self {
+            amount0: u256_to_i128_positive(amount0)?,
+            amount1: u256_to_i128_positive(amount1)?,
+        })
+    }
+
     /// Builds the principal token delta for a liquidity modification.
     ///
     /// The returned delta follows V4's caller / PoolManager convention:

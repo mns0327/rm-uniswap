@@ -225,7 +225,7 @@ impl PositionManager {
         let mut positions = self.positions.write();
         let position = positions.get(&token_id).ok_or(Error::PositionNotFound)?;
         authorize(position.owner, caller)?;
-        if position.state.liquidity != 0 {
+        if !position.state.liquidity.is_zero() {
             return Err(Error::PositionNotEmpty);
         }
         positions.remove(&token_id);
@@ -250,7 +250,8 @@ impl PositionManager {
             .copied()
             .ok_or(Error::PositionNotFound)?;
         authorize(snapshot.owner, caller)?;
-        if liquidity_delta < 0 && liquidity_delta.unsigned_abs() > snapshot.state.liquidity {
+        if liquidity_delta < 0 && liquidity_delta.unsigned_abs() > snapshot.state.liquidity.value()
+        {
             return Err(Error::LiquidityUnderflow);
         }
 
@@ -271,12 +272,13 @@ impl PositionManager {
             tick_lower: snapshot.tick_lower,
             tick_upper: snapshot.tick_upper,
             liquidity_delta,
+            info: None,
         };
         let (quoted, growth0, growth1) = {
             let pool = self.pool();
             let quoted = pool.quote_modify_liquidity(params)?;
             let growth = if liquidity_delta > 0 {
-                let mut fork = pool.try_fork()?;
+                let mut fork = ConcentratedPool::from_snapshot(pool.snapshot())?;
                 fork.modify_liquidity(params)?;
                 fork.fee_growth_inside(snapshot.tick_lower, snapshot.tick_upper)?
             } else {
@@ -306,7 +308,7 @@ impl PositionManager {
                 amount0: predicted_fee0,
                 amount1: predicted_fee1,
             },
-            liquidity: predicted_state.liquidity,
+            liquidity: predicted_state.liquidity.value(),
         };
         #[cfg(feature = "v4-hooks")]
         let result = {
@@ -325,7 +327,7 @@ impl PositionManager {
                 amount0: predicted_fee0,
                 amount1: predicted_fee1,
             },
-            liquidity: predicted_state.liquidity,
+            liquidity: predicted_state.liquidity.value(),
         };
 
         let pool_result = self.pool().modify_liquidity(params)?;

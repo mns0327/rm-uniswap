@@ -10,7 +10,7 @@ v4-hooks = ["positions"]
 full-v4 = ["positions", "v4-hooks"]
 
 [dependencies]
-ahash = "0.8.12"
+ahash = { version = "0.8.12", features = ["serde"] }
 alloy = "2.1.0"
 dashmap = "6.2.1"
 parking_lot = "0.12.5"

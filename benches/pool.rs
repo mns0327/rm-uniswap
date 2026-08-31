@@ -138,6 +138,7 @@ fn bench_pool(c: &mut Criterion) {
                     tick_lower: black_box(tick_lower),
                     tick_upper: black_box(tick_upper),
                     liquidity_delta: black_box(1_000_000_000_000_000_000i128),
+                    info: None,
                 })
                 .unwrap()
             },

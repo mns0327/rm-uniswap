@@ -2,10 +2,11 @@
 
 use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 
-use alloy::primitives::{Address, I256};
+use alloy::primitives::{Address, B256, I256};
 use rm_uniswap::v4::{
-    BalanceDelta, Pool, PoolSnapshot, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
-    positions::{MintResult, ModifyResult, PositionManager},
+    BalanceDelta, Error, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot,
+    PositionInfo as ModifyPositionInfo, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
+    positions::{PositionIndex, Positions},
 };
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, de};
@@ -125,6 +126,14 @@ struct ExpectedDelta {
     amount0: i128,
     #[serde(deserialize_with = "deserialize_i128_lossless")]
     amount1: i128,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixturePosition {
+    owner: Address,
+    tick_lower: TickIndex,
+    tick_upper: TickIndex,
+    salt: B256,
 }
 
 impl From<ExpectedDelta> for BalanceDelta {
@@ -339,8 +348,9 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
         .unwrap_or_else(|error| panic!("fixture {name} owner must be a hex address: {error}"));
     let pool = Pool::try_from(fixture.initial_pool)
         .unwrap_or_else(|error| panic!("fixture {name} initial pool construct failed: {error}"));
-    let manager = PositionManager::new(pool);
-    let mut minted_tokens = BTreeMap::<u64, MintResult>::new();
+    let mut pool = with_positions(pool);
+    let mut positions = BTreeMap::<u64, FixturePosition>::new();
+    let mut next_token_id = 1u64;
 
     for (idx, operation) in fixture.operations.into_iter().enumerate() {
         match operation {
@@ -352,34 +362,44 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                 amount1_max,
                 expect,
             } => {
-                let result = manager
-                    .mint(
-                        owner,
-                        tick(tick_lower),
-                        tick(tick_upper),
-                        liquidity,
-                        amount0_max,
-                        amount1_max,
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!("fixture {name} operation {idx} mint failed: {error}")
-                    });
+                let token_id = next_token_id;
+                next_token_id = next_token_id
+                    .checked_add(1)
+                    .unwrap_or_else(|| panic!("fixture {name} operation {idx} token_id overflow"));
+                let position = FixturePosition {
+                    owner,
+                    tick_lower: tick(tick_lower),
+                    tick_upper: tick(tick_upper),
+                    salt: token_id_salt(token_id),
+                };
+                let result = modify_position(
+                    &mut pool,
+                    position,
+                    liquidity_to_i128(name, idx, liquidity),
+                    amount0_max,
+                    amount1_max,
+                    0,
+                    0,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("fixture {name} operation {idx} mint failed: {error}")
+                });
                 if let Some(expect) = expect {
-                    if let Some(token_id) = expect.token_id {
+                    if let Some(expected_token_id) = expect.token_id {
                         assert_eq!(
-                            result.token_id, token_id,
+                            token_id, expected_token_id,
                             "fixture {name} operation {idx} token_id"
                         );
                     }
                     assert_modify_result(
                         name,
                         idx,
-                        &result.result,
+                        &result,
                         &expect.result,
-                        manager.pool().snapshot().state.liquidity.value(),
+                        pool.snapshot().state.liquidity.value(),
                     );
                 }
-                minted_tokens.insert(result.token_id, result);
+                positions.insert(token_id, position);
             }
             Operation::Increase {
                 token_id,
@@ -388,18 +408,26 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                 amount1_max,
                 expect,
             } => {
-                let result = manager
-                    .increase_liquidity(owner, token_id, liquidity, amount0_max, amount1_max)
-                    .unwrap_or_else(|error| {
-                        panic!("fixture {name} operation {idx} increase failed: {error}")
-                    });
+                let position = position_for(name, idx, &positions, token_id);
+                let result = modify_position(
+                    &mut pool,
+                    position,
+                    liquidity_to_i128(name, idx, liquidity),
+                    amount0_max,
+                    amount1_max,
+                    0,
+                    0,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("fixture {name} operation {idx} increase failed: {error}")
+                });
                 if let Some(expect) = expect {
                     assert_modify_result(
                         name,
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity.value(),
+                        pool.snapshot().state.liquidity.value(),
                     );
                 }
             }
@@ -441,10 +469,10 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                         panic!("fixture {name} operation {idx} protocol_fee must fit v4 maximum")
                     });
 
-                    manager.pool().set_protocol_fee(protocol_fee).unwrap();
+                    pool.set_protocol_fee(protocol_fee).unwrap();
                 }
 
-                let result = manager.pool().swap(params).unwrap_or_else(|error| {
+                let result = pool.swap(params).unwrap_or_else(|error| {
                     panic!("fixture {name} operation {idx} swap failed: {error}")
                 });
                 if let Some(expect) = expect {
@@ -468,7 +496,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                         expect.liquidity,
                         "fixture {name} operation {idx} liquidity"
                     );
-                    let pool_state = manager.pool().snapshot().state;
+                    let pool_state = pool.snapshot().state;
                     assert_eq!(
                         pool_state.fee_growth_global0_x128, expect.fee_growth_global0_x128,
                         "fixture {name} operation {idx} fee_growth_global0_x128"
@@ -487,8 +515,8 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                 }
             }
             Operation::Collect { token_id, expect } => {
-                let result = manager
-                    .collect_fees(owner, token_id)
+                let position = position_for(name, idx, &positions, token_id);
+                let result = modify_position(&mut pool, position, 0, u128::MAX, u128::MAX, 0, 0)
                     .unwrap_or_else(|error| {
                         panic!("fixture {name} operation {idx} collect failed: {error}")
                     });
@@ -498,7 +526,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity.value(),
+                        pool.snapshot().state.liquidity.value(),
                     );
                 }
             }
@@ -509,27 +537,37 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                 amount1_min,
                 expect,
             } => {
-                let result = manager
-                    .decrease_liquidity(owner, token_id, liquidity, amount0_min, amount1_min)
-                    .unwrap_or_else(|error| {
-                        panic!("fixture {name} operation {idx} decrease failed: {error}")
-                    });
+                let position = position_for(name, idx, &positions, token_id);
+                let result = modify_position(
+                    &mut pool,
+                    position,
+                    -liquidity_to_i128(name, idx, liquidity),
+                    u128::MAX,
+                    u128::MAX,
+                    amount0_min,
+                    amount1_min,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("fixture {name} operation {idx} decrease failed: {error}")
+                });
                 if let Some(expect) = expect {
                     assert_modify_result(
                         name,
                         idx,
                         &result,
                         &expect,
-                        manager.pool().snapshot().state.liquidity.value(),
+                        pool.snapshot().state.liquidity.value(),
                     );
                 }
             }
             Operation::Burn { token_id } => {
-                manager.burn(owner, token_id).unwrap_or_else(|error| {
+                let position = position_for(name, idx, &positions, token_id);
+                burn_position(&mut pool, position).unwrap_or_else(|error| {
                     panic!("fixture {name} operation {idx} burn failed: {error}")
                 });
+                positions.remove(&token_id);
                 assert!(
-                    manager.position(token_id).is_none(),
+                    pool.positions.0.get(&position.index()).is_none(),
                     "fixture {name} operation {idx} position should be removed"
                 );
             }
@@ -540,7 +578,7 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
         expected_final_pool
             .validate()
             .unwrap_or_else(|error| panic!("fixture {name} final snapshot invalid: {error}"));
-        let actual_final_pool = manager.pool().snapshot();
+        let actual_final_pool = snapshot_without_positions(&pool);
         if !final_pool_has_protocol_fee {
             expected_final_pool.protocol_fee = actual_final_pool.protocol_fee;
         }
@@ -551,20 +589,150 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
     }
 
     assert!(
-        !minted_tokens.is_empty(),
+        next_token_id > 1,
         "fixture {name} should mint at least one position"
     );
+}
+
+fn with_positions(pool: Pool) -> Pool<Positions> {
+    Pool {
+        state: pool.state,
+        swap_fee: pool.swap_fee,
+        tick_spacing: pool.tick_spacing,
+        ticks: pool.ticks,
+        positions: Positions::new(),
+    }
+}
+
+fn snapshot_without_positions(pool: &Pool<Positions>) -> PoolSnapshot {
+    let snapshot = pool.snapshot();
+    PoolSnapshot {
+        state: snapshot.state,
+        fee: snapshot.fee,
+        protocol_fee: snapshot.protocol_fee,
+        tick_spacing: snapshot.tick_spacing,
+        ticks: snapshot.ticks,
+        positions: (),
+    }
+}
+
+fn position_for(
+    fixture: &str,
+    idx: usize,
+    positions: &BTreeMap<u64, FixturePosition>,
+    token_id: u64,
+) -> FixturePosition {
+    positions.get(&token_id).copied().unwrap_or_else(|| {
+        panic!("fixture {fixture} operation {idx} position {token_id} should exist")
+    })
+}
+
+fn modify_position(
+    pool: &mut Pool<Positions>,
+    position: FixturePosition,
+    liquidity_delta: i128,
+    amount0_max: u128,
+    amount1_max: u128,
+    amount0_min: u128,
+    amount1_min: u128,
+) -> Result<ModifyLiquidityResult, Error> {
+    let params = ModifyLiquidityParams {
+        tick_lower: position.tick_lower,
+        tick_upper: position.tick_upper,
+        liquidity_delta,
+        info: Some(ModifyPositionInfo {
+            owner: position.owner,
+            salt: position.salt,
+        }),
+    };
+    let quoted = pool.quote_modify_liquidity(params)?;
+    validate_slippage(
+        quoted,
+        liquidity_delta,
+        amount0_max,
+        amount1_max,
+        amount0_min,
+        amount1_min,
+    )?;
+
+    pool.modify_liquidity(params)
+}
+
+fn burn_position(pool: &mut Pool<Positions>, position: FixturePosition) -> Result<(), Error> {
+    let state = pool
+        .positions
+        .0
+        .get(&position.index())
+        .ok_or(Error::PositionNotFound)?;
+    if state.liquidity.value() != 0 {
+        return Err(Error::PositionNotEmpty);
+    }
+    pool.positions.0.remove(&position.index());
+    Ok(())
+}
+
+fn validate_slippage(
+    delta: BalanceDelta,
+    liquidity_delta: i128,
+    amount0_max: u128,
+    amount1_max: u128,
+    amount0_min: u128,
+    amount1_min: u128,
+) -> Result<(), Error> {
+    if liquidity_delta >= 0 {
+        let amount0 = negative_delta_to_u128(delta.amount0)?;
+        let amount1 = negative_delta_to_u128(delta.amount1)?;
+        if amount0 > amount0_max || amount1 > amount1_max {
+            return Err(Error::SlippageExceeded);
+        }
+    } else {
+        let amount0 = u128::try_from(delta.amount0).map_err(|_| Error::AmountOverflow)?;
+        let amount1 = u128::try_from(delta.amount1).map_err(|_| Error::AmountOverflow)?;
+        if amount0 < amount0_min || amount1 < amount1_min {
+            return Err(Error::SlippageExceeded);
+        }
+    }
+    Ok(())
+}
+
+fn negative_delta_to_u128(value: i128) -> Result<u128, Error> {
+    if value > 0 {
+        return Err(Error::AmountOverflow);
+    }
+    Ok(value.unsigned_abs())
+}
+
+fn liquidity_to_i128(fixture: &str, idx: usize, liquidity: u128) -> i128 {
+    i128::try_from(liquidity)
+        .unwrap_or_else(|error| panic!("fixture {fixture} operation {idx} liquidity: {error}"))
+}
+
+fn token_id_salt(token_id: u64) -> B256 {
+    let mut bytes = [0u8; 32];
+    bytes[24..].copy_from_slice(&token_id.to_be_bytes());
+    B256::from(bytes)
+}
+
+impl FixturePosition {
+    fn index(self) -> PositionIndex {
+        PositionIndex {
+            owner: self.owner,
+            tick_lower: self.tick_lower,
+            tick_upper: self.tick_upper,
+            salt: self.salt,
+        }
+    }
 }
 
 fn assert_modify_result(
     fixture: &str,
     idx: usize,
-    actual: &ModifyResult,
+    actual: &ModifyLiquidityResult,
     expected: &ExpectedModify,
     actual_pool_liquidity: u128,
 ) {
     assert_eq!(
-        actual.principal_delta,
+        actual.delta,
         expected.principal_delta.into(),
         "fixture {fixture} operation {idx} principal_delta"
     );

@@ -21,7 +21,8 @@ pub use crate::core::types::hooks::Hooks;
 pub use crate::core::types::liquidity::Liquidity;
 pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::params::{
-    ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapResult, SwapSimulationResult,
+    ModifyLiquidityParams, ModifyLiquidityResult, PositionInfo, SwapParams, SwapResult,
+    SwapSimulationResult,
 };
 pub use crate::core::types::pool_key::{PoolId, PoolKey};
 pub use crate::core::types::pool_state::PoolState;
@@ -32,5 +33,6 @@ pub use crate::core::types::{PoolTicksSnapshot, TickInfo, TickInfoSnapshot};
 
 #[cfg(feature = "positions")]
 pub mod positions {
+    pub use crate::core::concentrated::position::{PositionIndex, Positions};
     pub use crate::core::concentrated::position_manager::*;
 }

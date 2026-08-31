@@ -11,7 +11,9 @@ use std::{fmt::Display, ops::Deref};
 /// This type intentionally does not enforce non-zero liquidity. Code paths
 /// that divide by liquidity or rely on active liquidity should validate that
 /// separately, typically with `NonZeroLiquidity`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Default, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Liquidity(u128);
 

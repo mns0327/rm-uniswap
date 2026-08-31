@@ -5,22 +5,25 @@
 //! PoolManager accounting perspective. Negative delta values mean the caller
 //! owes that token; positive values mean the caller receives it.
 //!
-//! `SwapParams::amount` uses V4 `amountSpecified` semantics: negative for exact
-//! input and positive for exact output. Tick spacing is supplied from the
-//! `PoolKey` and validated together with pool snapshots and tick stores.
+//! `SwapParams::amount_specified` uses V4 `amountSpecified` semantics:
+//! negative for exact input and positive for exact output. Tick spacing is
+//! supplied from the `PoolKey` and validated together with pool snapshots and
+//! tick stores.
 //!
-//! Read-only quote methods leave state unchanged. [`Pool::swap`] commits the
-//! resulting price, tick, liquidity, fee growth, and crossed tick fee state only
-//! after the full simulation succeeds.
+//! Read-only quote methods leave pool storage unchanged. [`Pool::swap`] runs
+//! the same math through mutable adapters, so final price, tick, liquidity,
+//! fee growth, and crossed tick fee state are reflected in pool storage.
 
 use std::sync::Arc;
 
 use alloy::primitives::I256;
 use parking_lot::RwLock;
 use ruint::aliases::U256;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Error as SwapSimError;
+use crate::core::concentrated::position::{PositionIndex, PositionsAccess};
 use crate::core::concentrated::ticks::TickAccess;
 use crate::core::concentrated::ticks::slab::TickSlab;
 use crate::core::types::fee::Fee;
@@ -43,28 +46,35 @@ use crate::v4::swap_math::compute_swap_step;
 
 /// Complete V4 pool state required for a full tick-crossing simulation.
 ///
-/// # Invariants (caller-enforced)
+/// # Invariants
 ///
 /// * `tick == floor(log_√1.0001(sqrt_price_x96))`. The simulator does not
 ///   re-derive tick from price; a mismatch produces wrong output.
-/// * `fee <= 1_000_000` — enforced on entry by [`Pool::swap`].
-/// * `tick_spacing` is positive — enforced by [`TickSpacing`].
+/// * `swap_fee` must contain protocol-valid directional effective fees.
+/// * `tick_spacing` is positive and protocol-valid — enforced by [`TickSpacing`].
 /// * All `tick_idx` values in `ticks` must be within `[MIN_TICK, MAX_TICK]` and
-///   be multiples of `tick_spacing` — enforced at `PoolTicks` construction.
+///   be multiples of `tick_spacing`.
+/// * When position storage is enabled, position liquidity must reconcile with
+///   initialized tick liquidity.
 #[derive(Debug)]
-pub struct Pool {
+pub struct Pool<P = ()> {
+    /// Current pool price, tick, liquidity, and fee-growth globals.
     pub state: Arc<RwLock<PoolState>>,
 
+    /// LP fee plus any directional protocol-fee configuration.
     pub swap_fee: SwapFee,
 
     /// Tick spacing from `PoolKey.tickSpacing`.
     pub tick_spacing: TickSpacing,
 
-    /// Initialized ticks keyed by `tick_idx` in an ordered map behind a lock.
+    /// Initialized ticks stored in this pool's spacing-aware slab index.
     pub ticks: TickSlab,
+
+    /// Optional position store used for fee-growth checkpoint accounting.
+    pub positions: P,
 }
 
-impl Serialize for Pool {
+impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Serialize for Pool<P> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -73,17 +83,19 @@ impl Serialize for Pool {
     }
 }
 
-impl<'de> Deserialize<'de> for Pool {
+impl<'de, P: Default + Clone + Serialize + DeserializeOwned + PositionsAccess> Deserialize<'de>
+    for Pool<P>
+{
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let snapshot = PoolSnapshot::deserialize(deserializer)?;
-        Self::try_from(snapshot).map_err(serde::de::Error::custom)
+        Self::from_snapshot(snapshot).map_err(serde::de::Error::custom)
     }
 }
 
-impl PoolSnapshot {
+impl<P: PositionsAccess> PoolSnapshot<P> {
     /// Validate all state that can affect swap correctness.
     pub fn validate(&self) -> Result<(), SwapSimError> {
         if self.ticks.tick_spacing != self.tick_spacing {
@@ -127,7 +139,7 @@ impl PoolSnapshot {
             return Err(SwapSimError::InvalidTick);
         }
 
-        Ok(())
+        self.positions.validate_against_ticks(&self.ticks)
     }
 }
 
@@ -137,19 +149,53 @@ impl PoolSnapshot {
 /// decoded from external data as untrusted and construct a runtime pool with
 /// [`Pool::try_from`] so all invariants are validated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PoolSnapshot {
+#[serde(bound(
+    serialize = "P: Serialize",
+    deserialize = "P: Deserialize<'de> + Default"
+))]
+pub struct PoolSnapshot<P = ()> {
+    /// Current pool price, active tick, liquidity, and fee-growth globals.
     pub state: PoolState,
+    /// Base LP fee before protocol-fee adjustments.
     pub fee: Fee,
+    /// Directional protocol-fee configuration.
     #[serde(default)]
     pub protocol_fee: ProtocolFee,
+    /// Pool tick spacing used to validate position boundaries and tick storage.
     pub tick_spacing: TickSpacing,
+    /// Serializable initialized tick storage.
     pub ticks: PoolTicksSnapshot,
+    /// Serializable position storage, or `()` when positions are disabled.
+    #[serde(default)]
+    pub positions: P,
 }
 
-impl TryFrom<PoolSnapshot> for Pool {
-    type Error = SwapSimError;
+impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
+    /// Capture an owned snapshot from the current live pool storage.
+    ///
+    /// The state is copied under a read lock; ticks and positions are cloned
+    /// into independent owned storage.
+    pub fn snapshot(&self) -> PoolSnapshot<P> {
+        let state = *self.state.read();
 
-    fn try_from(snapshot: PoolSnapshot) -> Result<Self, Self::Error> {
+        PoolSnapshot {
+            state,
+            fee: *self.swap_fee.lp_fee(),
+            protocol_fee: *self.swap_fee.protocol_fee(),
+            tick_spacing: self.tick_spacing,
+            ticks: PoolTicksSnapshot {
+                tick_spacing: self.ticks.tick_spacing(),
+                inner: self.ticks.snapshot(),
+            },
+            positions: self.positions.clone(),
+        }
+    }
+
+    /// Build a live pool from a serializable snapshot after validation.
+    ///
+    /// This reconstructs tick storage and fee caches from owned data, returning
+    /// an error if any pool, tick, fee, or position invariant is inconsistent.
+    pub fn from_snapshot(snapshot: PoolSnapshot<P>) -> Result<Self, crate::Error> {
         snapshot.validate()?;
 
         let ticks = TickSlab::from_snapshot(snapshot.ticks.tick_spacing, snapshot.ticks.inner)?;
@@ -160,20 +206,10 @@ impl TryFrom<PoolSnapshot> for Pool {
             swap_fee,
             tick_spacing: snapshot.tick_spacing,
             ticks,
+            positions: snapshot.positions,
         })
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TickCrossInfo {
-    pub cumulative_input: U256,
-    pub tick: TickIndex,
-    pub liquidity_after: Liquidity,
-    pub fee_growth_global0_x128: U256,
-    pub fee_growth_global1_x128: U256,
-}
-
-impl Pool {
     /// Construct a pool after validating every state invariant.
     ///
     /// Use this for external or dynamically assembled state. The legacy
@@ -187,7 +223,7 @@ impl Pool {
         tick_spacing: TickSpacing,
         ticks: TickSlab,
     ) -> Result<Self, SwapSimError> {
-        PoolSnapshot {
+        Self::from_snapshot(PoolSnapshot {
             state: PoolState {
                 sqrt_price_x96,
                 tick,
@@ -199,10 +235,42 @@ impl Pool {
             protocol_fee: ProtocolFee::ZERO,
             tick_spacing,
             ticks: ticks.owned_snapshot(),
-        }
-        .try_into()
+            positions: P::default(),
+        })
     }
 
+    /// Create an independent pool with fresh locks and caches.
+    pub fn try_fork(&self) -> Result<Self, SwapSimError> {
+        Self::from_snapshot(self.snapshot())
+    }
+}
+
+impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> TryFrom<PoolSnapshot<P>>
+    for Pool<P>
+{
+    type Error = SwapSimError;
+
+    fn try_from(snapshot: PoolSnapshot<P>) -> Result<Self, Self::Error> {
+        Self::from_snapshot(snapshot)
+    }
+}
+
+/// Tick-crossing audit payload for callers that record swap traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickCrossInfo {
+    /// Input consumed up to and including this crossing.
+    pub cumulative_input: U256,
+    /// Initialized tick boundary that was crossed.
+    pub tick: TickIndex,
+    /// Active liquidity immediately after applying the crossing delta.
+    pub liquidity_after: Liquidity,
+    /// Token0 global fee-growth value used for the crossing update.
+    pub fee_growth_global0_x128: U256,
+    /// Token1 global fee-growth value used for the crossing update.
+    pub fee_growth_global1_x128: U256,
+}
+
+impl<P: Default> Pool<P> {
     /// Construct a pool from trusted state without eager invariant validation.
     ///
     /// Prefer [`Pool::try_new`] for external input.
@@ -224,102 +292,117 @@ impl Pool {
             swap_fee,
             tick_spacing,
             ticks: TickSlab::new(tick_spacing),
+            positions: P::default(),
         }
     }
 
+    /// Replace protocol fees and refresh cached effective swap fees.
     #[inline(always)]
     pub fn set_protocol_fee(&mut self, protocol_fee: ProtocolFee) -> Result<(), crate::Error> {
         self.swap_fee.set_protocol_fee(protocol_fee)
     }
+}
 
-    /// Capture an owned, internally consistent snapshot.
+impl<P: PositionsAccess> Pool<P> {
+    /// Apply a liquidity change and commit it to pool, tick, and position state.
     ///
-    /// The tick lock is acquired before the state lock, matching mutation APIs.
-    pub fn snapshot(&self) -> PoolSnapshot {
-        let state = *self.state.read();
-
-        PoolSnapshot {
-            state,
-            fee: *self.swap_fee.lp_fee(),
-            protocol_fee: *self.swap_fee.protocol_fee(),
-            tick_spacing: self.tick_spacing,
-            ticks: PoolTicksSnapshot {
-                tick_spacing: self.ticks.tick_spacing(),
-                inner: self.ticks.snapshot(),
-            },
-        }
-    }
-
-    /// Create an independent pool with fresh locks and caches.
-    pub fn try_fork(&self) -> Result<Self, SwapSimError> {
-        Self::try_from(self.snapshot())
-    }
-
-    /// Apply a liquidity change and commit it to pool state.
-    ///
-    /// Implements the pool-level portion of Uniswap V4's `modifyLiquidity`:
+    /// Implements the pool-facing portion of Uniswap V4's `modifyLiquidity`:
     ///
     /// 1. Validate `tick_lower < tick_upper` and tick spacing alignment.
-    /// 2. Update lower/upper ticks with the signed `liquidity_net` convention.
-    /// 3. Enforce `TickSpacing::max_liquidity_per_tick` when adding.
-    /// 4. Compute the token delta owed by/to the pool.
+    /// 2. Update lower/upper initialized ticks with the signed `liquidity_net`
+    ///    convention, removing a boundary when its gross liquidity reaches zero.
+    /// 3. Enforce `TickSpacing::max_liquidity_per_tick` when adding liquidity.
+    /// 4. Realize position fees when position storage is enabled and `info` is
+    ///    supplied.
     /// 5. Update active liquidity when the current tick is inside the range.
+    /// 6. Return the caller / PoolManager principal delta for the liquidity
+    ///    change plus any realized fee delta.
     ///
-    /// Position ownership, fee-growth-inside, and fee collection are not
-    /// implemented here (this layer does not store a `positions` mapping or
-    /// fee-growth globals).
+    /// A zero-liquidity update can realize position fees without changing pool
+    /// principal or initialized ticks.
     pub fn modify_liquidity(
         &mut self,
         params: ModifyLiquidityParams,
     ) -> Result<ModifyLiquidityResult, SwapSimError> {
-        check_ticks(params.tick_lower, params.tick_upper, self.tick_spacing)?;
+        let ModifyLiquidityParams {
+            tick_lower,
+            tick_upper,
+            liquidity_delta,
+            info,
+        } = params;
+
+        check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
+
+        let fee_growth_before_removal = if P::ENABLE && info.is_some() && liquidity_delta <= 0 {
+            Some(self.fee_growth_inside(tick_lower, tick_upper)?)
+        } else {
+            None
+        };
 
         let mut lower_sqrt_price: SqrtPriceX96 = SqrtPriceX96::MIN;
         let mut upper_sqrt_price: SqrtPriceX96 = SqrtPriceX96::MIN;
 
-        if params.liquidity_delta != 0 {
-            lower_sqrt_price =
-                self.update_tick(params.tick_lower, params.liquidity_delta, false)?;
-            upper_sqrt_price = self.update_tick(params.tick_upper, params.liquidity_delta, true)?;
+        if liquidity_delta != 0 {
+            lower_sqrt_price = self.update_tick(tick_lower, liquidity_delta, false)?;
+            upper_sqrt_price = self.update_tick(tick_upper, liquidity_delta, true)?;
+        };
+
+        let fee_delta = {
+            if P::ENABLE
+                && let Some(position_info) = info
+            {
+                let (fee_growth_inside0_x128, fee_growth_inside1_x128) =
+                    if let Some(fee_growth_inside) = fee_growth_before_removal {
+                        fee_growth_inside
+                    } else {
+                        self.fee_growth_inside(tick_lower, tick_upper)?
+                    };
+
+                let position_idx = PositionIndex {
+                    owner: position_info.owner,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                    salt: position_info.salt,
+                };
+
+                self.positions.update_position(position_idx, |position| {
+                    match position.update(
+                        liquidity_delta,
+                        fee_growth_inside0_x128,
+                        fee_growth_inside1_x128,
+                    ) {
+                        Ok((fees_owed0, fees_owed1)) => {
+                            BalanceDelta::from_u256(fees_owed0, fees_owed1)
+                        }
+                        Err(e) => Err(e),
+                    }
+                })?
+            } else {
+                BalanceDelta::DEFAULT
+            }
         };
 
         let mut state = self.state.write();
 
-        // TODO: Update position
-        // {
-        //     (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) =
-        //         getFeeGrowthInside(self, tickLower, tickUpper);
-
-        //     Position.State storage position = self.positions.get(params.owner, tickLower, tickUpper, params.salt);
-        //     (uint256 feesOwed0, uint256 feesOwed1) =
-        //         position.update(liquidityDelta, feeGrowthInside0X128, feeGrowthInside1X128);
-
-        //     // Fees earned from LPing are calculated, and returned
-        //     feeDelta = toBalanceDelta(feesOwed0.toInt128(), feesOwed1.toInt128());
-        // }
-        let fee_delta = BalanceDelta::DEFAULT;
-
-        // TODO: Clear Tick Slot
-
-        let delta = if params.liquidity_delta != 0 {
-            if params.tick_lower <= state.tick && state.tick < params.tick_upper {
+        let delta = if liquidity_delta != 0 {
+            if tick_lower <= state.tick && state.tick < tick_upper {
                 state.liquidity = Liquidity::new(
                     state
                         .liquidity
                         .value()
-                        .checked_add_signed(params.liquidity_delta)
+                        .checked_add_signed(liquidity_delta)
                         .ok_or(SwapSimError::LiquidityOverflow)?,
                 );
             }
 
             BalanceDelta::from_liquidity_principal(
                 state.tick,
-                params.tick_lower,
-                params.tick_upper,
+                tick_lower,
+                tick_upper,
                 state.sqrt_price_x96,
                 lower_sqrt_price,
                 upper_sqrt_price,
-                params.liquidity_delta,
+                liquidity_delta,
             )?
         } else {
             BalanceDelta::DEFAULT
@@ -328,6 +411,11 @@ impl Pool {
         Ok(ModifyLiquidityResult { delta, fee_delta })
     }
 
+    /// Return the principal token delta for a liquidity change without mutation.
+    ///
+    /// This quote validates the same tick range as [`Pool::modify_liquidity`]
+    /// but does not initialize ticks, update active liquidity, or realize
+    /// position fees.
     pub fn quote_modify_liquidity(
         &self,
         params: ModifyLiquidityParams,
@@ -347,6 +435,10 @@ impl Pool {
     }
 
     /// Return current all-time fee growth inside a tick range.
+    ///
+    /// The calculation follows Uniswap's inside/outside accumulator semantics
+    /// with wrapping `U256` arithmetic. Missing boundary ticks contribute zero,
+    /// which is useful for quotes over not-yet-initialized ranges.
     pub fn fee_growth_inside(
         &self,
         tick_lower: TickIndex,
@@ -435,6 +527,8 @@ impl Pool {
 
         self.ticks
             .update_initialized_tick(tick_indexer, |tick_info| {
+                // Newly initialized ticks on or below the current tick start
+                // with outside fee growth set to the current global values.
                 if liquidity_gross_before.is_zero() && tick_index <= self.state.read().tick {
                     tick_info.fee_growth_outside0_x128 = state.fee_growth_global0_x128;
                     tick_info.fee_growth_outside1_x128 = state.fee_growth_global1_x128;
@@ -447,36 +541,48 @@ impl Pool {
             })
     }
 
+    /// Execute a swap and commit the resulting pool and tick state.
+    ///
+    /// The returned deltas use the caller / PoolManager perspective: negative
+    /// means the caller owes the token, positive means the caller receives it.
     pub fn swap(&mut self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
         let result = {
             let mut state = self.state.write();
-            swap_inner(&mut *state, &mut self.ticks, &self.swap_fee, &params)?
+            swap_inner(&mut *state, &mut self.ticks, &self.swap_fee, params)?
         };
 
         Ok(result)
     }
 
+    /// Simulate a swap without mutating pool or tick storage.
+    ///
+    /// The same swap loop is used as [`Pool::swap`], but read-only adapters
+    /// discard final state writes and tick-crossing fee-growth updates.
     pub fn quote_swap(&self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
         let state = self.state.read();
 
-        swap_inner(&*state, &self.ticks, &self.swap_fee, &params)
+        swap_inner(&*state, &self.ticks, &self.swap_fee, params)
     }
 }
 
-/// Execute a swap and commit the resulting state to this pool.
+/// Run the shared V4 swap loop over state and tick adapters.
 ///
-/// This mutating API preserves the full result shape, including crossings,
-/// because callers that mutate pool state often need audit/debug metadata.
-/// For the fastest read-only quote path, use [`Pool::simulate_swap`].
+/// Mutable adapters commit final pool state and tick-crossing fee-growth
+/// updates. Read-only adapters execute the same traversal while discarding those
+/// writes, which keeps [`Pool::swap`] and [`Pool::quote_swap`] behavior aligned.
 fn swap_inner<T: TickAccess, S: StateAccess>(
     mut state: S,
     mut ticks: T,
     swap_fee: &SwapFee,
-    params: &SwapParams,
+    params: SwapParams,
 ) -> Result<SwapResult, SwapSimError> {
-    let exact_in = params.amount.is_negative();
+    let SwapParams {
+        zero_for_one,
+        amount_specified,
+        sqrt_price_limit_x96,
+    } = params;
 
-    let zero_for_one = params.zero_for_one;
+    let exact_in = amount_specified.is_negative();
 
     let pool_state = state.get();
 
@@ -489,7 +595,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         liquidity: pool_state.liquidity,
     };
 
-    if params.amount.is_zero() {
+    if amount_specified.is_zero() {
         return Ok(result);
     }
 
@@ -500,12 +606,12 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
     // Validate the price limit against the current pool price.
     if zero_for_one {
         // V4: limit must be strictly below current price.
-        if params.sqrt_price_limit_x96 >= pool_state.sqrt_price_x96 {
+        if sqrt_price_limit_x96 >= pool_state.sqrt_price_x96 {
             return Err(SwapSimError::PriceLimitAlreadyExceeded);
         }
     } else {
         // V4: limit must be strictly above current price.
-        if params.sqrt_price_limit_x96 <= pool_state.sqrt_price_x96 {
+        if sqrt_price_limit_x96 <= pool_state.sqrt_price_x96 {
             return Err(SwapSimError::PriceLimitAlreadyExceeded);
         }
     }
@@ -519,11 +625,9 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         pool_state.fee_growth_global1_x128
     };
 
-    let mut amount_specified_remaining = params.amount;
+    let mut amount_specified_remaining = amount_specified;
 
-    while !(amount_specified_remaining.is_zero()
-        || result.sqrt_price_x96 == params.sqrt_price_limit_x96)
-    {
+    while !(amount_specified_remaining.is_zero() || result.sqrt_price_x96 == sqrt_price_limit_x96) {
         if result.liquidity.is_zero() {
             break;
         }
@@ -544,7 +648,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         step.sqrt_price_next_x96 = get_sqrt_price_target(
             zero_for_one,
             step.next_tick_info.sqrt_price_x96,
-            params.sqrt_price_limit_x96,
+            sqrt_price_limit_x96,
         );
 
         let swap_step = compute_swap_step(
@@ -560,7 +664,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         step.amount_out = swap_step.amount_out;
         step.fee_amount = swap_step.fee_amount;
 
-        if params.amount.is_positive() {
+        if amount_specified.is_positive() {
             amount_specified_remaining = amount_specified_remaining
                 .checked_sub(
                     I256::try_from(swap_step.amount_out)
@@ -637,7 +741,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         }
 
         if result.sqrt_price_x96 == step.sqrt_price_next_x96 {
-            let (fee_growth_global0_x128, fee_growth_global1_x128) = if params.zero_for_one {
+            let (fee_growth_global0_x128, fee_growth_global1_x128) = if zero_for_one {
                 (
                     step.fee_growth_global_x128,
                     pool_state.fee_growth_global1_x128,
@@ -655,7 +759,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
                 fee_growth_global1_x128,
             )?;
 
-            // safe because liquidity_net cannot be i128::MIN
+            // Safe because valid tick liquidity cannot produce `i128::MIN`.
             if zero_for_one {
                 liquidity_net = -liquidity_net;
             }
@@ -687,8 +791,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
     );
 
     result.swap_delta = if zero_for_one == exact_in {
-        let amount0 = params
-            .amount
+        let amount0 = amount_specified
             .checked_sub(amount_specified_remaining)
             .ok_or(SwapSimError::I128Overflow)?
             .try_into()
@@ -702,8 +805,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         let amount0 = amount_calculated
             .try_into()
             .map_err(|_| SwapSimError::I128Overflow)?;
-        let amount1 = params
-            .amount
+        let amount1 = amount_specified
             .checked_sub(amount_specified_remaining)
             .ok_or(SwapSimError::I128Overflow)?
             .try_into()
@@ -865,6 +967,7 @@ mod tests {
             swap_fee,
             tick_spacing,
             ticks: tick_map,
+            positions: (),
         }
     }
 
@@ -891,7 +994,7 @@ mod tests {
     ) -> SwapParams {
         SwapParams {
             zero_for_one,
-            amount,
+            amount_specified: amount,
             sqrt_price_limit_x96,
         }
     }
@@ -1263,6 +1366,7 @@ mod tests {
                 tick_lower: tick(-120),
                 tick_upper: tick(120),
                 liquidity_delta: liq as i128,
+                info: None,
             })
             .expect("add should succeed");
 
@@ -1299,6 +1403,7 @@ mod tests {
                 tick_lower: tick(-120),
                 tick_upper: tick(120),
                 liquidity_delta: 1_000_000_000_000i128,
+                info: None,
             })
             .expect("add should succeed");
 
@@ -1330,6 +1435,7 @@ mod tests {
             tick_lower: tick(-120),
             tick_upper: tick(120),
             liquidity_delta: liq,
+            info: None,
         })
         .unwrap();
 
@@ -1338,6 +1444,7 @@ mod tests {
                 tick_lower: tick(-120),
                 tick_upper: tick(120),
                 liquidity_delta: -liq,
+                info: None,
             })
             .expect("remove should succeed");
 
