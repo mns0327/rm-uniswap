@@ -11,13 +11,11 @@
 //! tick stores.
 //!
 //! Read-only quote methods leave pool storage unchanged. [`Pool::swap`] runs
-//! the same math through mutable adapters, so final price, tick, liquidity,
-//! fee growth, and crossed tick fee state are reflected in pool storage.
-
-use std::sync::Arc;
+//! the same math through mutable state and tick access, so final price, tick,
+//! liquidity, fee growth, and crossed tick fee state are reflected in pool
+//! storage.
 
 use alloy::primitives::I256;
-use parking_lot::RwLock;
 use ruint::aliases::U256;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -59,7 +57,7 @@ use crate::v4::swap_math::compute_swap_step;
 #[derive(Debug)]
 pub struct Pool<P = ()> {
     /// Current pool price, tick, liquidity, and fee-growth globals.
-    pub state: Arc<RwLock<PoolState>>,
+    pub state: PoolState,
 
     /// LP fee plus any directional protocol-fee configuration.
     pub swap_fee: SwapFee,
@@ -145,9 +143,10 @@ impl<P: PositionsAccess> PoolSnapshot<P> {
 
 /// Owned, serializable pool snapshot.
 ///
-/// A snapshot never shares locks or caches with a live [`Pool`]. Treat values
-/// decoded from external data as untrusted and construct a runtime pool with
-/// [`Pool::try_from`] so all invariants are validated.
+/// A snapshot owns plain pool, tick, and position data with no shared mutable
+/// storage from the source [`Pool`]. Treat values decoded from external data as
+/// untrusted and construct a runtime pool with [`Pool::try_from`] so all
+/// invariants are validated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "P: Serialize",
@@ -171,15 +170,13 @@ pub struct PoolSnapshot<P = ()> {
 }
 
 impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
-    /// Capture an owned snapshot from the current live pool storage.
+    /// Capture an owned snapshot from the current pool storage.
     ///
-    /// The state is copied under a read lock; ticks and positions are cloned
-    /// into independent owned storage.
+    /// Pool state is copied by value, while ticks and positions are cloned into
+    /// independent owned storage.
     pub fn snapshot(&self) -> PoolSnapshot<P> {
-        let state = *self.state.read();
-
         PoolSnapshot {
-            state,
+            state: self.state.clone(),
             fee: *self.swap_fee.lp_fee(),
             protocol_fee: *self.swap_fee.protocol_fee(),
             tick_spacing: self.tick_spacing,
@@ -202,7 +199,7 @@ impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
         let swap_fee = SwapFee::new(snapshot.fee, snapshot.protocol_fee)?;
 
         Ok(Self {
-            state: Arc::new(RwLock::new(snapshot.state)),
+            state: snapshot.state,
             swap_fee,
             tick_spacing: snapshot.tick_spacing,
             ticks,
@@ -239,7 +236,10 @@ impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
         })
     }
 
-    /// Create an independent pool with fresh locks and caches.
+    /// Create an independent pool from the current validated snapshot.
+    ///
+    /// The fork owns its own state, tick storage, and position storage, so
+    /// subsequent mutations cannot affect the source pool.
     pub fn try_fork(&self) -> Result<Self, SwapSimError> {
         Self::from_snapshot(self.snapshot())
     }
@@ -282,13 +282,13 @@ impl<P: Default> Pool<P> {
         tick_spacing: TickSpacing,
     ) -> Self {
         Pool {
-            state: Arc::new(RwLock::new(PoolState {
+            state: PoolState {
                 sqrt_price_x96,
                 tick,
                 liquidity,
                 fee_growth_global0_x128: U256::ZERO,
                 fee_growth_global1_x128: U256::ZERO,
-            })),
+            },
             swap_fee,
             tick_spacing,
             ticks: TickSlab::new(tick_spacing),
@@ -382,12 +382,10 @@ impl<P: PositionsAccess> Pool<P> {
             }
         };
 
-        let mut state = self.state.write();
-
         let delta = if liquidity_delta != 0 {
-            if tick_lower <= state.tick && state.tick < tick_upper {
-                state.liquidity = Liquidity::new(
-                    state
+            if tick_lower <= self.state.tick && self.state.tick < tick_upper {
+                self.state.liquidity = Liquidity::new(
+                    self.state
                         .liquidity
                         .value()
                         .checked_add_signed(liquidity_delta)
@@ -396,10 +394,10 @@ impl<P: PositionsAccess> Pool<P> {
             }
 
             BalanceDelta::from_liquidity_principal(
-                state.tick,
+                self.state.tick,
                 tick_lower,
                 tick_upper,
-                state.sqrt_price_x96,
+                self.state.sqrt_price_x96,
                 lower_sqrt_price,
                 upper_sqrt_price,
                 liquidity_delta,
@@ -421,13 +419,11 @@ impl<P: PositionsAccess> Pool<P> {
         params: ModifyLiquidityParams,
     ) -> Result<BalanceDelta, SwapSimError> {
         check_ticks(params.tick_lower, params.tick_upper, self.tick_spacing)?;
-        let state = self.state.read();
-
         BalanceDelta::from_liquidity_principal(
-            state.tick,
+            self.state.tick,
             params.tick_lower,
             params.tick_upper,
-            state.sqrt_price_x96,
+            self.state.sqrt_price_x96,
             params.tick_lower.sqrt_price_x96(),
             params.tick_upper.sqrt_price_x96(),
             params.liquidity_delta,
@@ -445,8 +441,6 @@ impl<P: PositionsAccess> Pool<P> {
         tick_upper: TickIndex,
     ) -> Result<(U256, U256), SwapSimError> {
         check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
-        let state = self.state.read();
-
         let lower = self
             .ticks
             .get(self.ticks.indexer(tick_lower))
@@ -458,17 +452,17 @@ impl<P: PositionsAccess> Pool<P> {
             .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
             .unwrap_or((U256::ZERO, U256::ZERO));
 
-        Ok(if state.tick < tick_lower {
+        Ok(if self.state.tick < tick_lower {
             (lower.0.wrapping_sub(upper.0), lower.1.wrapping_sub(upper.1))
-        } else if state.tick >= tick_upper {
+        } else if self.state.tick >= tick_upper {
             (upper.0.wrapping_sub(lower.0), upper.1.wrapping_sub(lower.1))
         } else {
             (
-                state
+                self.state
                     .fee_growth_global0_x128
                     .wrapping_sub(lower.0)
                     .wrapping_sub(upper.0),
-                state
+                self.state
                     .fee_growth_global1_x128
                     .wrapping_sub(lower.1)
                     .wrapping_sub(upper.1),
@@ -482,8 +476,6 @@ impl<P: PositionsAccess> Pool<P> {
         liquidity_delta: i128,
         upper: bool,
     ) -> Result<SqrtPriceX96, SwapSimError> {
-        let state = self.state.read();
-
         let tick_indexer = self.ticks.indexer(tick_index);
 
         let (liquidity_gross_before, liquidity_net_before, sqrt_price_x96) =
@@ -529,9 +521,9 @@ impl<P: PositionsAccess> Pool<P> {
             .update_initialized_tick(tick_indexer, |tick_info| {
                 // Newly initialized ticks on or below the current tick start
                 // with outside fee growth set to the current global values.
-                if liquidity_gross_before.is_zero() && tick_index <= self.state.read().tick {
-                    tick_info.fee_growth_outside0_x128 = state.fee_growth_global0_x128;
-                    tick_info.fee_growth_outside1_x128 = state.fee_growth_global1_x128;
+                if liquidity_gross_before.is_zero() && tick_index <= self.state.tick {
+                    tick_info.fee_growth_outside0_x128 = self.state.fee_growth_global0_x128;
+                    tick_info.fee_growth_outside1_x128 = self.state.fee_growth_global1_x128;
                 }
 
                 tick_info.liquidity_gross = liquidity_gross_after;
@@ -546,30 +538,26 @@ impl<P: PositionsAccess> Pool<P> {
     /// The returned deltas use the caller / PoolManager perspective: negative
     /// means the caller owes the token, positive means the caller receives it.
     pub fn swap(&mut self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
-        let result = {
-            let mut state = self.state.write();
-            swap_inner(&mut *state, &mut self.ticks, &self.swap_fee, params)?
-        };
+        let result = { swap_inner(&mut self.state, &mut self.ticks, &self.swap_fee, params)? };
 
         Ok(result)
     }
 
     /// Simulate a swap without mutating pool or tick storage.
     ///
-    /// The same swap loop is used as [`Pool::swap`], but read-only adapters
-    /// discard final state writes and tick-crossing fee-growth updates.
+    /// The same swap loop is used as [`Pool::swap`], but read-only state and
+    /// tick access ignore final state writes and tick-crossing fee-growth
+    /// updates.
     pub fn quote_swap(&self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
-        let state = self.state.read();
-
-        swap_inner(&*state, &self.ticks, &self.swap_fee, params)
+        swap_inner(&self.state, &self.ticks, &self.swap_fee, params)
     }
 }
 
-/// Run the shared V4 swap loop over state and tick adapters.
+/// Run the shared V4 swap loop over pool-state and tick-store access.
 ///
-/// Mutable adapters commit final pool state and tick-crossing fee-growth
-/// updates. Read-only adapters execute the same traversal while discarding those
-/// writes, which keeps [`Pool::swap`] and [`Pool::quote_swap`] behavior aligned.
+/// Mutable access commits final pool state and tick-crossing fee-growth updates.
+/// Read-only access executes the same traversal while ignoring those writes,
+/// which keeps [`Pool::swap`] and [`Pool::quote_swap`] behavior aligned.
 fn swap_inner<T: TickAccess, S: StateAccess>(
     mut state: S,
     mut ticks: T,
@@ -957,22 +945,18 @@ mod tests {
         let swap_fee = SwapFee::new(fee, protocol_fee).expect("swap fee out of range");
 
         Pool {
-            state: Arc::new(RwLock::new(PoolState {
+            state: PoolState {
                 sqrt_price_x96,
                 tick,
                 liquidity,
                 fee_growth_global0_x128: U256::ZERO,
                 fee_growth_global1_x128: U256::ZERO,
-            })),
+            },
             swap_fee,
             tick_spacing,
             ticks: tick_map,
             positions: (),
         }
-    }
-
-    fn read_pool_state(pool: &Pool) -> PoolState {
-        *pool.state.read()
     }
 
     fn basic_pool(ticks: &[(TickIndex, TickInfo)]) -> Pool {
@@ -1011,7 +995,7 @@ mod tests {
     fn swap_zero_amount_does_nothing() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        let before = read_pool_state(&pool);
+        let before = pool.state;
 
         let result = pool
             .swap(make_params(true, exact_in(U256::ZERO), sqrt_at(-120)))
@@ -1027,14 +1011,14 @@ mod tests {
     fn swap_commits_state() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        let before = read_pool_state(&pool);
+        let before = pool.state;
         let limit = sqrt_at(-120);
 
         let result = pool
             .swap(make_params(true, exact_in(ether(1)), limit))
             .expect("swap should succeed");
 
-        let after = read_pool_state(&pool);
+        let after = pool.state;
         assert_ne!(after.sqrt_price_x96, before.sqrt_price_x96);
         assert_eq!(after.sqrt_price_x96, result.sqrt_price_x96);
         assert_eq!(after.tick, result.tick);
@@ -1045,7 +1029,7 @@ mod tests {
     fn forked_swap_does_not_change_original_pool_state() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let before = read_pool_state(&pool);
+        let before = pool.state;
         let limit = sqrt_at(-120);
         let mut fork = pool.try_fork().expect("pool snapshot should fork");
 
@@ -1053,7 +1037,7 @@ mod tests {
             .swap(make_params(true, exact_in(ether(1)), limit))
             .expect("forked swap should succeed");
 
-        let after = read_pool_state(&pool);
+        let after = pool.state;
         assert_eq!(after.sqrt_price_x96, before.sqrt_price_x96);
         assert_eq!(after.tick, before.tick);
         assert_eq!(after.liquidity, before.liquidity);
@@ -1143,7 +1127,7 @@ mod tests {
         let mut pool = basic_pool(&ticks);
         let limit = sqrt_at(-120);
 
-        let before_price = read_pool_state(&pool).sqrt_price_x96;
+        let before_price = pool.state.sqrt_price_x96;
         let result = pool
             .swap(make_params(true, exact_in(ether(1)), limit))
             .unwrap();
@@ -1158,7 +1142,7 @@ mod tests {
         let mut pool = basic_pool(&ticks);
         let limit = sqrt_at(120);
 
-        let before_price = read_pool_state(&pool).sqrt_price_x96;
+        let before_price = pool.state.sqrt_price_x96;
         let result = pool
             .swap(make_params(false, exact_in(ether(1)), limit))
             .unwrap();
@@ -1370,7 +1354,7 @@ mod tests {
             })
             .expect("add should succeed");
 
-        assert_eq!(read_pool_state(&pool).liquidity, Liquidity::new(liq));
+        assert_eq!(pool.state.liquidity, Liquidity::new(liq));
         // Liquidity delta is caller / PoolManager perspective: caller owes tokens when LP adds.
         assert!(result.delta.amount0 < 0, "caller pays token0");
         assert!(result.delta.amount1 < 0, "caller pays token1");
@@ -1408,7 +1392,7 @@ mod tests {
             .expect("add should succeed");
 
         assert_eq!(
-            read_pool_state(&pool).liquidity,
+            pool.state.liquidity,
             Liquidity::ZERO,
             "out-of-range position"
         );
@@ -1448,7 +1432,7 @@ mod tests {
             })
             .expect("remove should succeed");
 
-        assert_eq!(read_pool_state(&pool).liquidity, Liquidity::ZERO);
+        assert_eq!(pool.state.liquidity, Liquidity::ZERO);
         // Removing liquidity means the caller receives tokens back from the pool.
         assert!(result.delta.amount0 > 0, "caller receives token0");
         assert!(result.delta.amount1 > 0, "caller receives token1");
@@ -1562,8 +1546,7 @@ mod tests {
     fn rejects_invalid_pool_sqrt_price() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        pool.state.write().sqrt_price_x96 =
-            invalid_sqrt_from_u160(test_min_sqrt_price() - U160::ONE);
+        pool.state.sqrt_price_x96 = invalid_sqrt_from_u160(test_min_sqrt_price() - U160::ONE);
 
         assert_eq!(
             pool.swap(make_params(

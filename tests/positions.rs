@@ -114,14 +114,14 @@ fn newly_minted_position_does_not_collect_prior_fees() {
 fn slippage_failure_does_not_mutate_pool() {
     let owner = Address::repeat_byte(0x33);
     let manager = PositionManager::new(empty_pool());
-    let before = *manager.pool().state.read();
+    let before = manager.pool().state;
 
     assert!(
         manager
             .mint(owner, tick(-120), tick(120), 1_000_000, 0, 0)
             .is_err()
     );
-    let after = *manager.pool().state.read();
+    let after = manager.pool().state;
     assert_eq!(before.liquidity, after.liquidity);
     assert!(manager.pool().ticks.is_empty());
 }
@@ -197,7 +197,7 @@ fn v4_hook_failure_rolls_back_before_pool_mutation() {
             )
             .is_err()
     );
-    assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
+    assert_eq!(manager.pool().state.liquidity, Liquidity::ZERO);
     assert!(manager.pool().ticks.is_empty());
 }
 
@@ -231,7 +231,7 @@ fn before_hook_failure_rolls_back_before_pool_mutation() {
             .unwrap_err(),
         Error::Unauthorized
     );
-    assert_eq!(manager.pool().state.read().liquidity, Liquidity::ZERO);
+    assert_eq!(manager.pool().state.liquidity, Liquidity::ZERO);
     assert!(manager.pool().ticks.is_empty());
 }
 
