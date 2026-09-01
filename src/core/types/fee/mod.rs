@@ -27,6 +27,8 @@ pub struct Fee {
 }
 
 impl Fee {
+    pub const ZERO: Self = Self::new(0).unwrap();
+
     /// Attempts to construct a `Fee` from raw pips.
     ///
     /// Returns `None` if `fee_pips` is greater than `MAX_FEE`. A value equal

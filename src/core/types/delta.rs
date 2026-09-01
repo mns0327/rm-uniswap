@@ -9,6 +9,34 @@ use crate::{
     v4::Liquidity,
 };
 
+/// Swap amount adjustments returned by a `before_swap` hook.
+///
+/// V4 splits the hook's pre-swap adjustment into the specified side of the
+/// swap and the unspecified side. The adapter later maps those two signed
+/// values onto token0/token1 according to swap direction and exact
+/// input/output mode.
+pub struct BeforeSwapDelta {
+    /// Adjustment to `SwapParams::amount_specified` before swap execution.
+    ///
+    /// Negative values increase exact-input size or reduce exact-output target;
+    /// positive values reduce exact-input size or increase exact-output target.
+    pub specified_delta: i128,
+
+    /// Hook-owned delta for the opposite side of the swap.
+    ///
+    /// This is accumulated with the hook's `after_swap` return value before the
+    /// final hook `BalanceDelta` is derived.
+    pub unspecified_delta: i128,
+}
+
+impl BeforeSwapDelta {
+    /// No hook adjustment.
+    pub const ZERO: Self = Self {
+        specified_delta: 0,
+        unspecified_delta: 0,
+    };
+}
+
 /// Signed token delta using Uniswap V4's **caller / PoolManager-perspective**
 /// `BalanceDelta` convention, matching the convention used by the current
 /// swap simulator.
@@ -148,6 +176,37 @@ impl BalanceDelta {
         };
 
         if raw < 0 { raw.unsigned_abs() } else { 0 }
+    }
+
+    /// Subtracts another signed delta, returning `I128Overflow` on overflow.
+    ///
+    /// This is used when hook-owned deltas are removed from a pool-produced
+    /// operation delta to derive the caller-settled remainder.
+    #[inline]
+    pub fn checked_sub(&self, other: &Self) -> Result<Self, crate::Error> {
+        let amount0 = self
+            .amount0
+            .checked_sub(other.amount0)
+            .ok_or(crate::Error::I128Overflow)?;
+        let amount1 = self
+            .amount1
+            .checked_sub(other.amount1)
+            .ok_or(crate::Error::I128Overflow)?;
+        Ok(Self { amount0, amount1 })
+    }
+
+    /// Adds another signed delta, returning `I128Overflow` on overflow.
+    #[inline]
+    pub fn checked_add(&self, other: &Self) -> Result<Self, crate::Error> {
+        let amount0 = self
+            .amount0
+            .checked_add(other.amount0)
+            .ok_or(crate::Error::I128Overflow)?;
+        let amount1 = self
+            .amount1
+            .checked_add(other.amount1)
+            .ok_or(crate::Error::I128Overflow)?;
+        Ok(Self { amount0, amount1 })
     }
 }
 
