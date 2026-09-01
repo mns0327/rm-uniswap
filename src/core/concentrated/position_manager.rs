@@ -280,9 +280,9 @@ impl PositionManager {
             let growth = if liquidity_delta > 0 {
                 let mut fork = ConcentratedPool::from_snapshot(pool.snapshot())?;
                 fork.modify_liquidity(params)?;
-                fork.fee_growth_inside(snapshot.tick_lower, snapshot.tick_upper)?
+                fee_growth_inside_for_position(&fork, snapshot.tick_lower, snapshot.tick_upper)?
             } else {
-                pool.fee_growth_inside(snapshot.tick_lower, snapshot.tick_upper)?
+                fee_growth_inside_for_position(&pool, snapshot.tick_lower, snapshot.tick_upper)?
             };
 
             (quoted, growth.0, growth.1)
@@ -419,4 +419,27 @@ pub fn negative_delta_to_u128(value: i128) -> Result<u128, Error> {
         return Err(Error::AmountOverflow);
     }
     Ok(value.unsigned_abs())
+}
+
+fn fee_growth_inside_for_position(
+    pool: &ConcentratedPool,
+    tick_lower: TickIndex,
+    tick_upper: TickIndex,
+) -> Result<(U256, U256), Error> {
+    let (lower0, lower1) = tick_fee_growth_outside(pool, tick_lower);
+    let (upper0, upper1) = tick_fee_growth_outside(pool, tick_upper);
+
+    pool.fee_growth_inside(tick_lower, tick_upper, lower0, lower1, upper0, upper1)
+}
+
+fn tick_fee_growth_outside(pool: &ConcentratedPool, tick: TickIndex) -> (U256, U256) {
+    pool.ticks
+        .get(pool.ticks.indexer(tick))
+        .map(|tick_info| {
+            (
+                tick_info.fee_growth_outside0_x128,
+                tick_info.fee_growth_outside1_x128,
+            )
+        })
+        .unwrap_or((U256::ZERO, U256::ZERO))
 }

@@ -333,30 +333,56 @@ impl<P: PositionsAccess> Pool<P> {
 
         check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
 
-        let fee_growth_before_removal = if P::ENABLE && info.is_some() && liquidity_delta <= 0 {
-            Some(self.fee_growth_inside(tick_lower, tick_upper)?)
-        } else {
-            None
-        };
-
         let mut lower_sqrt_price: SqrtPriceX96 = SqrtPriceX96::MIN;
         let mut upper_sqrt_price: SqrtPriceX96 = SqrtPriceX96::MIN;
 
+        let lower_fee_growth_outside0_x128;
+        let lower_fee_growth_outside1_x128;
+        let upper_fee_growth_outside0_x128;
+        let upper_fee_growth_outside1_x128;
+
         if liquidity_delta != 0 {
-            lower_sqrt_price = self.update_tick(tick_lower, liquidity_delta, false)?;
-            upper_sqrt_price = self.update_tick(tick_upper, liquidity_delta, true)?;
-        };
+            (
+                lower_sqrt_price,
+                lower_fee_growth_outside0_x128,
+                lower_fee_growth_outside1_x128,
+            ) = self.update_tick(tick_lower, liquidity_delta, false)?;
+            (
+                upper_sqrt_price,
+                upper_fee_growth_outside0_x128,
+                upper_fee_growth_outside1_x128,
+            ) = self.update_tick(tick_upper, liquidity_delta, true)?;
+        } else {
+            (
+                lower_fee_growth_outside0_x128,
+                lower_fee_growth_outside1_x128,
+            ) = self
+                .ticks
+                .get(self.ticks.indexer(tick_lower))
+                .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
+                .unwrap_or((U256::ZERO, U256::ZERO));
+            (
+                upper_fee_growth_outside0_x128,
+                upper_fee_growth_outside1_x128,
+            ) = self
+                .ticks
+                .get(self.ticks.indexer(tick_upper))
+                .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
+                .unwrap_or((U256::ZERO, U256::ZERO));
+        }
 
         let fee_delta = {
             if P::ENABLE
                 && let Some(position_info) = info
             {
-                let (fee_growth_inside0_x128, fee_growth_inside1_x128) =
-                    if let Some(fee_growth_inside) = fee_growth_before_removal {
-                        fee_growth_inside
-                    } else {
-                        self.fee_growth_inside(tick_lower, tick_upper)?
-                    };
+                let (fee_growth_inside0_x128, fee_growth_inside1_x128) = self.fee_growth_inside(
+                    tick_lower,
+                    tick_upper,
+                    lower_fee_growth_outside0_x128,
+                    lower_fee_growth_outside1_x128,
+                    upper_fee_growth_outside0_x128,
+                    upper_fee_growth_outside1_x128,
+                )?;
 
                 let position_idx = PositionIndex {
                     owner: position_info.owner,
@@ -439,33 +465,35 @@ impl<P: PositionsAccess> Pool<P> {
         &self,
         tick_lower: TickIndex,
         tick_upper: TickIndex,
+        tick_lower_fee_growth_outside0_x128: U256,
+        tick_lower_fee_growth_outside1_x128: U256,
+        tick_upper_fee_growth_outside0_x128: U256,
+        tick_upper_fee_growth_outside1_x128: U256,
     ) -> Result<(U256, U256), SwapSimError> {
-        check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
-        let lower = self
-            .ticks
-            .get(self.ticks.indexer(tick_lower))
-            .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
-            .unwrap_or((U256::ZERO, U256::ZERO));
-        let upper = self
-            .ticks
-            .get(self.ticks.indexer(tick_upper))
-            .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
-            .unwrap_or((U256::ZERO, U256::ZERO));
-
         Ok(if self.state.tick < tick_lower {
-            (lower.0.wrapping_sub(upper.0), lower.1.wrapping_sub(upper.1))
+            (
+                tick_lower_fee_growth_outside0_x128
+                    .wrapping_sub(tick_upper_fee_growth_outside0_x128),
+                tick_lower_fee_growth_outside1_x128
+                    .wrapping_sub(tick_upper_fee_growth_outside1_x128),
+            )
         } else if self.state.tick >= tick_upper {
-            (upper.0.wrapping_sub(lower.0), upper.1.wrapping_sub(lower.1))
+            (
+                tick_upper_fee_growth_outside0_x128
+                    .wrapping_sub(tick_lower_fee_growth_outside0_x128),
+                tick_upper_fee_growth_outside1_x128
+                    .wrapping_sub(tick_lower_fee_growth_outside1_x128),
+            )
         } else {
             (
                 self.state
                     .fee_growth_global0_x128
-                    .wrapping_sub(lower.0)
-                    .wrapping_sub(upper.0),
+                    .wrapping_sub(tick_lower_fee_growth_outside0_x128)
+                    .wrapping_sub(tick_upper_fee_growth_outside0_x128),
                 self.state
                     .fee_growth_global1_x128
-                    .wrapping_sub(lower.1)
-                    .wrapping_sub(upper.1),
+                    .wrapping_sub(tick_lower_fee_growth_outside1_x128)
+                    .wrapping_sub(tick_upper_fee_growth_outside1_x128),
             )
         })
     }
@@ -475,22 +503,29 @@ impl<P: PositionsAccess> Pool<P> {
         tick_index: TickIndex,
         liquidity_delta: i128,
         upper: bool,
-    ) -> Result<SqrtPriceX96, SwapSimError> {
+    ) -> Result<(SqrtPriceX96, U256, U256), SwapSimError> {
         let tick_indexer = self.ticks.indexer(tick_index);
 
-        let (liquidity_gross_before, liquidity_net_before, sqrt_price_x96) =
-            if let Some(tick_info) = self.ticks.get(tick_indexer) {
-                (
-                    tick_info.liquidity_gross,
-                    tick_info.liquidity_net,
-                    tick_info.sqrt_price_x96(),
-                )
-            } else {
-                let sqrt_price = tick_index.sqrt_price_x96();
-                self.ticks
-                    .insert(tick_indexer, TickInfo::new(tick_index, sqrt_price))?;
-                (Liquidity::ZERO, 0, sqrt_price)
-            };
+        let (
+            liquidity_gross_before,
+            liquidity_net_before,
+            sqrt_price_x96,
+            fee_growth_outside0_x128,
+            fee_growth_outside1_x128,
+        ) = if let Some(tick_info) = self.ticks.get(tick_indexer) {
+            (
+                tick_info.liquidity_gross,
+                tick_info.liquidity_net,
+                tick_info.sqrt_price_x96(),
+                tick_info.fee_growth_outside0_x128,
+                tick_info.fee_growth_outside1_x128,
+            )
+        } else {
+            let sqrt_price = tick_index.sqrt_price_x96();
+            self.ticks
+                .insert(tick_indexer, TickInfo::new(tick_index, sqrt_price))?;
+            (Liquidity::ZERO, 0, sqrt_price, U256::ZERO, U256::ZERO)
+        };
 
         let liquidity_gross_after = Liquidity::new(
             liquidity_gross_before
@@ -514,7 +549,11 @@ impl<P: PositionsAccess> Pool<P> {
 
         if liquidity_gross_after.is_zero() {
             self.ticks.remove(tick_indexer);
-            return Ok(sqrt_price_x96);
+            return Ok((
+                sqrt_price_x96,
+                fee_growth_outside0_x128,
+                fee_growth_outside1_x128,
+            ));
         }
 
         self.ticks
@@ -529,7 +568,11 @@ impl<P: PositionsAccess> Pool<P> {
                 tick_info.liquidity_gross = liquidity_gross_after;
                 tick_info.liquidity_net = liquidity_net;
 
-                Ok(tick_info.sqrt_price_x96())
+                Ok((
+                    tick_info.sqrt_price_x96(),
+                    tick_info.fee_growth_outside0_x128,
+                    tick_info.fee_growth_outside1_x128,
+                ))
             })
     }
 
