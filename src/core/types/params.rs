@@ -56,20 +56,6 @@ pub struct ModifyLiquidityParams {
     /// Signed liquidity delta. Positive adds liquidity, negative removes it.
     pub liquidity_delta: i128,
 
-    /// Optional position identity used for fee-growth checkpoint accounting.
-    ///
-    /// `None` keeps the operation at the pool/tick layer, which is useful for
-    /// quote-only paths or callers that do not maintain a position store.
-    pub info: Option<PositionInfo>,
-}
-
-/// Position identity for liquidity updates that touch position accounting.
-///
-/// The pair maps directly to Uniswap v4's owner and salt fields. Together with
-/// the lower and upper ticks from [`ModifyLiquidityParams`], it forms the
-/// position key used for fee-growth checkpoints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PositionInfo {
     /// Account or manager address that owns the position.
     pub owner: Address,
 

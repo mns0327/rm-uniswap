@@ -328,7 +328,8 @@ impl<P: PositionsAccess> Pool<P> {
             tick_lower,
             tick_upper,
             liquidity_delta,
-            info,
+            owner,
+            salt,
         } = params;
 
         check_ticks(tick_lower, tick_upper, self.tick_spacing)?;
@@ -372,9 +373,7 @@ impl<P: PositionsAccess> Pool<P> {
         }
 
         let fee_delta = {
-            if P::ENABLE
-                && let Some(position_info) = info
-            {
+            if P::ENABLE {
                 let (fee_growth_inside0_x128, fee_growth_inside1_x128) = self.fee_growth_inside(
                     tick_lower,
                     tick_upper,
@@ -385,10 +384,10 @@ impl<P: PositionsAccess> Pool<P> {
                 )?;
 
                 let position_idx = PositionIndex {
-                    owner: position_info.owner,
+                    owner: owner,
                     tick_lower: tick_lower,
                     tick_upper: tick_upper,
-                    salt: position_info.salt,
+                    salt: salt,
                 };
 
                 self.positions.update_position(position_idx, |position| {
@@ -882,7 +881,7 @@ mod tests {
     use crate::core::{math::tick::get_sqrt_price_at_tick, types::tick::TickIndex};
 
     use super::*;
-    use alloy::primitives::Sign;
+    use alloy::primitives::{Address, B256, Sign};
     use proptest::prelude::*;
     use ruint::aliases::U160;
 
@@ -1012,6 +1011,20 @@ mod tests {
             tick_spacing_60(),
             ticks.iter().copied(),
         )
+    }
+
+    fn modify_params(
+        tick_lower: TickIndex,
+        tick_upper: TickIndex,
+        liquidity_delta: i128,
+    ) -> ModifyLiquidityParams {
+        ModifyLiquidityParams {
+            tick_lower,
+            tick_upper,
+            liquidity_delta,
+            owner: Address::ZERO,
+            salt: B256::ZERO,
+        }
     }
 
     fn make_params(
@@ -1389,12 +1402,7 @@ mod tests {
         let liq = 1_000_000_000_000u128;
 
         let result = pool
-            .modify_liquidity(ModifyLiquidityParams {
-                tick_lower: tick(-120),
-                tick_upper: tick(120),
-                liquidity_delta: liq as i128,
-                info: None,
-            })
+            .modify_liquidity(modify_params(tick(-120), tick(120), liq as i128))
             .expect("add should succeed");
 
         assert_eq!(pool.state.liquidity, Liquidity::new(liq));
@@ -1426,12 +1434,7 @@ mod tests {
         );
 
         let result = pool
-            .modify_liquidity(ModifyLiquidityParams {
-                tick_lower: tick(-120),
-                tick_upper: tick(120),
-                liquidity_delta: 1_000_000_000_000i128,
-                info: None,
-            })
+            .modify_liquidity(modify_params(tick(-120), tick(120), 1_000_000_000_000i128))
             .expect("add should succeed");
 
         assert_eq!(
@@ -1458,21 +1461,11 @@ mod tests {
         );
         let liq = 1_000_000_000_000i128;
 
-        pool.modify_liquidity(ModifyLiquidityParams {
-            tick_lower: tick(-120),
-            tick_upper: tick(120),
-            liquidity_delta: liq,
-            info: None,
-        })
-        .unwrap();
+        pool.modify_liquidity(modify_params(tick(-120), tick(120), liq))
+            .unwrap();
 
         let result = pool
-            .modify_liquidity(ModifyLiquidityParams {
-                tick_lower: tick(-120),
-                tick_upper: tick(120),
-                liquidity_delta: -liq,
-                info: None,
-            })
+            .modify_liquidity(modify_params(tick(-120), tick(120), -liq))
             .expect("remove should succeed");
 
         assert_eq!(pool.state.liquidity, Liquidity::ZERO);

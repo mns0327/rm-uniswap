@@ -57,7 +57,7 @@ pub struct PositionState {
 /// The wrapper keeps the storage type explicit while allowing callers to depend
 /// on [`PositionsAccess`] instead of a concrete hash-map implementation.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Positions(pub AHashMap<PositionIndex, PositionState>);
 
 /// Abstraction over optional position storage.

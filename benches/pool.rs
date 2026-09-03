@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use alloy::primitives::I256;
+use alloy::primitives::{Address, B256, I256};
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use rm_uniswap::v4::{ModifyLiquidityParams, Pool, PoolTicks, SwapParams, TickIndex, TickSpacing};
 use ruint::aliases::U256;
@@ -138,7 +138,8 @@ fn bench_pool(c: &mut Criterion) {
                     tick_lower: black_box(tick_lower),
                     tick_upper: black_box(tick_upper),
                     liquidity_delta: black_box(1_000_000_000_000_000_000i128),
-                    info: None,
+                    owner: Address::ZERO,
+                    salt: B256::ZERO,
                 })
                 .unwrap()
             },

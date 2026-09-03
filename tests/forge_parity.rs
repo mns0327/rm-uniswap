@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 use alloy::primitives::{Address, B256, I256};
 use rm_uniswap::v4::{
     BalanceDelta, Error, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot,
-    PositionInfo as ModifyPositionInfo, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
+    ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
     positions::{PositionIndex, Positions},
 };
 use ruint::aliases::U256;
@@ -640,10 +640,8 @@ fn modify_position(
         tick_lower: position.tick_lower,
         tick_upper: position.tick_upper,
         liquidity_delta,
-        info: Some(ModifyPositionInfo {
-            owner: position.owner,
-            salt: position.salt,
-        }),
+        owner: position.owner,
+        salt: position.salt,
     };
     let quoted = pool.quote_modify_liquidity(params)?;
     validate_slippage(

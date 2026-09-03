@@ -13,16 +13,15 @@ pub use crate::core::math::{
     full as full_math, sqrt_price as sqrt_price_math, swap as swap_math, swap::SwapStep,
     tick as tick_math,
 };
-pub use crate::core::types::delta::BalanceDelta;
+pub use crate::core::types::delta::{BalanceDelta, BeforeSwapDelta};
 pub use crate::core::types::fee::Fee;
 pub use crate::core::types::fee::protocol_fee::ProtocolFee;
 pub use crate::core::types::fee::swap_fee::SwapFee;
-pub use crate::core::types::hooks::Hooks;
+pub use crate::core::types::hooks::{Hooks, HooksImpl};
 pub use crate::core::types::liquidity::Liquidity;
 pub use crate::core::types::nonzero::NonZeroLiquidity;
 pub use crate::core::types::params::{
-    ModifyLiquidityParams, ModifyLiquidityResult, PositionInfo, SwapParams, SwapResult,
-    SwapSimulationResult,
+    ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapResult, SwapSimulationResult,
 };
 pub use crate::core::types::pool_key::{PoolId, PoolKey};
 pub use crate::core::types::pool_state::PoolState;
@@ -33,6 +32,6 @@ pub use crate::core::types::{PoolTicksSnapshot, TickInfo, TickInfoSnapshot};
 
 #[cfg(feature = "positions")]
 pub mod positions {
+    pub use crate::core::concentrated::pool_manager::*;
     pub use crate::core::concentrated::position::{PositionIndex, Positions};
-    pub use crate::core::concentrated::position_manager::*;
 }

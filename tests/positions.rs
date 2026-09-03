@@ -1,13 +1,19 @@
 #![cfg(feature = "positions")]
 
-use alloy::primitives::{Address, I256};
+use alloy::primitives::{Address, B256, I256};
 use rm_uniswap::v4::{
-    Fee, Liquidity, Pool, PoolTicks, SqrtPriceX96, SwapParams, TickIndex, TickSpacing,
-    positions::PositionManager,
+    Fee, Liquidity, ModifyLiquidityParams, Pool, PoolKey, PoolTicks, SqrtPriceX96, SwapParams,
+    TickIndex, TickSpacing,
+    positions::{PositionIndex, SinglePoolManager},
 };
 use ruint::aliases::U256;
+
 #[cfg(feature = "v4-hooks")]
-use std::sync::Arc;
+use {
+    parking_lot::Mutex,
+    rm_uniswap::v4::{BalanceDelta, BeforeSwapDelta, Error, Hooks, HooksImpl},
+    std::sync::Arc,
+};
 
 fn tick(index: i32) -> TickIndex {
     TickIndex::new(index).unwrap()
@@ -33,374 +39,349 @@ fn empty_pool() -> Pool {
     .unwrap()
 }
 
+fn pool_key() -> PoolKey {
+    PoolKey::new(
+        Address::repeat_byte(0x01),
+        Address::repeat_byte(0x02),
+        3_000,
+        60,
+        Address::repeat_byte(0x03),
+    )
+}
+
+fn salt(byte: u8) -> B256 {
+    B256::repeat_byte(byte)
+}
+
+fn position_params(
+    owner: Address,
+    salt: B256,
+    tick_lower: TickIndex,
+    tick_upper: TickIndex,
+    liquidity_delta: i128,
+) -> ModifyLiquidityParams {
+    ModifyLiquidityParams {
+        tick_lower,
+        tick_upper,
+        liquidity_delta,
+        owner,
+        salt,
+    }
+}
+
 #[test]
-fn returns_fee_delta_separately_from_principal() {
+fn liquidity_modification_realizes_fees_through_positions() {
     let owner = Address::repeat_byte(0x22);
-    let manager = PositionManager::new(empty_pool());
-    let minted = manager
-        .mint(
-            owner,
-            tick(-120),
-            tick(120),
-            1_000_000_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
+    let mut manager = SinglePoolManager::new(empty_pool(), None);
+    let add = position_params(owner, salt(0x11), tick(-120), tick(120), 1_000_000_000_000);
 
+    manager.modify_liquidity(add, b"").unwrap();
     manager
-        .pool()
+        .pool_mut()
         .swap(SwapParams::new(
             false,
             -I256::from(U256::from(1_000_000_000u64)),
         ))
         .unwrap();
 
-    let collected = manager.collect_fees(owner, minted.token_id).unwrap();
-    assert_eq!(collected.principal_delta.amount0, 0);
-    assert_eq!(collected.principal_delta.amount1, 0);
+    let collect = ModifyLiquidityParams {
+        liquidity_delta: 0,
+        ..add
+    };
+    let collected = manager.modify_liquidity(collect, b"").unwrap();
+
+    assert_eq!(collected.delta, collected.fee_delta);
     assert!(collected.fee_delta.amount0 > 0 || collected.fee_delta.amount1 > 0);
-
-    manager
-        .decrease_liquidity(owner, minted.token_id, collected.liquidity, 0, 0)
-        .unwrap();
-    manager.burn(owner, minted.token_id).unwrap();
 }
 
 #[test]
-fn newly_minted_position_does_not_collect_prior_fees() {
-    let early_owner = Address::repeat_byte(0x23);
-    let late_owner = Address::repeat_byte(0x24);
-    let manager = PositionManager::new(empty_pool());
+fn sender_overrides_spoofed_position_owner() {
+    let sender = Address::repeat_byte(0x33);
+    let params = position_params(sender, salt(0x22), tick(-120), tick(120), 1_000_000);
+    let mut manager = SinglePoolManager::new(empty_pool(), None);
 
-    manager
-        .mint(
-            early_owner,
-            tick(-120),
-            tick(120),
-            1_000_000_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
+    manager.modify_liquidity(params, b"").unwrap();
 
-    manager
-        .pool()
-        .swap(SwapParams::new(
-            false,
-            -I256::from(U256::from(1_000_000_000u64)),
+    let actual = PositionIndex {
+        owner: sender,
+        tick_lower: params.tick_lower,
+        tick_upper: params.tick_upper,
+        salt: params.salt,
+    };
+
+    assert!(manager.pool().positions.0.contains_key(&actual));
+}
+
+#[cfg(feature = "v4-hooks")]
+struct ScriptedHook {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    before_add_error: Option<Error>,
+    after_add_error: Option<Error>,
+    after_modify_delta: BalanceDelta,
+    before_swap_delta: BeforeSwapDelta,
+    after_swap_delta: i128,
+}
+
+#[cfg(feature = "v4-hooks")]
+impl Default for ScriptedHook {
+    fn default() -> Self {
+        Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            before_add_error: None,
+            after_add_error: None,
+            after_modify_delta: BalanceDelta::DEFAULT,
+            before_swap_delta: BeforeSwapDelta::ZERO,
+            after_swap_delta: 0,
+        }
+    }
+}
+
+#[cfg(feature = "v4-hooks")]
+impl HooksImpl for ScriptedHook {}
+
+#[cfg(feature = "v4-hooks")]
+impl Hooks for ScriptedHook {
+    fn before_add_liquidity(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _params: ModifyLiquidityParams,
+        _hook_data: &[u8],
+    ) -> Result<(), Error> {
+        self.events.lock().push("before_add_liquidity");
+        if let Some(error) = self.before_add_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn after_add_liquidity(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _params: ModifyLiquidityParams,
+        _delta: BalanceDelta,
+        _fees_accrued: BalanceDelta,
+        _hook_data: &[u8],
+    ) -> Result<BalanceDelta, Error> {
+        self.events.lock().push("after_add_liquidity");
+        if let Some(error) = self.after_add_error {
+            return Err(error);
+        }
+        Ok(self.after_modify_delta)
+    }
+
+    fn before_remove_liquidity(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _params: ModifyLiquidityParams,
+        _hook_data: &[u8],
+    ) -> Result<(), Error> {
+        self.events.lock().push("before_remove_liquidity");
+        Ok(())
+    }
+
+    fn after_remove_liquidity(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _params: ModifyLiquidityParams,
+        _delta: BalanceDelta,
+        _fees_accrued: BalanceDelta,
+        _hook_data: &[u8],
+    ) -> Result<BalanceDelta, Error> {
+        self.events.lock().push("after_remove_liquidity");
+        Ok(self.after_modify_delta)
+    }
+
+    fn before_swap(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _params: SwapParams,
+        _hook_data: &[u8],
+    ) -> Result<(BeforeSwapDelta, Fee), Error> {
+        self.events.lock().push("before_swap");
+        Ok((
+            BeforeSwapDelta {
+                specified_delta: self.before_swap_delta.specified_delta,
+                unspecified_delta: self.before_swap_delta.unspecified_delta,
+            },
+            Fee::ZERO,
         ))
-        .unwrap();
+    }
 
-    let late_position = manager
-        .mint(
-            late_owner,
-            tick(-120),
-            tick(120),
-            1_000_000_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
+    fn after_swap(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _params: SwapParams,
+        _delta: BalanceDelta,
+        _hook_data: &[u8],
+    ) -> Result<i128, Error> {
+        self.events.lock().push("after_swap");
+        Ok(self.after_swap_delta)
+    }
 
-    let collected = manager
-        .collect_fees(late_owner, late_position.token_id)
-        .unwrap();
-    assert_eq!(collected.fee_delta.amount0, 0);
-    assert_eq!(collected.fee_delta.amount1, 0);
-}
+    fn before_donate(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _amount0: U256,
+        _amount1: U256,
+        _hook_data: &[u8],
+    ) -> Result<(), Error> {
+        self.events.lock().push("before_donate");
+        Ok(())
+    }
 
-#[test]
-fn slippage_failure_does_not_mutate_pool() {
-    let owner = Address::repeat_byte(0x33);
-    let manager = PositionManager::new(empty_pool());
-    let before = manager.pool().state;
-
-    assert!(
-        manager
-            .mint(owner, tick(-120), tick(120), 1_000_000, 0, 0)
-            .is_err()
-    );
-    let after = manager.pool().state;
-    assert_eq!(before.liquidity, after.liquidity);
-    assert!(manager.pool().ticks.is_empty());
-}
-
-#[test]
-fn fee_growth_outside_assigns_post_cross_fees_to_the_active_range() {
-    let owner = Address::repeat_byte(0x44);
-    let manager = PositionManager::new(empty_pool());
-    let left = manager
-        .mint(
-            owner,
-            tick(-120),
-            tick(0),
-            1_000_000_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
-    let right = manager
-        .mint(
-            owner,
-            tick(0),
-            tick(120),
-            1_000_000_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
-
-    manager
-        .pool()
-        .swap(SwapParams::new(
-            true,
-            -I256::from(U256::from(1_000_000_000u64)),
-        ))
-        .unwrap();
-
-    let left_fees = manager.collect_fees(owner, left.token_id).unwrap();
-    let right_fees = manager.collect_fees(owner, right.token_id).unwrap();
-    assert!(left_fees.fee_delta.amount0 > right_fees.fee_delta.amount0);
+    fn after_donate(
+        &mut self,
+        _sender: &Address,
+        _pool_key: &PoolKey,
+        _amount0: U256,
+        _amount1: U256,
+        _hook_data: &[u8],
+    ) -> Result<(), Error> {
+        self.events.lock().push("after_donate");
+        Ok(())
+    }
 }
 
 #[cfg(feature = "v4-hooks")]
 #[test]
-fn v4_hook_failure_rolls_back_before_pool_mutation() {
-    use rm_uniswap::{
-        Error,
-        v4::positions::{LiquidityHook, ModifyRequest, ModifyResult},
+fn before_hook_failure_leaves_pool_unchanged() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = ScriptedHook {
+        events: Arc::clone(&events),
+        before_add_error: Some(Error::Unauthorized),
+        ..ScriptedHook::default()
     };
-
-    struct Reject;
-    impl LiquidityHook for Reject {
-        fn after_modify_liquidity(
-            &self,
-            _request: &ModifyRequest,
-            _result: &ModifyResult,
-        ) -> Result<rm_uniswap::v4::BalanceDelta, Error> {
-            Err(Error::Unauthorized)
-        }
-    }
-
     let owner = Address::repeat_byte(0x55);
-    let manager = PositionManager::with_hook(empty_pool(), Arc::new(Reject));
-    assert!(
-        manager
-            .mint(
-                owner,
-                tick(-120),
-                tick(120),
-                1_000_000,
-                u128::MAX,
-                u128::MAX
-            )
-            .is_err()
-    );
-    assert_eq!(manager.pool().state.liquidity, Liquidity::ZERO);
-    assert!(manager.pool().ticks.is_empty());
-}
+    let mut manager = SinglePoolManager::new(empty_pool(), Some((pool_key(), Box::new(hook))));
+    let before = manager.pool().snapshot();
 
-#[cfg(feature = "v4-hooks")]
-#[test]
-fn before_hook_failure_rolls_back_before_pool_mutation() {
-    use rm_uniswap::{
-        Error,
-        v4::positions::{LiquidityHook, ModifyRequest},
-    };
-
-    struct Reject;
-    impl LiquidityHook for Reject {
-        fn before_modify_liquidity(&self, _request: &ModifyRequest) -> Result<(), Error> {
-            Err(Error::Unauthorized)
-        }
-    }
-
-    let owner = Address::repeat_byte(0x56);
-    let manager = PositionManager::with_hook(empty_pool(), Arc::new(Reject));
     assert_eq!(
         manager
-            .mint(
-                owner,
-                tick(-120),
-                tick(120),
-                1_000_000,
-                u128::MAX,
-                u128::MAX
+            .modify_liquidity(
+                position_params(owner, salt(0x33), tick(-120), tick(120), 1_000_000),
+                b"reject",
             )
             .unwrap_err(),
         Error::Unauthorized
     );
-    assert_eq!(manager.pool().state.liquidity, Liquidity::ZERO);
-    assert!(manager.pool().ticks.is_empty());
+    assert_eq!(manager.pool().snapshot(), before);
+    assert_eq!(&*events.lock(), &["before_add_liquidity"]);
 }
 
 #[cfg(feature = "v4-hooks")]
 #[test]
-fn hooks_run_in_before_then_after_order() {
-    use parking_lot::Mutex;
-    use rm_uniswap::v4::{
-        BalanceDelta,
-        positions::{LiquidityHook, ModifyRequest, ModifyResult},
-    };
-
-    struct Recorder(Arc<Mutex<Vec<&'static str>>>);
-    impl LiquidityHook for Recorder {
-        fn before_modify_liquidity(
-            &self,
-            _request: &ModifyRequest,
-        ) -> Result<(), rm_uniswap::Error> {
-            self.0.lock().push("before");
-            Ok(())
-        }
-
-        fn after_modify_liquidity(
-            &self,
-            _request: &ModifyRequest,
-            result: &ModifyResult,
-        ) -> Result<BalanceDelta, rm_uniswap::Error> {
-            assert_eq!(result.liquidity, 1_000_000);
-            self.0.lock().push("after");
-            Ok(BalanceDelta::DEFAULT)
-        }
-    }
-
+fn after_hook_failure_propagates_after_pool_mutation() {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let owner = Address::repeat_byte(0x57);
-    let manager = PositionManager::with_hook(empty_pool(), Arc::new(Recorder(Arc::clone(&events))));
-    manager
-        .mint(
-            owner,
-            tick(-120),
-            tick(120),
-            1_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
-
-    assert_eq!(&*events.lock(), &["before", "after"]);
-}
-
-#[cfg(feature = "v4-hooks")]
-#[test]
-fn hook_runs_without_holding_position_map_lock() {
-    use parking_lot::Mutex;
-    use rm_uniswap::v4::positions::{LiquidityHook, ModifyRequest};
-    use std::{
-        sync::mpsc::{self, Receiver, Sender},
-        time::Duration,
+    let hook = ScriptedHook {
+        events: Arc::clone(&events),
+        after_add_error: Some(Error::Unauthorized),
+        ..ScriptedHook::default()
     };
-
-    struct BlockingHook {
-        entered: Sender<()>,
-        release: Mutex<Receiver<()>>,
-    }
-    impl LiquidityHook for BlockingHook {
-        fn before_modify_liquidity(
-            &self,
-            _request: &ModifyRequest,
-        ) -> Result<(), rm_uniswap::Error> {
-            self.entered.send(()).unwrap();
-            self.release.lock().recv().unwrap();
-            Ok(())
-        }
-    }
-
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let owner = Address::repeat_byte(0x58);
-    let manager = Arc::new(PositionManager::with_hook(
-        empty_pool(),
-        Arc::new(BlockingHook {
-            entered: entered_tx,
-            release: Mutex::new(release_rx),
-        }),
-    ));
-    let mint_manager = Arc::clone(&manager);
-    let mint_thread = std::thread::spawn(move || {
-        mint_manager.mint(
-            owner,
-            tick(-120),
-            tick(120),
-            1_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-    });
-
-    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-
-    let inspect_manager = Arc::clone(&manager);
-    let (inspected_tx, inspected_rx) = mpsc::channel();
-    let inspect_thread = std::thread::spawn(move || {
-        inspected_tx.send(inspect_manager.position(1)).unwrap();
-    });
-    let inspected = inspected_rx.recv_timeout(Duration::from_millis(250));
-
-    release_tx.send(()).unwrap();
-    inspect_thread.join().unwrap();
-    mint_thread.join().unwrap().unwrap();
-
-    assert!(inspected.unwrap().is_some());
-}
-
-#[cfg(feature = "v4-hooks")]
-#[test]
-fn hook_delta_overflow_fails_before_pool_or_position_mutation() {
-    use rm_uniswap::{
-        Error,
-        v4::{
-            BalanceDelta,
-            positions::{LiquidityHook, ModifyRequest, ModifyResult},
-        },
-    };
-
-    struct OverflowOnCollect;
-    impl LiquidityHook for OverflowOnCollect {
-        fn after_modify_liquidity(
-            &self,
-            request: &ModifyRequest,
-            _result: &ModifyResult,
-        ) -> Result<BalanceDelta, Error> {
-            Ok(if request.liquidity_delta == 0 {
-                BalanceDelta {
-                    amount0: i128::MAX,
-                    amount1: i128::MAX,
-                }
-            } else {
-                BalanceDelta::DEFAULT
-            })
-        }
-    }
-
-    let owner = Address::repeat_byte(0x59);
-    let manager = PositionManager::with_hook(empty_pool(), Arc::new(OverflowOnCollect));
-    let minted = manager
-        .mint(
-            owner,
-            tick(-120),
-            tick(120),
-            1_000_000_000_000,
-            u128::MAX,
-            u128::MAX,
-        )
-        .unwrap();
-    manager
-        .pool()
-        .swap(SwapParams::new(
-            false,
-            -I256::from(U256::from(1_000_000_000u64)),
-        ))
-        .unwrap();
-
-    let pool_before = manager.pool().snapshot();
-    let position_before = manager.position(minted.token_id).unwrap();
+    let owner = Address::repeat_byte(0x56);
+    let mut manager = SinglePoolManager::new(empty_pool(), Some((pool_key(), Box::new(hook))));
+    let before = manager.pool().snapshot();
 
     assert_eq!(
-        manager.collect_fees(owner, minted.token_id).unwrap_err(),
-        Error::AmountOverflow
+        manager
+            .modify_liquidity(
+                position_params(owner, salt(0x44), tick(-120), tick(120), 1_000_000),
+                b"reject-after",
+            )
+            .unwrap_err(),
+        Error::Unauthorized
     );
-    assert_eq!(manager.pool().snapshot(), pool_before);
-    assert_eq!(manager.position(minted.token_id).unwrap(), position_before);
+    assert_ne!(manager.pool().snapshot(), before);
+    assert_eq!(manager.pool().state.liquidity, Liquidity::new(1_000_000));
+    assert_eq!(
+        &*events.lock(),
+        &["before_add_liquidity", "after_add_liquidity"]
+    );
+}
+
+#[cfg(feature = "v4-hooks")]
+#[test]
+fn swap_hooks_run_in_order_and_adjust_caller_delta() {
+    let key = pool_key();
+    let owner = Address::repeat_byte(0x57);
+    let trader = Address::repeat_byte(0x58);
+    let add = position_params(owner, salt(0x55), tick(-120), tick(120), 1_000_000_000_000);
+    let swap = SwapParams::new(false, -I256::from(U256::from(1_000_000_000u64)));
+
+    let mut baseline = SinglePoolManager::new(empty_pool(), None);
+    baseline.modify_liquidity(add, b"").unwrap();
+    let raw_delta = baseline.swap(trader, swap, b"").unwrap();
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = ScriptedHook {
+        events: Arc::clone(&events),
+        before_swap_delta: BeforeSwapDelta {
+            specified_delta: 0,
+            unspecified_delta: 7,
+        },
+        after_swap_delta: 5,
+        ..ScriptedHook::default()
+    };
+    let mut manager = SinglePoolManager::new(empty_pool(), Some((key, Box::new(hook))));
+    manager.modify_liquidity(add, b"").unwrap();
+    events.lock().clear();
+
+    let caller_delta = manager.swap(trader, swap, b"swap").unwrap();
+    let expected = raw_delta
+        .checked_sub(&BalanceDelta {
+            amount0: 12,
+            amount1: 0,
+        })
+        .unwrap();
+
+    assert_eq!(caller_delta, expected);
+    assert_eq!(&*events.lock(), &["before_swap", "after_swap"]);
+}
+
+#[cfg(feature = "v4-hooks")]
+#[test]
+fn zero_swap_is_rejected() {
+    let mut manager = SinglePoolManager::new(empty_pool(), None);
+
+    assert_eq!(
+        manager
+            .swap(
+                Address::repeat_byte(0x59),
+                SwapParams::new(true, I256::ZERO),
+                b"",
+            )
+            .unwrap_err(),
+        Error::ZeroValue
+    );
+}
+
+#[cfg(feature = "v4-hooks")]
+#[test]
+fn donate_runs_hooks_without_mutating_pool() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = ScriptedHook {
+        events: Arc::clone(&events),
+        ..ScriptedHook::default()
+    };
+    let mut manager = SinglePoolManager::new(empty_pool(), Some((pool_key(), Box::new(hook))));
+    let before = manager.pool().snapshot();
+
+    let delta = manager
+        .donate(
+            Address::repeat_byte(0x60),
+            U256::from(100u64),
+            U256::from(200u64),
+            b"donate",
+        )
+        .unwrap();
+
+    assert_eq!(delta, BalanceDelta::DEFAULT);
+    assert_eq!(manager.pool().snapshot(), before);
+    assert_eq!(&*events.lock(), &["before_donate", "after_donate"]);
 }

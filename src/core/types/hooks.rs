@@ -294,6 +294,8 @@ pub trait Hooks: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::FixedBytes;
+
     use super::*;
     use crate::{
         Error,
@@ -446,7 +448,8 @@ mod tests {
             tick_lower: TickIndex::new(-60).unwrap(),
             tick_upper: TickIndex::new(60).unwrap(),
             liquidity_delta,
-            info: None,
+            owner: Address::ZERO,
+            salt: FixedBytes::default(),
         }
     }
 
