@@ -234,6 +234,7 @@ mod tests {
     // ---------- Derived traits ----------
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn copy_and_clone_produce_equal_instances() {
         let spacing1 = TickSpacing::new(7).unwrap();
         let spacing2 = spacing1; // Copy

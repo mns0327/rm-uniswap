@@ -160,12 +160,14 @@ pub struct TickInfoInner {
     ///
     /// Crossing a tick flips this value around the token0 global fee-growth
     /// accumulator with wrapping `U256` arithmetic.
+    #[serde(default)]
     pub fee_growth_outside0_x128: U256,
 
     /// Fee growth on the opposite side of this tick from the current price.
     ///
     /// Crossing a tick flips this value around the token1 global fee-growth
     /// accumulator with wrapping `U256` arithmetic.
+    #[serde(default)]
     pub fee_growth_outside1_x128: U256,
 }
 

@@ -30,7 +30,6 @@ pub use crate::core::types::tick::TickIndex;
 pub use crate::core::types::tick_spacing::TickSpacing;
 pub use crate::core::types::{PoolTicksSnapshot, TickInfo, TickInfoInner};
 
-#[cfg(feature = "positions")]
 pub mod positions {
     pub use crate::core::concentrated::pool_manager::*;
     pub use crate::core::concentrated::position::{PositionIndex, Positions};

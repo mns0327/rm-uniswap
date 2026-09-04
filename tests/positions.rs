@@ -1,19 +1,12 @@
-#![cfg(feature = "positions")]
-
 use alloy::primitives::{Address, B256, I256};
+use parking_lot::Mutex;
 use rm_uniswap::v4::{
-    Fee, Liquidity, ModifyLiquidityParams, Pool, PoolKey, PoolTicks, SqrtPriceX96, SwapParams,
-    TickIndex, TickSpacing,
+    BalanceDelta, BeforeSwapDelta, Error, Fee, Hooks, HooksImpl, Liquidity, ModifyLiquidityParams,
+    Pool, PoolKey, PoolTicks, SqrtPriceX96, SwapParams, TickIndex, TickSpacing,
     positions::{PositionIndex, SinglePoolManager},
 };
 use ruint::aliases::U256;
-
-#[cfg(feature = "v4-hooks")]
-use {
-    parking_lot::Mutex,
-    rm_uniswap::v4::{BalanceDelta, BeforeSwapDelta, Error, Hooks, HooksImpl},
-    std::sync::Arc,
-};
+use std::sync::Arc;
 
 fn tick(index: i32) -> TickIndex {
     TickIndex::new(index).unwrap()
@@ -112,7 +105,6 @@ fn sender_overrides_spoofed_position_owner() {
     assert!(manager.pool().positions.0.contains_key(&actual));
 }
 
-#[cfg(feature = "v4-hooks")]
 struct ScriptedHook {
     events: Arc<Mutex<Vec<&'static str>>>,
     before_add_error: Option<Error>,
@@ -122,7 +114,6 @@ struct ScriptedHook {
     after_swap_delta: i128,
 }
 
-#[cfg(feature = "v4-hooks")]
 impl Default for ScriptedHook {
     fn default() -> Self {
         Self {
@@ -136,10 +127,8 @@ impl Default for ScriptedHook {
     }
 }
 
-#[cfg(feature = "v4-hooks")]
 impl HooksImpl for ScriptedHook {}
 
-#[cfg(feature = "v4-hooks")]
 impl Hooks for ScriptedHook {
     fn before_add_liquidity(
         &mut self,
@@ -249,7 +238,6 @@ impl Hooks for ScriptedHook {
     }
 }
 
-#[cfg(feature = "v4-hooks")]
 #[test]
 fn before_hook_failure_leaves_pool_unchanged() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -275,7 +263,6 @@ fn before_hook_failure_leaves_pool_unchanged() {
     assert_eq!(&*events.lock(), &["before_add_liquidity"]);
 }
 
-#[cfg(feature = "v4-hooks")]
 #[test]
 fn after_hook_failure_propagates_after_pool_mutation() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -305,7 +292,6 @@ fn after_hook_failure_propagates_after_pool_mutation() {
     );
 }
 
-#[cfg(feature = "v4-hooks")]
 #[test]
 fn swap_hooks_run_in_order_and_adjust_caller_delta() {
     let key = pool_key();
@@ -344,7 +330,6 @@ fn swap_hooks_run_in_order_and_adjust_caller_delta() {
     assert_eq!(&*events.lock(), &["before_swap", "after_swap"]);
 }
 
-#[cfg(feature = "v4-hooks")]
 #[test]
 fn zero_swap_is_rejected() {
     let mut manager = SinglePoolManager::new(empty_pool(), None);
@@ -361,7 +346,6 @@ fn zero_swap_is_rejected() {
     );
 }
 
-#[cfg(feature = "v4-hooks")]
 #[test]
 fn donate_runs_hooks_without_mutating_pool() {
     let events = Arc::new(Mutex::new(Vec::new()));

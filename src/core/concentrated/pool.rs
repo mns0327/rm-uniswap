@@ -176,7 +176,7 @@ impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
     /// independent owned storage.
     pub fn snapshot(&self) -> PoolSnapshot<P> {
         PoolSnapshot {
-            state: self.state.clone(),
+            state: self.state,
             fee: *self.swap_fee.lp_fee(),
             protocol_fee: *self.swap_fee.protocol_fee(),
             tick_spacing: self.tick_spacing,
@@ -394,10 +394,10 @@ impl<P: PositionsAccess> Pool<P> {
                 )?;
 
                 let position_idx = PositionIndex {
-                    owner: owner,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
-                    salt: salt,
+                    owner,
+                    tick_lower,
+                    tick_upper,
+                    salt,
                 };
 
                 self.positions.update_position(position_idx, |position| {

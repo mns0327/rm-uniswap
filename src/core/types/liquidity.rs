@@ -205,6 +205,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn copy_and_clone_produce_equal_instances() {
         let a = Liquidity::new(7);
         let b = a;

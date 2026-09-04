@@ -320,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn indexer_is_copy_and_clone() {
         let original = TickSlabIndexer::from_tick(tick(7), TICK_SPACING);
         let copied = original;

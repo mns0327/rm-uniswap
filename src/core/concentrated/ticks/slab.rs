@@ -420,13 +420,9 @@ impl TickSlab {
     /// Returns a mutable backing allocator key for an initialized page.
     #[inline(always)]
     fn get_key_mut(&mut self, cache_index: u16) -> Option<&mut u16> {
-        self.cache.get_mut(cache_index as usize).and_then(|key| {
-            if *key != INITIAL_CACHE_VALUE {
-                Some(key)
-            } else {
-                None
-            }
-        })
+        self.cache
+            .get_mut(cache_index as usize)
+            .filter(|key| **key != INITIAL_CACHE_VALUE)
     }
 
     /// Looks up an initialized page by its protocol-level cache index.
@@ -472,7 +468,7 @@ impl TickSlab {
                     ticks.insert(
                         TickSlabIndexer::from_parts(current_cache_index, slot_index)
                             .to_tick(self.tick_spacing.as_u32()),
-                        tick_info.inner.clone(),
+                        tick_info.inner,
                     );
                 }
             }

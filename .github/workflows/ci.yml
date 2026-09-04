@@ -27,11 +27,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Run full V4 tests
-        run: cargo test --features full-v4
+      - name: Run tests
+        run: cargo test
 
       - name: Build docs
-        run: cargo doc --no-deps --features full-v4
+        run: cargo doc --no-deps
 
   forge:
     name: Forge parity

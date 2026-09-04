@@ -1,5 +1,3 @@
-#![cfg(feature = "positions")]
-
 use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 
 use alloy::primitives::{Address, B256, I256};

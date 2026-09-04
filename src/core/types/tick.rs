@@ -227,6 +227,7 @@ mod tests {
     // ---------- Derived traits ----------
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn copy_and_clone_produce_equal_instances() {
         let t1 = TickIndex::new(7).unwrap();
         let t2 = t1; // Copy
