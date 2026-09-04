@@ -3,7 +3,7 @@
 //! Run with: `cargo bench --bench full_math`
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::v4::full_math;
+use rm_uniswap::full_math;
 use ruint::aliases::U256;
 
 fn bench_full_math(c: &mut Criterion) {

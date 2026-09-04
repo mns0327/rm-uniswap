@@ -1,8 +1,10 @@
 //! Keyed position storage for concentrated-liquidity accounting.
 //!
-//! Positions mirror Uniswap v4's position-map shape: the key is the owner,
-//! lower tick, upper tick, and salt, while the value stores liquidity plus the
-//! last inside fee-growth checkpoints used to realize accrued fees.
+//! Position storage for concentrated-liquidity accounting.
+//!
+//! The key is the owner, lower tick, upper tick, and salt, while the value
+//! stores liquidity plus the last inside fee-growth checkpoints used to realize
+//! accrued fees.
 
 use std::collections::BTreeMap;
 
@@ -15,12 +17,11 @@ use crate::{
     Error,
     core::{
         math::full,
-        types::{PoolTicksSnapshot, tick::TickIndex},
+        types::{PoolTicksSnapshot, liquidity::Liquidity, tick::TickIndex},
     },
-    v4::Liquidity,
 };
 
-/// Map key for one Uniswap v4-style liquidity position.
+/// Map key for one concentrated-liquidity position.
 ///
 /// The same owner may hold multiple positions over the same tick range by using
 /// a distinct `salt`. Tick validation is owned by the caller; this key stores
@@ -55,7 +56,8 @@ pub struct PositionState {
 /// In-memory position map keyed by [`PositionIndex`].
 ///
 /// The wrapper keeps the storage type explicit while allowing callers to depend
-/// on [`PositionsAccess`] instead of a concrete hash-map implementation.
+/// on the position-access abstraction instead of a concrete hash-map
+/// implementation.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Positions(pub AHashMap<PositionIndex, PositionState>);
@@ -239,9 +241,8 @@ impl PositionsAccess for () {
 mod tests {
     use super::*;
 
-    use crate::{
-        core::types::ticks::TickInfoInner,
-        v4::{Liquidity, TickIndex, TickSpacing},
+    use crate::core::types::{
+        liquidity::Liquidity, tick::TickIndex, tick_spacing::TickSpacing, ticks::TickInfoInner,
     };
 
     fn tick(index: i32) -> TickIndex {

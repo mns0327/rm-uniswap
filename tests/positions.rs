@@ -1,9 +1,12 @@
 use alloy::primitives::{Address, B256, I256};
 use parking_lot::Mutex;
-use rm_uniswap::v4::{
-    BalanceDelta, BeforeSwapDelta, Error, Fee, Hooks, HooksImpl, Liquidity, ModifyLiquidityParams,
-    Pool, PoolKey, PoolTicks, SqrtPriceX96, SwapParams, TickIndex, TickSpacing,
-    positions::{PositionIndex, SinglePoolManager},
+use rm_uniswap::{
+    BalanceDelta, Error, Fee, Liquidity, ModifyLiquidityParams, Pool, PoolTicks, SqrtPriceX96,
+    SwapParams, TickIndex, TickSpacing,
+    v4::{
+        BeforeSwapDelta, Hooks, HooksImpl, PoolKey,
+        positions::{PositionIndex, SinglePoolManager},
+    },
 };
 use ruint::aliases::U256;
 use std::sync::Arc;

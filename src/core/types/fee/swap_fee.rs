@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{core::types::fee::protocol_fee::ProtocolFee, v4::Fee};
+use crate::core::types::fee::{Fee, protocol_fee::ProtocolFee};
 
 /// Effective swap-fee configuration for a pool.
 ///

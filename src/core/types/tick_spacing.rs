@@ -8,9 +8,8 @@ use std::ops::Deref;
 /// A validated Uniswap tick spacing represented as a positive `i16`.
 ///
 /// Wrapping a raw `i16` in this type guarantees that any `TickSpacing` in
-/// circulation is positive. The `i16` storage matches Uniswap v4's
-/// tick-spacing width while preventing zero or negative spacings from reaching
-/// pool math.
+/// circulation is positive while preventing zero or negative spacings from
+/// reaching pool math.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TickSpacing(i16);
@@ -18,7 +17,7 @@ pub struct TickSpacing(i16);
 impl TickSpacing {
     /// Smallest valid tick spacing.
     pub const MIN: Self = Self(1);
-    /// Largest tick spacing representable by Uniswap v4 tick spacing.
+    /// Largest tick spacing representable by this type.
     pub const MAX: Self = Self(i16::MAX);
 
     /// Attempts to construct a `TickSpacing` from a raw `i16`.
@@ -52,7 +51,7 @@ impl TickSpacing {
     /// Returns the maximum gross liquidity allowed at one initialized tick.
     ///
     /// Derived from the number of usable compressed ticks between
-    /// [`TickIndex::MIN`] and [`TickIndex::MAX`], matching Uniswap v4's
+    /// [`TickIndex::MIN`] and [`TickIndex::MAX`], matching Uniswap's
     /// `Pool.tickSpacingToMaxLiquidityPerTick`.
     #[inline(always)]
     pub const fn max_liquidity_per_tick(&self) -> Liquidity {
@@ -80,7 +79,7 @@ pub(crate) const fn calculate_cache_cap(tick_spacing: TickSpacing) -> u16 {
 #[macro_export]
 macro_rules! tick_spacing {
     ($val:expr) => {{
-        $crate::v4::TickSpacing::new($val)
+        $crate::TickSpacing::new($val)
             .unwrap_or_else(|| panic!("invalid TickSpacing value: {}", $val))
     }};
 }

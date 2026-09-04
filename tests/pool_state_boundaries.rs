@@ -2,11 +2,8 @@ use std::collections::BTreeMap;
 
 use alloy::primitives::I256;
 use rm_uniswap::{
-    Error,
-    v4::{
-        Fee, Liquidity, Pool, PoolTicks, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
-        TickInfoInner, TickSpacing, tick_math,
-    },
+    Error, Fee, Liquidity, Pool, PoolTicks, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
+    TickInfoInner, TickSpacing, tick_math,
 };
 use ruint::aliases::U256;
 

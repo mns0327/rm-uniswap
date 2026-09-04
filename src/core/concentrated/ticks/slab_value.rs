@@ -1,4 +1,4 @@
-use crate::{core::types::tick_slab_indexer::TickSlabIndexer, v4::TickInfo};
+use crate::core::types::{TickInfo, tick_slab_indexer::TickSlabIndexer};
 
 /// Fixed-size storage for one cache page of initialized pool ticks.
 ///
@@ -247,10 +247,7 @@ impl TickSlabValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::types::tick::TickIndex,
-        v4::{Liquidity, TickInfoInner},
-    };
+    use crate::core::types::{TickInfoInner, liquidity::Liquidity, tick::TickIndex};
 
     const TICK_SPACING: u32 = 1;
 

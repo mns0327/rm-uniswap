@@ -13,17 +13,17 @@ use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main
 
 #[path = "../src/core/mod.rs"]
 mod core;
-#[path = "../src/v4.rs"]
-mod v4;
 
 pub use core::error::Error;
 
-use crate::{
-    core::{
-        concentrated::ticks::slab::TickSlab,
-        types::{tick::TickIndex, tick_spacing::TickSpacing},
+use crate::core::{
+    concentrated::ticks::slab::TickSlab,
+    types::{
+        liquidity::Liquidity,
+        tick::TickIndex,
+        tick_spacing::TickSpacing,
+        ticks::{TickInfo, TickInfoInner},
     },
-    v4::{Liquidity, TickInfo, TickInfoInner},
 };
 
 const TICK_SPACING: TickSpacing = TickSpacing::MIN;

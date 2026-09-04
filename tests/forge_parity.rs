@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 
 use alloy::primitives::{Address, B256, I256};
-use rm_uniswap::v4::{
+use rm_uniswap::{
     BalanceDelta, Error, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot,
     ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
-    positions::{PositionIndex, Positions},
+    v4::positions::{PositionIndex, Positions},
 };
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, de};

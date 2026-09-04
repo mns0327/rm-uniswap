@@ -1,34 +1,11 @@
-/// Uniswap V4-compatible facade.
+/// Uniswap v4-specific facade.
 ///
-/// The public API mirrors the Solidity library names while using Rust method
-/// names: [`FullMath`], [`SqrtPriceMath`], [`SwapMath`], and [`TickMath`].
-///
-/// Use [`Quoter`] for single-range quotes that cannot cross an initialized
-/// tick. Use [`Pool`] when a swap may cross ticks or when committed pool state
-/// must be updated.
-pub use crate::Error;
-pub use crate::core::concentrated::pool::{Pool, PoolSnapshot, TickCrossInfo};
-pub use crate::core::concentrated::ticks::slab::TickSlab as PoolTicks;
-pub use crate::core::math::{
-    full as full_math, sqrt_price as sqrt_price_math, swap as swap_math, swap::SwapStep,
-    tick as tick_math,
-};
-pub use crate::core::types::delta::{BalanceDelta, BeforeSwapDelta};
-pub use crate::core::types::fee::Fee;
-pub use crate::core::types::fee::protocol_fee::ProtocolFee;
-pub use crate::core::types::fee::swap_fee::SwapFee;
+/// Shared concentrated-liquidity pool, tick, fee, and math types are exported
+/// from the crate root. This module contains v4-only surfaces such as hooks,
+/// pool keys, and the single-pool manager adapter.
+pub use crate::core::types::delta::BeforeSwapDelta;
 pub use crate::core::types::hooks::{Hooks, HooksImpl};
-pub use crate::core::types::liquidity::Liquidity;
-pub use crate::core::types::nonzero::NonZeroLiquidity;
-pub use crate::core::types::params::{
-    ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapResult, SwapSimulationResult,
-};
 pub use crate::core::types::pool_key::{PoolId, PoolKey};
-pub use crate::core::types::pool_state::PoolState;
-pub use crate::core::types::sqrt_price::SqrtPriceX96;
-pub use crate::core::types::tick::TickIndex;
-pub use crate::core::types::tick_spacing::TickSpacing;
-pub use crate::core::types::{PoolTicksSnapshot, TickInfo, TickInfoInner};
 
 pub mod positions {
     pub use crate::core::concentrated::pool_manager::*;

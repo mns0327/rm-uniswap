@@ -9,13 +9,14 @@ use crate::{
     core::{
         concentrated::ticks::{bitmap::HierBitmap, slab_value::TickSlabValue},
         types::{
-            PoolTicksSnapshot,
+            PoolTicksSnapshot, TickInfo, TickInfoInner,
+            liquidity::Liquidity,
+            sqrt_price::SqrtPriceX96,
             tick::TickIndex,
             tick_slab_indexer::TickSlabIndexer,
             tick_spacing::{TickSpacing, calculate_cache_cap},
         },
     },
-    v4::{Liquidity, SqrtPriceX96, TickInfo, TickInfoInner},
 };
 
 const INITIAL_CACHE_VALUE: u16 = u16::MAX;
@@ -155,11 +156,11 @@ impl TickSlab {
 
     /// Returns the next initialized tick after `tick_indexer`, along with its slab indexer.
     ///
-    /// Within a page, [`TickSlabValue::next_slot`] uses zero-count instructions on
-    /// the page occupancy map to jump to the next set bit strictly after the
-    /// current slot. The returned [`TickSlabIndexer`] identifies that initialized
-    /// tick, so callers can keep traversing without reconstructing the position
-    /// from the `TickInfo`.
+    /// Within a page, the page-local slot search uses zero-count instructions
+    /// on the page occupancy map to jump to the next set bit strictly after the
+    /// current slot. The returned slab indexer identifies that initialized tick,
+    /// so callers can keep traversing without reconstructing the position from
+    /// the `TickInfo`.
     ///
     /// If the current page has no later initialized slot, this follows the
     /// already-maintained page link and returns the first initialized slot in

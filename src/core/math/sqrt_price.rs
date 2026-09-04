@@ -1,15 +1,15 @@
-//! Optimized port of Uniswap V4 `SqrtPriceMath`.
+//! Optimized port of Uniswap `SqrtPriceMath`.
 //!
 //! Design goals:
 //! - Keep Uniswap-compatible rounding semantics.
 //! - Avoid Solidity-style overflow checks that are expensive in Rust.
 //! - Avoid generic FullMath paths when the expression has a cheaper fixed form.
-//! - Reject values outside the real Uniswap V4 domain instead of silently
+//! - Reject values outside the real Uniswap sqrt-price domain instead of silently
 //!   truncating left shifts.
 
+use crate::core::types::liquidity::Liquidity;
 use crate::core::types::nonzero::{NonZeroLiquidity, NonZeroU256};
 use crate::core::types::sqrt_price::SqrtPriceX96;
-use crate::v4::Liquidity;
 use alloy::primitives::I256;
 use ruint::Uint;
 use ruint::aliases::{U128, U160, U256};

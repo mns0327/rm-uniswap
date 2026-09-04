@@ -12,14 +12,13 @@ use std::collections::BTreeMap;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    core::types::{tick::TickIndex, tick_spacing::TickSpacing},
-    v4::{Liquidity, SqrtPriceX96},
+use crate::core::types::{
+    liquidity::Liquidity, sqrt_price::SqrtPriceX96, tick::TickIndex, tick_spacing::TickSpacing,
 };
 
 /// Tick data stored at an initialized tick boundary.
 ///
-/// The liquidity and fee-growth fields mirror Uniswap V4's `Tick.Info`
+/// The liquidity and fee-growth fields mirror Uniswap-style tick accounting
 /// accounting. This runtime form also stores the validated tick index and its
 /// Q64.96 sqrt price so swap steps can jump to a boundary without recomputing
 /// the price from the map key.

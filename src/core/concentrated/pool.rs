@@ -1,14 +1,13 @@
-//! Uniswap V4 pool simulator with full tick-crossing support.
+//! Concentrated-liquidity pool simulator with full tick-crossing support.
 //!
-//! The swap loop follows V4 `Pool.sol`: it advances through initialized ticks,
-//! updates liquidity on crossings, and returns deltas from the caller /
-//! PoolManager accounting perspective. Negative delta values mean the caller
-//! owes that token; positive values mean the caller receives it.
+//! The swap loop advances through initialized ticks, updates liquidity on
+//! crossings, and returns deltas from the caller perspective used by the
+//! supported Uniswap-style facades. Negative delta values mean the caller owes
+//! that token; positive values mean the caller receives it.
 //!
-//! `SwapParams::amount_specified` uses V4 `amountSpecified` semantics:
-//! negative for exact input and positive for exact output. Tick spacing is
-//! supplied from the `PoolKey` and validated together with pool snapshots and
-//! tick stores.
+//! `SwapParams::amount_specified` is negative for exact input and positive for
+//! exact output. Tick spacing is validated together with pool snapshots and tick
+//! stores.
 //!
 //! Read-only quote methods leave pool storage unchanged. [`Pool::swap`] runs
 //! the same math through mutable state and tick access, so final price, tick,
@@ -37,12 +36,14 @@ use crate::core::types::sqrt_price::SqrtPriceX96;
 use crate::core::types::tick::TickIndex;
 use crate::core::types::tick_spacing::TickSpacing;
 use crate::core::{
-    math::{swap::get_sqrt_price_target, tick::get_tick_at_sqrt_price},
+    math::{
+        swap::{compute_swap_step, get_sqrt_price_target},
+        tick::get_tick_at_sqrt_price,
+    },
     types::{PoolTicksSnapshot, TickInfo, delta::BalanceDelta},
 };
-use crate::v4::swap_math::compute_swap_step;
 
-/// Complete V4 pool state required for a full tick-crossing simulation.
+/// Complete pool state required for a full tick-crossing simulation.
 ///
 /// # Invariants
 ///
@@ -306,7 +307,7 @@ impl<P: Default> Pool<P> {
 impl<P: PositionsAccess> Pool<P> {
     /// Apply a liquidity change and commit it to pool, tick, and position state.
     ///
-    /// Implements the pool-facing portion of Uniswap V4's `modifyLiquidity`:
+    /// Implements the pool-facing portion of a concentrated-liquidity update:
     ///
     /// 1. Validate `tick_lower < tick_upper` and tick spacing alignment.
     /// 2. Update lower/upper initialized ticks with the signed `liquidity_net`
@@ -605,7 +606,7 @@ impl<P: PositionsAccess> Pool<P> {
     }
 }
 
-/// Run the shared V4 swap loop over pool-state and tick-store access.
+/// Run the shared concentrated-liquidity swap loop over pool-state and tick-store access.
 ///
 /// Mutable access commits final pool state and tick-crossing fee-growth updates.
 /// Read-only access executes the same traversal while ignoring those writes,
@@ -645,12 +646,12 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
 
     // Validate the price limit against the current pool price.
     if zero_for_one {
-        // V4: limit must be strictly below current price.
+        // The limit must be strictly below current price.
         if sqrt_price_limit_x96 >= pool_state.sqrt_price_x96 {
             return Err(SwapSimError::PriceLimitAlreadyExceeded);
         }
     } else {
-        // V4: limit must be strictly above current price.
+        // The limit must be strictly above current price.
         if sqrt_price_limit_x96 <= pool_state.sqrt_price_x96 {
             return Err(SwapSimError::PriceLimitAlreadyExceeded);
         }
@@ -1522,7 +1523,7 @@ mod tests {
 
         let result = pool
             .swap(make_params(true, exact_in(ether(1)), sqrt_at(-60)))
-            .expect("V4 allows 100% fee for exact-input");
+            .expect("Uniswap allows 100% fee for exact-input");
 
         // Entire input consumed as fee; no output.
         assert_eq!(

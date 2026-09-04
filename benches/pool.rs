@@ -6,7 +6,7 @@ use std::path::Path;
 
 use alloy::primitives::{Address, B256, I256};
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::v4::{ModifyLiquidityParams, Pool, PoolTicks, SwapParams, TickIndex, TickSpacing};
+use rm_uniswap::{ModifyLiquidityParams, Pool, PoolTicks, SwapParams, TickIndex, TickSpacing};
 use ruint::aliases::U256;
 
 fn build_test_pool() -> Pool {

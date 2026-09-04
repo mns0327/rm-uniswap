@@ -1,9 +1,11 @@
 use alloy::primitives::{Address, I256};
 use ruint::aliases::U256;
 
-use crate::{
-    core::types::{delta::BeforeSwapDelta, pool_key::PoolKey},
-    v4::{BalanceDelta, Fee, ModifyLiquidityParams, SwapParams},
+use crate::core::types::{
+    delta::{BalanceDelta, BeforeSwapDelta},
+    fee::Fee,
+    params::{ModifyLiquidityParams, SwapParams},
+    pool_key::PoolKey,
 };
 
 /// Convenience adapter that applies Uniswap V4 hook accounting around raw

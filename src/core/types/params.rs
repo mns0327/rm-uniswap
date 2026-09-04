@@ -1,22 +1,22 @@
 use alloy::primitives::{Address, FixedBytes, I256};
 use ruint::aliases::U256;
 
-use crate::{
-    core::types::tick_slab_indexer::TickSlabIndexer,
-    v4::{BalanceDelta, Fee, Liquidity, SqrtPriceX96, TickIndex, TickInfo},
+use crate::core::types::{
+    TickInfo, delta::BalanceDelta, fee::Fee, liquidity::Liquidity, sqrt_price::SqrtPriceX96,
+    tick::TickIndex, tick_slab_indexer::TickSlabIndexer,
 };
 
-/// Parameters for one Uniswap v4-style swap.
+/// Parameters for one concentrated-liquidity swap.
 ///
-/// Mirrors `IPoolManager.SwapParams`: direction, signed input/output amount,
-/// and the caller's sqrt-price safety limit.
+/// Carries direction, signed input/output amount, and the caller's sqrt-price
+/// safety limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapParams {
     /// `true`  → sell token0, buy token1 (price moves **down**).
     /// `false` → sell token1, buy token0 (price moves **up**).
     pub zero_for_one: bool,
 
-    /// Signed swap amount, matching v4 `amountSpecified` semantics.
+    /// Signed swap amount.
     ///
     /// * negative → exact-input; absolute value is the input amount.
     /// * positive → exact-output; absolute value is the desired output amount.
@@ -40,11 +40,10 @@ impl SwapParams {
     }
 }
 
-/// Parameters for a Uniswap v4-style liquidity update.
+/// Parameters for a concentrated-liquidity update.
 ///
-/// Mirrors the pool-facing portion of `IPoolManager.ModifyLiquidityParams`.
-/// `info` carries the owner/salt pair only when the caller wants position-level
-/// fee accounting in addition to the pool-level liquidity change.
+/// The owner/salt pair is used when the caller wants position-level fee
+/// accounting in addition to the pool-level liquidity change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifyLiquidityParams {
     /// Inclusive lower tick of the liquidity range.
@@ -76,7 +75,7 @@ pub struct ModifyLiquidityResult {
 /// Output of a successful simulated swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapResult {
-    /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
+    /// Signed token deltas in the shared caller-facing `BalanceDelta` convention.
     ///
     /// Use [`BalanceDelta::amount_in`] / [`BalanceDelta::amount_out`] for
     /// direction-aware unsigned magnitudes.
@@ -165,7 +164,7 @@ pub struct SwapSimulationResult {
     /// All-time LP fee growth per unit of liquidity in token1 after the swap.
     pub fee_growth_global1_x128: U256,
 
-    /// Signed token deltas in V4's caller / PoolManager `BalanceDelta` convention.
+    /// Signed token deltas in the shared caller-facing `BalanceDelta` convention.
     pub delta: BalanceDelta,
 
     /// Protocol fee collected in the input token, in raw token units.

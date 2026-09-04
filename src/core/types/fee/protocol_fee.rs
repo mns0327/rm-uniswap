@@ -42,7 +42,8 @@ impl ProtocolFee {
 
     /// Attempts to construct directional protocol fees from raw pips.
     ///
-    /// Returns `None` if either direction exceeds [`MAX_PROTOCOL_FEE`].
+    /// Returns `None` if either direction exceeds the maximum directional
+    /// protocol fee.
     #[inline(always)]
     pub const fn new(zero_for_one_fee: u16, one_for_zero_fee: u16) -> Option<Self> {
         let result = Self {
@@ -62,9 +63,9 @@ impl ProtocolFee {
     /// # Safety
     ///
     /// Callers must guarantee that both directional fees are less than or equal
-    /// to [`MAX_PROTOCOL_FEE`]. Invalid values can cause swap-fee calculation
-    /// to fail in code paths that otherwise assume `ProtocolFee` has already
-    /// been validated.
+    /// to the maximum directional protocol fee. Invalid values can cause
+    /// swap-fee calculation to fail in code paths that otherwise assume
+    /// `ProtocolFee` has already been validated.
     #[inline(always)]
     pub const unsafe fn unchecked_new(zero_for_one_fee: u16, one_for_zero_fee: u16) -> Self {
         Self {

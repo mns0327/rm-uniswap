@@ -11,8 +11,7 @@ use ruint::aliases::U256;
 
 use crate::{
     Error,
-    core::types::tick_slab_indexer::TickSlabIndexer,
-    v4::{TickIndex, TickInfo},
+    core::types::{TickInfo, tick::TickIndex, tick_slab_indexer::TickSlabIndexer},
 };
 
 use slab::TickSlab;

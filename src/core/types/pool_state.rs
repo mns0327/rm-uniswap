@@ -7,9 +7,9 @@
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
-use crate::v4::{Liquidity, SqrtPriceX96, TickIndex};
+use crate::core::types::{liquidity::Liquidity, sqrt_price::SqrtPriceX96, tick::TickIndex};
 
-/// Current V4 pool state required by the concentrated-liquidity swap loop.
+/// Current pool state required by the concentrated-liquidity swap loop.
 ///
 /// The price, tick, and active liquidity describe the current position inside
 /// the initialized tick grid. Fee-growth globals track accumulated LP fees per
@@ -30,7 +30,7 @@ pub struct PoolState {
     /// Current tick — must equal `floor(log_√1.0001(sqrt_price_x96))`.
     pub tick: TickIndex,
 
-    /// Active liquidity for the current tick range (`uint128` in V4).
+    /// Active liquidity for the current tick range.
     pub liquidity: Liquidity,
 
     /// All-time LP fee growth per unit of active liquidity in token0, Q128.

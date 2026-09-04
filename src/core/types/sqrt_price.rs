@@ -99,7 +99,7 @@ impl SqrtPriceX96 {
 
     /// Returns the loosest valid price limit for a given swap direction.
     ///
-    /// Matches V4: zeroForOne swaps must stay strictly above
+    /// Matches Uniswap swap bounds: zero-for-one swaps must stay strictly above
     /// `MIN_SQRT_PRICE`; oneForZero swaps must stay strictly below
     /// `MAX_SQRT_PRICE`.
     #[inline(always)]
@@ -154,22 +154,22 @@ impl SqrtPriceX96 {
 /// ```
 /// # use rm_uniswap::sqrt_price_x96;
 /// let a = sqrt_price_x96!(79228162514264337593543950336);
-/// let b = sqrt_price_x96!(raw rm_uniswap::v4::SqrtPriceX96::MIN.value());
+/// let b = sqrt_price_x96!(raw rm_uniswap::SqrtPriceX96::MIN.value());
 ///
 /// let c = sqrt_price_x96!(
 ///     str "1461446703485210103287273052203988822378723970342"
 /// );
 ///
 /// assert_eq!(a.tick_index().value(), 0);
-/// assert_eq!(b, rm_uniswap::v4::SqrtPriceX96::MIN);
-/// assert_eq!(c, rm_uniswap::v4::SqrtPriceX96::MAX);
+/// assert_eq!(b, rm_uniswap::SqrtPriceX96::MIN);
+/// assert_eq!(c, rm_uniswap::SqrtPriceX96::MAX);
 /// ```
 #[macro_export]
 macro_rules! sqrt_price_x96 {
     (str $val:expr) => {{
         let text: &str = $val;
 
-        $crate::v4::SqrtPriceX96::from_decimal_str(text)
+        $crate::SqrtPriceX96::from_decimal_str(text)
             .unwrap_or_else(|err| panic!("invalid SqrtPriceX96 string `{}`: {:?}", text, err,))
             .unwrap_or_else(|| panic!("SqrtPriceX96 value is out of range: {}", text,))
     }};
@@ -177,7 +177,7 @@ macro_rules! sqrt_price_x96 {
     ($val:literal) => {{
         let text = stringify!($val);
 
-        $crate::v4::SqrtPriceX96::from_decimal_str(text)
+        $crate::SqrtPriceX96::from_decimal_str(text)
             .unwrap_or_else(|err| panic!("invalid U160 literal `{}`: {:?}", text, err,))
             .unwrap_or_else(|| panic!("SqrtPriceX96 value is out of range: {}", text,))
     }};
@@ -185,7 +185,7 @@ macro_rules! sqrt_price_x96 {
     (raw $val:expr) => {{
         let value = $val;
 
-        $crate::v4::SqrtPriceX96::new(value)
+        $crate::SqrtPriceX96::new(value)
             .unwrap_or_else(|| panic!("SqrtPriceX96 value is out of range: {}", value,))
     }};
 }
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn extreme_price_limit_returns_strict_v4_bounds() {
+    fn extreme_price_limit_returns_strict_uniswap_bounds() {
         assert_eq!(
             SqrtPriceX96::extreme_price_limit(true).value(),
             SqrtPriceX96::MIN.value() + U160::ONE

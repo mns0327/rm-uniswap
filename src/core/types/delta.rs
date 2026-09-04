@@ -4,9 +4,8 @@ use crate::{
     Error,
     core::{
         math::sqrt_price::{get_amount0_delta, get_amount1_delta},
-        types::{sqrt_price::SqrtPriceX96, tick::TickIndex},
+        types::{liquidity::Liquidity, sqrt_price::SqrtPriceX96, tick::TickIndex},
     },
-    v4::Liquidity,
 };
 
 /// Swap amount adjustments returned by a `before_swap` hook.
@@ -37,9 +36,8 @@ impl BeforeSwapDelta {
     };
 }
 
-/// Signed token delta using Uniswap V4's **caller / PoolManager-perspective**
-/// `BalanceDelta` convention, matching the convention used by the current
-/// swap simulator.
+/// Signed token delta using the caller perspective used by the current swap
+/// simulator.
 ///
 /// # Sign convention
 ///
@@ -91,7 +89,7 @@ impl BalanceDelta {
 
     /// Builds the principal token delta for a liquidity modification.
     ///
-    /// The returned delta follows V4's caller / PoolManager convention:
+    /// The returned delta follows the shared caller-facing convention:
     /// adding liquidity is negative because the caller deposits principal,
     /// while removing liquidity is positive because the caller receives it.
     pub(crate) fn from_liquidity_principal(

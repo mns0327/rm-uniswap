@@ -1,13 +1,13 @@
 //! # SwapMath — Optimized single-tick swap step computation
 //!
-//! Production-focused Rust port of Uniswap V4 swap-step math.
+//! Production-focused Rust port of Uniswap concentrated-liquidity swap-step math.
 //!
 //! Main optimizations:
 //! - No tracing in the hot arithmetic path.
 //! - No generic FullMath for fee arithmetic.
 //! - Fee math uses exact U256 × u32 / u32 long division.
 //! - Fee complement is computed once and passed down.
-//! - Exact-input partial-fill accounting preserves V4-style semantics:
+//! - Exact-input partial-fill accounting preserves Uniswap-style semantics:
 //!   if target is not reached, amount_in is the full fee-adjusted input.
 
 use alloy::primitives::I256;
@@ -160,7 +160,7 @@ fn compute_exact_in(
     let (sqrt_ratio_next_x96, amount_in) = if reached_target {
         (sqrt_ratio_target_x96, max_amount_in)
     } else {
-        // V4-compatible accounting:
+        // Uniswap-compatible accounting:
         // In a partial exact-input fill, consume the full fee-adjusted input.
         // Do not recompute amount_in from the rounded next price.
         let next = get_next_sqrt_price_from_input(
@@ -360,7 +360,7 @@ mod tests {
         u256("39614081257132168796771975168")
     }
 
-    /// Non-zero U160 — valid range for Uniswap V4 sqrt prices.
+    /// Non-zero U160 in the valid range for Uniswap sqrt prices.
     fn arb_sqrt_price() -> impl Strategy<Value = SqrtPriceX96> {
         any::<[u64; 3]>()
             .prop_map(|limbs| {

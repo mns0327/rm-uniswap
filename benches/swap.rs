@@ -4,7 +4,7 @@
 
 use alloy::primitives::I256;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::v4::{Fee, NonZeroLiquidity, SqrtPriceX96, TickIndex, swap_math, tick_math};
+use rm_uniswap::{Fee, NonZeroLiquidity, SqrtPriceX96, TickIndex, swap_math, tick_math};
 use ruint::aliases::U256;
 
 fn tick(value: i32) -> TickIndex {

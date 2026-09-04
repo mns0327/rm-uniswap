@@ -3,7 +3,7 @@
 //! Run with: `cargo bench --bench sqrt_price`
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::v4::{NonZeroLiquidity, SqrtPriceX96, TickIndex, sqrt_price_math, tick_math};
+use rm_uniswap::{NonZeroLiquidity, SqrtPriceX96, TickIndex, sqrt_price_math, tick_math};
 use ruint::aliases::U256;
 
 fn tick(value: i32) -> TickIndex {

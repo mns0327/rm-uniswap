@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
 use crate::{
+    core::math::tick::get_sqrt_price_at_tick,
     core::types::{sqrt_price::SqrtPriceX96, tick_spacing::TickSpacing},
-    v4::tick_math::get_sqrt_price_at_tick,
 };
 
-/// A validated tick index within the Uniswap v4 protocol range.
+/// A validated tick index within the Uniswap protocol range.
 ///
 /// Wrapping a raw `i32` in this type guarantees that any `TickIndex` in
 /// circulation is inside [`Self::MIN`]..=[`Self::MAX`]. This mirrors
@@ -26,10 +26,10 @@ use crate::{
 pub struct TickIndex(i32);
 
 impl TickIndex {
-    /// Highest tick accepted by Uniswap v4 `TickMath`.
+    /// Highest tick accepted by Uniswap `TickMath`.
     pub const MAX: Self = Self(887_272);
 
-    /// Lowest tick accepted by Uniswap v4 `TickMath`.
+    /// Lowest tick accepted by Uniswap `TickMath`.
     pub const MIN: Self = Self(-887_272);
 
     /// Number of bits required to represent the signed protocol tick range.
@@ -95,10 +95,7 @@ impl TickIndex {
 /// prefer `TickIndex::new` and handle the `None` case explicitly.
 #[macro_export]
 macro_rules! tick_idx {
-    ($val:expr) => {{
-        $crate::v4::TickIndex::new($val)
-            .unwrap_or_else(|| panic!("invalid TickIndex value: {}", $val))
-    }};
+    ($val:expr) => {{ $crate::TickIndex::new($val).unwrap_or_else(|| panic!("invalid TickIndex value: {}", $val)) }};
 }
 
 /// Allows a `TickIndex` to be transparently dereferenced to `&i32`,

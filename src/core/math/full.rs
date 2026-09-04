@@ -1,6 +1,7 @@
 //! # FullMath — 512-bit Precision Multiply-Divide (Optimized)
 //!
-//! A fully optimized port of the `FullMath` used by Uniswap V4.
+//! A fully optimized port of the `FullMath` used by Uniswap concentrated
+//! liquidity math.
 //!
 //! ## Core Idea
 //!
