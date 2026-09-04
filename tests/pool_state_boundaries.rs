@@ -5,7 +5,7 @@ use rm_uniswap::{
     Error,
     v4::{
         Fee, Liquidity, Pool, PoolTicks, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
-        TickInfo, TickSpacing, tick_math,
+        TickInfoInner, TickSpacing, tick_math,
     },
 };
 use ruint::aliases::U256;
@@ -35,18 +35,18 @@ fn valid_pool() -> Pool {
         BTreeMap::from([
             (
                 tick(-60),
-                TickInfo {
+                TickInfoInner {
                     liquidity_net: LIQUIDITY as i128,
                     liquidity_gross: Liquidity::new(LIQUIDITY),
-                    ..TickInfo::default()
+                    ..TickInfoInner::DEFAULT
                 },
             ),
             (
                 tick(60),
-                TickInfo {
+                TickInfoInner {
                     liquidity_net: -(LIQUIDITY as i128),
                     liquidity_gross: Liquidity::new(LIQUIDITY),
-                    ..TickInfo::default()
+                    ..TickInfoInner::DEFAULT
                 },
             ),
         ]),
@@ -89,7 +89,7 @@ fn snapshot_rejects_zero_gross_initialized_tick() {
     snapshot
         .ticks
         .inner
-        .insert(tick(-120), TickInfo::default().into());
+        .insert(tick(-120), TickInfoInner::DEFAULT);
 
     assert_eq!(Pool::try_from(snapshot).unwrap_err(), Error::InvalidTick);
 }

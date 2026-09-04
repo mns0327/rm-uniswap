@@ -18,13 +18,12 @@ mod v4;
 
 pub use core::error::Error;
 
-use crate::v4::Liquidity;
 use crate::{
     core::{
         concentrated::ticks::slab::TickSlab,
         types::{tick::TickIndex, tick_spacing::TickSpacing},
     },
-    v4::TickInfo,
+    v4::{Liquidity, TickInfo, TickInfoInner},
 };
 
 const TICK_SPACING: TickSpacing = TickSpacing::MIN;
@@ -43,14 +42,17 @@ fn tick(value: i32) -> TickIndex {
 
 fn info(tick_idx: i32) -> TickInfo {
     TickInfo {
-        liquidity_gross: Liquidity::new(tick_idx as u128 + 1),
-        liquidity_net: tick_idx as i128,
+        inner: TickInfoInner {
+            liquidity_gross: Liquidity::new(tick_idx as u128 + 1),
+            liquidity_net: tick_idx as i128,
+            ..TickInfoInner::DEFAULT
+        },
         ..TickInfo::DEFAULT
     }
 }
 
 fn liquidity_gross(info: &TickInfo) -> u128 {
-    info.liquidity_gross.value()
+    info.inner.liquidity_gross.value()
 }
 
 fn build_dense_keys() -> Vec<i32> {

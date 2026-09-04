@@ -11,23 +11,33 @@
     "inner": {
       "-5": {
         "liquidity_gross": 5609029060868,
-        "liquidity_net": 5609029060868
+        "liquidity_net": 5609029060868,
+        "fee_growth_outside0_x128": 0,
+        "fee_growth_outside1_x128": 0
       },
       "-3": {
         "liquidity_gross": 1429877564585,
-        "liquidity_net": 1429877564585
+        "liquidity_net": 1429877564585,
+        "fee_growth_outside0_x128": 0,
+        "fee_growth_outside1_x128": 0
       },
       "-1": {
         "liquidity_gross": 15004779038361,
-        "liquidity_net": 15004779038361
+        "liquidity_net": 15004779038361,
+        "fee_growth_outside0_x128": 0,
+        "fee_growth_outside1_x128": 0
       },
       "3": {
         "liquidity_gross": 16434656602946,
-        "liquidity_net": -16434656602946
+        "liquidity_net": -16434656602946,
+        "fee_growth_outside0_x128": 0,
+        "fee_growth_outside1_x128": 0
       },
       "4": {
         "liquidity_gross": 5609029060868,
-        "liquidity_net": -5609029060868
+        "liquidity_net": -5609029060868,
+        "fee_growth_outside0_x128": 0,
+        "fee_growth_outside1_x128": 0
       }
     }
   }

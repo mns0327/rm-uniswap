@@ -33,7 +33,7 @@ fn bench_pool_ticks(c: &mut Criterion) {
             black_box(
                 pool.ticks
                     .next_initialized_tick(indexer, black_box(true))
-                    .map(|(indexer, tick_info)| (indexer, tick_info.liquidity_gross)),
+                    .map(|(indexer, tick_info)| (indexer, tick_info.inner.liquidity_gross)),
             )
         })
     });
@@ -44,7 +44,7 @@ fn bench_pool_ticks(c: &mut Criterion) {
             black_box(
                 pool.ticks
                     .next_initialized_tick(indexer, black_box(false))
-                    .map(|(indexer, tick_info)| (indexer, tick_info.liquidity_gross)),
+                    .map(|(indexer, tick_info)| (indexer, tick_info.inner.liquidity_gross)),
             )
         })
     });
@@ -72,7 +72,7 @@ fn bench_pool_ticks(c: &mut Criterion) {
             |mut ticks| {
                 let indexer = ticks.indexer(black_box(tick_upper));
                 ticks
-                    .update_initialized_tick(indexer, |tick_info| {
+                    .update_initialized_tick(indexer, |_, _, tick_info| {
                         tick_info.fee_growth_outside0_x128 = black_box(U256::from(500u64));
                         Ok(())
                     })

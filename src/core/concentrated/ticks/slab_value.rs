@@ -247,7 +247,10 @@ impl TickSlabValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::types::tick::TickIndex, v4::Liquidity};
+    use crate::{
+        core::types::tick::TickIndex,
+        v4::{Liquidity, TickInfoInner},
+    };
 
     const TICK_SPACING: u32 = 1;
 
@@ -261,7 +264,10 @@ mod tests {
 
     fn info(liquidity_gross: u128) -> TickInfo {
         TickInfo {
-            liquidity_gross: Liquidity::new(liquidity_gross),
+            inner: TickInfoInner {
+                liquidity_gross: Liquidity::new(liquidity_gross),
+                ..TickInfoInner::DEFAULT
+            },
             ..TickInfo::DEFAULT
         }
     }

@@ -12,4 +12,4 @@ pub(crate) mod tick_slab_indexer;
 pub(crate) mod tick_spacing;
 pub(crate) mod ticks;
 
-pub use ticks::{PoolTicksSnapshot, TickInfo, TickInfoSnapshot};
+pub use ticks::{PoolTicksSnapshot, TickInfo, TickInfoInner};

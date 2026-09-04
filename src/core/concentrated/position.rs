@@ -240,7 +240,7 @@ mod tests {
     use super::*;
 
     use crate::{
-        core::types::ticks::TickInfoSnapshot,
+        core::types::ticks::TickInfoInner,
         v4::{Liquidity, TickIndex, TickSpacing},
     };
 
@@ -268,11 +268,11 @@ mod tests {
         }
     }
 
-    fn tick_snapshot(gross: u128, net: i128) -> TickInfoSnapshot {
-        TickInfoSnapshot {
+    fn tick_snapshot(gross: u128, net: i128) -> TickInfoInner {
+        TickInfoInner {
             liquidity_gross: Liquidity::new(gross),
             liquidity_net: net,
-            ..TickInfoSnapshot::DEFAULT
+            ..TickInfoInner::DEFAULT
         }
     }
 

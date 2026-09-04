@@ -13,10 +13,9 @@ use crate::{
             tick::TickIndex,
             tick_slab_indexer::TickSlabIndexer,
             tick_spacing::{TickSpacing, calculate_cache_cap},
-            ticks::TickInfoSnapshot,
         },
     },
-    v4::{Liquidity, TickInfo},
+    v4::{Liquidity, SqrtPriceX96, TickInfo, TickInfoInner},
 };
 
 const INITIAL_CACHE_VALUE: u16 = u16::MAX;
@@ -272,7 +271,7 @@ impl TickSlab {
         fee_growth_global0_x128: U256,
         fee_growth_global1_x128: U256,
     ) -> Result<i128, SwapSimError> {
-        self.update_initialized_tick(tick_indexer, |tick_info| {
+        self.update_initialized_tick(tick_indexer, |_, _, tick_info| {
             tick_info.fee_growth_outside0_x128 =
                 fee_growth_global0_x128.wrapping_sub(tick_info.fee_growth_outside0_x128);
             tick_info.fee_growth_outside1_x128 =
@@ -296,11 +295,17 @@ impl TickSlab {
         update: F,
     ) -> Result<T, SwapSimError>
     where
-        F: FnOnce(&mut TickInfo) -> Result<T, SwapSimError>,
+        F: FnOnce(&TickIndex, &SqrtPriceX96, &mut TickInfoInner) -> Result<T, SwapSimError>,
     {
         self.get_slab_mut(tick_indexer.cache_index())
             .and_then(|(_, slab)| slab.get_mut(&tick_indexer))
-            .map_or(Err(SwapSimError::MissingInitializedTick), update)
+            .map_or(Err(SwapSimError::MissingInitializedTick), |tick_info| {
+                update(
+                    &tick_info.tick_index,
+                    &tick_info.sqrt_price_x96,
+                    &mut tick_info.inner,
+                )
+            })
     }
 
     /// Removes a tick and frees its page when the page no longer has initialized ticks.
@@ -457,7 +462,7 @@ impl TickSlab {
     /// Pages are visited in protocol order and each page-local slot is decoded
     /// back into the raw tick for this slab's spacing. Empty cache pages and
     /// uninitialized slots are omitted from the snapshot.
-    pub fn snapshot(&self) -> BTreeMap<TickIndex, TickInfoSnapshot> {
+    pub fn snapshot(&self) -> BTreeMap<TickIndex, TickInfoInner> {
         let mut ticks = BTreeMap::new();
         let mut cache_index = self.bitmap.next_or_eq(0);
 
@@ -467,7 +472,7 @@ impl TickSlab {
                     ticks.insert(
                         TickSlabIndexer::from_parts(current_cache_index, slot_index)
                             .to_tick(self.tick_spacing.as_u32()),
-                        TickInfoSnapshot::from(*tick_info),
+                        tick_info.inner.clone(),
                     );
                 }
             }
@@ -492,17 +497,15 @@ impl TickSlab {
     /// initialized ticks: gross liquidity must be non-zero and net liquidity
     /// must fit within gross liquidity. Invalid snapshots fail before returning
     /// partially trusted storage to callers.
-    pub fn from_snapshot<I>(
+    pub fn from_snapshot(
         tick_spacing: TickSpacing,
-        ticks: BTreeMap<TickIndex, I>,
-    ) -> Result<Self, SwapSimError>
-    where
-        I: Into<TickInfoSnapshot>,
-    {
+        ticks: BTreeMap<TickIndex, TickInfoInner>,
+    ) -> Result<Self, SwapSimError> {
         let mut slab = Self::new(tick_spacing);
 
         for (tick_idx, info) in ticks {
-            let info = info.into();
+            let tick_info = TickInfo::with_inner(tick_idx, tick_idx.sqrt_price_x96(), info);
+
             if !tick_idx.for_spacing(tick_spacing) {
                 return Err(SwapSimError::InvalidTick);
             }
@@ -518,7 +521,7 @@ impl TickSlab {
             }
 
             let indexer = slab.indexer(tick_idx);
-            slab.insert(indexer, info.into_tick_info(tick_idx))?;
+            slab.insert(indexer, tick_info)?;
         }
 
         Ok(slab)
@@ -538,13 +541,16 @@ mod tests {
 
     fn info(liquidity_gross: u128) -> TickInfo {
         TickInfo {
-            liquidity_gross: Liquidity::new(liquidity_gross),
+            inner: TickInfoInner {
+                liquidity_gross: Liquidity::new(liquidity_gross),
+                ..TickInfoInner::DEFAULT
+            },
             ..TickInfo::DEFAULT
         }
     }
 
-    fn snapshot_info(liquidity_gross: u128) -> TickInfoSnapshot {
-        TickInfoSnapshot::from(info(liquidity_gross))
+    fn snapshot_info(liquidity_gross: u128) -> TickInfoInner {
+        info(liquidity_gross).inner
     }
 
     fn cache_tick(cache_index: u16) -> TickIndex {
@@ -764,7 +770,7 @@ mod tests {
 
         slab.insert(indexer, info(100)).unwrap();
 
-        let updated = slab.update_initialized_tick(indexer, |tick_info| {
+        let updated = slab.update_initialized_tick(indexer, |_, _, tick_info| {
             tick_info.liquidity_gross = Liquidity::new(250);
             Ok(true)
         });
@@ -779,7 +785,7 @@ mod tests {
         let indexer = slab.indexer(tick(7));
         let mut called = false;
 
-        let updated = slab.update_initialized_tick(indexer, |_| {
+        let updated = slab.update_initialized_tick(indexer, |_, _, _| {
             called = true;
             Ok(true)
         });
@@ -800,7 +806,7 @@ mod tests {
 
         slab.insert(initialized, info(100)).unwrap();
 
-        let updated = slab.update_initialized_tick(missing, |_| {
+        let updated = slab.update_initialized_tick(missing, |_, _, _| {
             called = true;
             Ok(true)
         });
@@ -1095,8 +1101,11 @@ mod tests {
         ]);
 
         for (&tick_idx, &tick_info) in &ticks {
-            slab.insert(slab.indexer(tick_idx), tick_info.into_tick_info(tick_idx))
-                .unwrap();
+            slab.insert(
+                slab.indexer(tick_idx),
+                TickInfo::with_inner(tick_idx, tick_idx.sqrt_price_x96(), tick_info),
+            )
+            .unwrap();
         }
 
         assert_eq!(slab.snapshot(), ticks);
@@ -1162,10 +1171,10 @@ mod tests {
     fn from_snapshot_rejects_liquidity_net_above_gross() {
         let ticks = BTreeMap::from([(
             tick(10),
-            TickInfoSnapshot {
+            TickInfoInner {
                 liquidity_gross: Liquidity::new(100),
                 liquidity_net: 101,
-                ..TickInfoSnapshot::DEFAULT
+                ..TickInfoInner::DEFAULT
             },
         )]);
 
@@ -1179,10 +1188,10 @@ mod tests {
     fn from_snapshot_rejects_liquidity_gross_above_tick_cap() {
         let ticks = BTreeMap::from([(
             tick(10),
-            TickInfoSnapshot {
+            TickInfoInner {
                 liquidity_gross: Liquidity::MAX,
                 liquidity_net: 0,
-                ..TickInfoSnapshot::DEFAULT
+                ..TickInfoInner::DEFAULT
             },
         )]);
 
@@ -1194,7 +1203,7 @@ mod tests {
 
     #[test]
     fn from_snapshot_rejects_uninitialized_tick_entries() {
-        let ticks = BTreeMap::from([(tick(10), TickInfoSnapshot::DEFAULT)]);
+        let ticks = BTreeMap::from([(tick(10), TickInfoInner::DEFAULT)]);
 
         assert_eq!(
             TickSlab::from_snapshot(TICK_SPACING, ticks).err(),
@@ -1212,8 +1221,11 @@ mod tests {
         ]);
 
         for (&tick_idx, &tick_info) in &ticks {
-            slab.insert(slab.indexer(tick_idx), tick_info.into_tick_info(tick_idx))
-                .unwrap();
+            slab.insert(
+                slab.indexer(tick_idx),
+                TickInfo::with_inner(tick_idx, tick_idx.sqrt_price_x96(), tick_info),
+            )
+            .unwrap();
         }
 
         let json = serde_json::to_string(&slab).unwrap();

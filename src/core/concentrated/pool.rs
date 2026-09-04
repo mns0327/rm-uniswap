@@ -360,7 +360,12 @@ impl<P: PositionsAccess> Pool<P> {
             ) = self
                 .ticks
                 .get(self.ticks.indexer(tick_lower))
-                .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
+                .map(|tick| {
+                    (
+                        tick.inner.fee_growth_outside0_x128,
+                        tick.inner.fee_growth_outside1_x128,
+                    )
+                })
                 .unwrap_or((U256::ZERO, U256::ZERO));
             (
                 upper_fee_growth_outside0_x128,
@@ -368,7 +373,12 @@ impl<P: PositionsAccess> Pool<P> {
             ) = self
                 .ticks
                 .get(self.ticks.indexer(tick_upper))
-                .map(|tick| (tick.fee_growth_outside0_x128, tick.fee_growth_outside1_x128))
+                .map(|tick| {
+                    (
+                        tick.inner.fee_growth_outside0_x128,
+                        tick.inner.fee_growth_outside1_x128,
+                    )
+                })
                 .unwrap_or((U256::ZERO, U256::ZERO));
         }
 
@@ -506,24 +516,24 @@ impl<P: PositionsAccess> Pool<P> {
         let tick_indexer = self.ticks.indexer(tick_index);
 
         let (
+            sqrt_price_x96,
             liquidity_gross_before,
             liquidity_net_before,
-            sqrt_price_x96,
             fee_growth_outside0_x128,
             fee_growth_outside1_x128,
         ) = if let Some(tick_info) = self.ticks.get(tick_indexer) {
             (
-                tick_info.liquidity_gross,
-                tick_info.liquidity_net,
-                tick_info.sqrt_price_x96(),
-                tick_info.fee_growth_outside0_x128,
-                tick_info.fee_growth_outside1_x128,
+                tick_info.sqrt_price_x96,
+                tick_info.inner.liquidity_gross,
+                tick_info.inner.liquidity_net,
+                tick_info.inner.fee_growth_outside0_x128,
+                tick_info.inner.fee_growth_outside1_x128,
             )
         } else {
             let sqrt_price = tick_index.sqrt_price_x96();
             self.ticks
                 .insert(tick_indexer, TickInfo::new(tick_index, sqrt_price))?;
-            (Liquidity::ZERO, 0, sqrt_price, U256::ZERO, U256::ZERO)
+            (sqrt_price, Liquidity::ZERO, 0, U256::ZERO, U256::ZERO)
         };
 
         let liquidity_gross_after = Liquidity::new(
@@ -556,7 +566,7 @@ impl<P: PositionsAccess> Pool<P> {
         }
 
         self.ticks
-            .update_initialized_tick(tick_indexer, |tick_info| {
+            .update_initialized_tick(tick_indexer, |_, sqrt_price_x96, tick_info| {
                 // Newly initialized ticks on or below the current tick start
                 // with outside fee growth set to the current global values.
                 if liquidity_gross_before.is_zero() && tick_index <= self.state.tick {
@@ -568,7 +578,7 @@ impl<P: PositionsAccess> Pool<P> {
                 tick_info.liquidity_net = liquidity_net;
 
                 Ok((
-                    tick_info.sqrt_price_x96(),
+                    *sqrt_price_x96,
                     tick_info.fee_growth_outside0_x128,
                     tick_info.fee_growth_outside1_x128,
                 ))
@@ -812,14 +822,6 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
         }
     }
 
-    state.set(
-        result.tick,
-        result.sqrt_price_x96,
-        result.liquidity,
-        zero_for_one,
-        step.fee_growth_global_x128,
-    );
-
     result.swap_delta = if zero_for_one == exact_in {
         let amount0 = amount_specified
             .checked_sub(amount_specified_remaining)
@@ -843,6 +845,14 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
 
         BalanceDelta::new(amount0, amount1)
     };
+
+    state.set(
+        result.tick,
+        result.sqrt_price_x96,
+        result.liquidity,
+        zero_for_one,
+        step.fee_growth_global_x128,
+    );
 
     Ok(result)
 }
@@ -980,9 +990,14 @@ mod tests {
         let tick = TickIndex::new(tick).unwrap();
         let liquidity = Liquidity::new(liquidity);
         let fee = Fee::new(fee).expect("fee out of range");
-        let tick_map =
-            TickSlab::from_snapshot(tick_spacing, ticks.into_iter().collect::<BTreeMap<_, _>>())
-                .expect("valid ticks");
+        let tick_map = TickSlab::from_snapshot(
+            tick_spacing,
+            ticks
+                .into_iter()
+                .map(|(k, v)| (k, v.inner))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .expect("valid ticks");
 
         let swap_fee = SwapFee::new(fee, protocol_fee).expect("swap fee out of range");
 
@@ -1412,11 +1427,19 @@ mod tests {
 
         let ticks = &pool.ticks;
         assert_eq!(
-            ticks.get(ticks.indexer(tick(-120))).unwrap().liquidity_net,
+            ticks
+                .get(ticks.indexer(tick(-120)))
+                .unwrap()
+                .inner
+                .liquidity_net,
             liq as i128
         );
         assert_eq!(
-            ticks.get(ticks.indexer(tick(120))).unwrap().liquidity_net,
+            ticks
+                .get(ticks.indexer(tick(120)))
+                .unwrap()
+                .inner
+                .liquidity_net,
             -(liq as i128)
         );
     }
@@ -1483,7 +1506,10 @@ mod tests {
     fn rejects_out_of_range_tick_entry() {
         TickSlab::from_snapshot(
             tick_spacing_60(),
-            [tick_info(TickIndex::MIN.value() - 1, 0, 1)].into(),
+            [tick_info(TickIndex::MIN.value() - 1, 0, 1)]
+                .into_iter()
+                .map(|(tick_idx, tick_info)| (tick_idx, tick_info.inner))
+                .collect(),
         )
         .unwrap_err();
     }
