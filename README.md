@@ -17,15 +17,12 @@ building tools that need fast, deterministic Uniswap pool behavior.
 ```toml
 [dependencies]
 rm-uniswap = "0.1"
-alloy = "2"
-ruint = "1"
 ```
 
 ```rust
-use alloy::primitives::I256;
-use ruint::aliases::U256;
 use rm_uniswap::{
-    Fee, Liquidity, Pool, ProtocolFee, SqrtPriceX96, SwapFee, SwapParams, TickIndex, TickSpacing,
+    Fee, I256, Liquidity, Pool, ProtocolFee, SqrtPriceX96, SwapFee, SwapParams, TickIndex,
+    TickSpacing, U256,
 };
 
 // Start from an empty-tick pool at price 1.0, with a 0.3% swap fee.

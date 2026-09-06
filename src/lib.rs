@@ -2,6 +2,11 @@ mod core;
 pub mod v3;
 pub mod v4;
 
+/// Re-exported so callers don't need to depend on `alloy`/`ruint` directly
+/// (and risk a version mismatch with the types used in this crate's API).
+pub use alloy::primitives::{Address, FixedBytes, I256};
+pub use ruint::aliases::U256;
+
 pub use core::concentrated::pool::{Pool, PoolSnapshot, TickCrossInfo};
 pub use core::concentrated::ticks::slab::TickSlab as PoolTicks;
 pub use core::error::Error;
