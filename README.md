@@ -5,13 +5,9 @@
 [![Documentation](https://docs.rs/rm-uniswap/badge.svg)](https://docs.rs/rm-uniswap)
 [![Rust](https://img.shields.io/badge/rust-1.94.1%2B-blue.svg?maxAge=3600)](https://github.com/mns0327/rm-uniswap)
 
-Uniswap v3/v4 concentrated liquidity pool math and state simulation, in Rust.
+Rm-uniswap is a Rust port of Uniswap’s concentrated liquidity pool math and state simulation.
 
-`rm-uniswap` reimplements the concentrated-liquidity pool logic (tick math,
-swap stepping, tick crossing, fee/protocol-fee accounting) so pool state and
-swaps can be simulated entirely off-chain — no RPC calls, no `eth_call`,
-no on-chain gas. It's built for backtesting, strategy simulation, and
-building tools that need fast, deterministic Uniswap pool behavior.
+The library is built for high-performance simulation and includes both v3 and v4 pool implementations.
 
 ## Usage
 
