@@ -5,6 +5,7 @@
 //! snapshot for quotes or a mutable state reference for live swaps.
 
 use ruint::aliases::U256;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::core::types::{liquidity::Liquidity, sqrt_price::SqrtPriceX96, tick::TickIndex};
@@ -22,7 +23,8 @@ use crate::core::types::{liquidity::Liquidity, sqrt_price::SqrtPriceX96, tick::T
 /// * `liquidity` must equal the net active liquidity at `tick`.
 /// * Fee-growth values use Uniswap's Q128 accumulator semantics and may wrap
 ///   modulo 2^256, matching on-chain arithmetic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PoolState {
     /// Current pool sqrt price in Q64.96 fixed-point.
     pub sqrt_price_x96: SqrtPriceX96,
@@ -34,11 +36,11 @@ pub struct PoolState {
     pub liquidity: Liquidity,
 
     /// All-time LP fee growth per unit of active liquidity in token0, Q128.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub fee_growth_global0_x128: U256,
 
     /// All-time LP fee growth per unit of active liquidity in token1, Q128.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub fee_growth_global1_x128: U256,
 }
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::core::types::fee::{Fee, protocol_fee::ProtocolFee};
@@ -8,7 +9,8 @@ use crate::core::types::fee::{Fee, protocol_fee::ProtocolFee};
 /// protocol component can differ by swap direction. This type stores the raw
 /// LP fee and protocol-fee configuration, then caches the calculated effective
 /// fees for both token0-to-token1 and token1-to-token0 swaps.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SwapFee {
     lp_fee: Fee,
     protocol_fee: ProtocolFee,

@@ -2,17 +2,21 @@
 name = "rm-uniswap"
 version = "0.1.0"
 edition = "2024"
+description = "Uniswap v3/v4 concentrated liquidity pool math and state simulation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mns0327/rm-uniswap"
+readme = "README.md"
 
 [workspace]
 members = [".", "xtask"]
 
 [dependencies]
-ahash = { version = "0.8.12", features = ["serde"] }
+ahash = "0.8.12"
 alloy = "2.4.1"
 dashmap = "6.2.1"
 parking_lot = "0.12.5"
 ruint = "1.18.0"
-serde = "1.0.228"
+serde = { version = "1.0.228", optional = true }
 slab = "0.4.12"
 tracing = "0.1.44"
 
@@ -20,6 +24,10 @@ tracing = "0.1.44"
 proptest = "1"
 criterion = "0.5"
 serde_json = "1.0.150"
+
+[features]
+default = ["serde"]
+serde = ["dep:serde", "serde/derive", "ahash/serde"]
 
 [[bench]]
 name = "small_ratio"

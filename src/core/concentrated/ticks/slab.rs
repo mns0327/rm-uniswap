@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use ruint::aliases::U256;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use slab::Slab;
 
@@ -52,6 +53,7 @@ pub struct TickSlab {
     max_liquidity_per_tick: Liquidity,
 }
 
+#[cfg(feature = "serde")]
 impl Serialize for TickSlab {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -61,6 +63,7 @@ impl Serialize for TickSlab {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for TickSlab {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1220,6 +1223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
     fn serde_roundtrips_through_pool_ticks_snapshot() {
         let tick_spacing = TickSpacing::new(10).unwrap();
         let mut slab = TickSlab::new(tick_spacing);
@@ -1244,6 +1248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
     fn serde_rejects_invalid_pool_ticks_snapshot() {
         let tick_spacing = TickSpacing::new(10).unwrap();
         let snapshot = PoolTicksSnapshot {

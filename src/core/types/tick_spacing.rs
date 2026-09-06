@@ -1,6 +1,7 @@
 use crate::core::types::{
     liquidity::Liquidity, tick::TickIndex, tick_slab_indexer::TickSlabIndexer,
 };
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use std::ops::Deref;
@@ -10,8 +11,9 @@ use std::ops::Deref;
 /// Wrapping a raw `i16` in this type guarantees that any `TickSpacing` in
 /// circulation is positive while preventing zero or negative spacings from
 /// reaching pool math.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct TickSpacing(i16);
 
 impl TickSpacing {

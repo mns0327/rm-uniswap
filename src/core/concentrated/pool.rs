@@ -16,7 +16,9 @@
 
 use alloy::primitives::I256;
 use ruint::aliases::U256;
+#[cfg(feature = "serde")]
 use serde::de::DeserializeOwned;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Error as SwapSimError;
@@ -73,6 +75,7 @@ pub struct Pool<P = ()> {
     pub positions: P,
 }
 
+#[cfg(feature = "serde")]
 impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Serialize for Pool<P> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -82,6 +85,7 @@ impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Serialize for Po
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de, P: Default + Clone + Serialize + DeserializeOwned + PositionsAccess> Deserialize<'de>
     for Pool<P>
 {
@@ -148,29 +152,33 @@ impl<P: PositionsAccess> PoolSnapshot<P> {
 /// storage from the source [`Pool`]. Treat values decoded from external data as
 /// untrusted and construct a runtime pool with [`Pool::try_from`] so all
 /// invariants are validated.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound(
-    serialize = "P: Serialize",
-    deserialize = "P: Deserialize<'de> + Default"
-))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "P: Serialize",
+        deserialize = "P: Deserialize<'de> + Default"
+    ))
+)]
 pub struct PoolSnapshot<P = ()> {
     /// Current pool price, active tick, liquidity, and fee-growth globals.
     pub state: PoolState,
     /// Base LP fee before protocol-fee adjustments.
     pub fee: Fee,
     /// Directional protocol-fee configuration.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub protocol_fee: ProtocolFee,
     /// Pool tick spacing used to validate position boundaries and tick storage.
     pub tick_spacing: TickSpacing,
     /// Serializable initialized tick storage.
     pub ticks: PoolTicksSnapshot,
     /// Serializable position storage, or `()` when positions are disabled.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub positions: P,
 }
 
-impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
+impl<P: Clone + PositionsAccess> Pool<P> {
     /// Capture an owned snapshot from the current pool storage.
     ///
     /// Pool state is copied by value, while ticks and positions are cloned into
@@ -246,9 +254,7 @@ impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> Pool<P> {
     }
 }
 
-impl<P: Serialize + DeserializeOwned + Clone + PositionsAccess> TryFrom<PoolSnapshot<P>>
-    for Pool<P>
-{
+impl<P: Clone + PositionsAccess> TryFrom<PoolSnapshot<P>> for Pool<P> {
     type Error = SwapSimError;
 
     fn try_from(snapshot: PoolSnapshot<P>) -> Result<Self, Self::Error> {

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use ahash::AHashMap;
 use alloy::primitives::{Address, FixedBytes};
 use ruint::aliases::U256;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -26,7 +27,8 @@ use crate::{
 /// The same owner may hold multiple positions over the same tick range by using
 /// a distinct `salt`. Tick validation is owned by the caller; this key stores
 /// already-validated [`TickIndex`] values exactly as supplied.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PositionIndex {
     /// Account or manager address that owns the position.
     pub owner: Address,
@@ -43,7 +45,8 @@ pub struct PositionIndex {
 /// Fee-growth checkpoints are recorded when the position is last touched.
 /// Comparing the current inside fee growth against these values yields the fees
 /// accrued by the position's liquidity since that update.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PositionState {
     /// Active liquidity owned by the position across its tick range.
     pub liquidity: Liquidity,
@@ -59,7 +62,8 @@ pub struct PositionState {
 /// on the position-access abstraction instead of a concrete hash-map
 /// implementation.
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Positions(pub AHashMap<PositionIndex, PositionState>);
 
 /// Abstraction over optional position storage.

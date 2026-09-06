@@ -3,6 +3,7 @@ use ruint::{
     aliases::{U160, U256},
     uint,
 };
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, ops::Deref};
 
@@ -14,8 +15,9 @@ use crate::core::{math::tick::get_tick_at_sqrt_price, types::tick::TickIndex};
 /// circulation is inside the protocol-supported sqrt-price range. This mirrors
 /// [`TickIndex`]: callers validate once at the boundary, then pass a compact
 /// type through pool math without repeatedly checking raw values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct SqrtPriceX96(U160);
 
 impl SqrtPriceX96 {
@@ -190,6 +192,7 @@ macro_rules! sqrt_price_x96 {
     }};
 }
 
+#[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for SqrtPriceX96 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

@@ -1,4 +1,5 @@
 use ruint::aliases::U256;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, ops::Deref};
 
@@ -11,10 +12,9 @@ use std::{fmt::Display, ops::Deref};
 /// This type intentionally does not enforce non-zero liquidity. Code paths
 /// that divide by liquidity or rely on active liquidity should validate that
 /// separately, typically with `NonZeroLiquidity`.
-#[derive(
-    Debug, Clone, Default, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Liquidity(u128);
 
 impl Liquidity {
@@ -263,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
     fn serde_json_is_transparent_number() {
         let liquidity = Liquidity::new(123_456);
         let json = serde_json::to_string(&liquidity).unwrap();
@@ -273,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
     fn serde_json_roundtrips_protocol_bounds() {
         for liquidity in [Liquidity::ZERO, Liquidity::MAX] {
             let json = serde_json::to_string(&liquidity).unwrap();

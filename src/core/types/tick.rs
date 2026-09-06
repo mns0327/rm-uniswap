@@ -5,6 +5,7 @@
 //! checked against the protocol tick range, so the rest of the simulator can
 //! pass ticks around without repeating boundary checks.
 
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
@@ -19,10 +20,9 @@ use crate::{
 /// circulation is inside [`Self::MIN`]..=[`Self::MAX`]. This mirrors
 /// [`SqrtPriceX96`]: callers validate once at the boundary, then pass a compact
 /// domain type through pool math, tick spacing checks, and price conversion.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct TickIndex(i32);
 
 impl TickIndex {

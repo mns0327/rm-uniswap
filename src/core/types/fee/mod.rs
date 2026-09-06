@@ -1,3 +1,4 @@
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 pub mod protocol_fee;
@@ -79,6 +80,7 @@ impl Fee {
     }
 }
 
+#[cfg(feature = "serde")]
 impl Serialize for Fee {
     /// Serializes `Fee` as the raw pips integer for snapshot compatibility.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -89,6 +91,7 @@ impl Serialize for Fee {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for Fee {
     /// Deserializes raw pips and validates the value before constructing `Fee`.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

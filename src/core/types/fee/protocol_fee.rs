@@ -1,4 +1,5 @@
 use crate::core::types::fee::Fee;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Maximum directional protocol fee accepted by Uniswap V4.
@@ -23,7 +24,8 @@ pub(crate) const PIPS_DENOMINATOR: u32 = 1_000_000;
 /// Values are stored as pips in the protocol-fee domain of
 /// `0..=MAX_PROTOCOL_FEE`. Use [`ProtocolFee::ZERO`] when protocol fees are
 /// disabled in both directions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ProtocolFee {
     zero_for_one_fee: u16,
     one_for_zero_fee: u16,

@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use ruint::aliases::U256;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::core::types::{
@@ -140,7 +141,8 @@ impl Default for TickInfo {
 /// serializable snapshots. Runtime storage wraps it in [`TickInfo`] to attach
 /// the validated tick index and derived sqrt price needed during swap
 /// traversal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct TickInfoInner {
     /// Gross liquidity attached to this initialized tick.
     ///
@@ -159,14 +161,14 @@ pub struct TickInfoInner {
     ///
     /// Crossing a tick flips this value around the token0 global fee-growth
     /// accumulator with wrapping `U256` arithmetic.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub fee_growth_outside0_x128: U256,
 
     /// Fee growth on the opposite side of this tick from the current price.
     ///
     /// Crossing a tick flips this value around the token1 global fee-growth
     /// accumulator with wrapping `U256` arithmetic.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub fee_growth_outside1_x128: U256,
 }
 
@@ -186,7 +188,8 @@ impl TickInfoInner {
 /// no mutable storage with the source pool. External snapshots are untrusted:
 /// rebuild them through the tick-store snapshot loader so spacing alignment,
 /// non-zero gross liquidity, and net-liquidity bounds are validated before use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PoolTicksSnapshot {
     /// Tick spacing used to interpret every key in `inner`.
     pub tick_spacing: TickSpacing,
