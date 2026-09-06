@@ -3352,7 +3352,7 @@ dependencies = [
 
 [[package]]
 name = "rm-uniswap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "alloy",

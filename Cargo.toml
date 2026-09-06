@@ -1,6 +1,6 @@
 [package]
 name = "rm-uniswap"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.94.1"
 description = "Uniswap v3/v4 concentrated liquidity pool math and state simulation"
