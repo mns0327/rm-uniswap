@@ -21,21 +21,32 @@ rm-uniswap = "0.1"
 
 ```rust
 use rm_uniswap::{
-    Fee, I256, Liquidity, Pool, ProtocolFee, SqrtPriceX96, SwapFee, SwapParams, TickIndex,
-    TickSpacing, U256,
+    Address, Fee, FixedBytes, I256, Liquidity, ModifyLiquidityParams, Pool, ProtocolFee,
+    SqrtPriceX96, SwapFee, SwapParams, TickIndex, TickSpacing, U256,
 };
 
-// Start from an empty-tick pool at price 1.0, with a 0.3% swap fee.
+// Pools start empty, at price 1.0, with a 0.3% swap fee.
 let sqrt_price = SqrtPriceX96::from_u256(U256::ONE << 96).unwrap();
 let swap_fee = SwapFee::new(Fee::new(3_000).unwrap(), ProtocolFee::ZERO).unwrap();
 
 let mut pool: Pool = Pool::new(
     sqrt_price,
     TickIndex::new(0).unwrap(),
-    Liquidity::new(1_000_000_000_000),
+    Liquidity::ZERO,
     swap_fee,
     TickSpacing::new(60).unwrap(),
 );
+
+// A swap needs liquidity in range first, so mint a position around the
+// current price before swapping.
+pool.modify_liquidity(ModifyLiquidityParams {
+    tick_lower: TickIndex::new(-60).unwrap(),
+    tick_upper: TickIndex::new(60).unwrap(),
+    liquidity_delta: 1_000_000_000_000,
+    owner: Address::ZERO,
+    salt: FixedBytes::ZERO,
+})
+.unwrap();
 
 // Exact input swap of 1_000_000 units of token0 for token1.
 let result = pool
