@@ -241,9 +241,11 @@ impl TickSlab {
     /// Returns the next initialized tick boundary in the given swap direction.
     ///
     /// `zero_for_one` swaps move left through the tick range, so they use the
-    /// previous initialized boundary. The opposite direction moves right and
-    /// uses the next initialized boundary. The current slot is never returned as
-    /// the next boundary.
+    /// previous initialized boundary, inclusive of the current slot: if the
+    /// pool's current tick is itself an initialized boundary, it must be
+    /// returned immediately since the swap has not yet crossed it. The
+    /// opposite direction moves right and uses the next initialized boundary,
+    /// which is always strictly after the current slot.
     #[inline(always)]
     pub fn next_initialized_tick(
         &self,
@@ -251,7 +253,9 @@ impl TickSlab {
         zero_for_one: bool,
     ) -> Option<(TickSlabIndexer, &TickInfo)> {
         if zero_for_one {
-            self.prev(tick_indexer)
+            self.get(tick_indexer)
+                .map(|tick_info| (tick_indexer, tick_info))
+                .or_else(|| self.prev(tick_indexer))
         } else {
             self.next(tick_indexer)
         }
@@ -1013,7 +1017,14 @@ mod tests {
         assert_eq!(
             slab.next_initialized_tick(page_1_first, true)
                 .map(|(indexer, tick_info)| (indexer, *tick_info)),
-            Some((page_0_last, info(31)))
+            Some((page_1_first, info(100))),
+            "zero_for_one search is inclusive of an initialized current tick"
+        );
+        assert_eq!(
+            slab.next_initialized_tick(page_0_last, true)
+                .map(|(indexer, tick_info)| (indexer, *tick_info)),
+            Some((page_0_last, info(31))),
+            "zero_for_one search returns the current tick itself when initialized"
         );
         assert_eq!(
             slab.next_initialized_tick(page_1_first, false)

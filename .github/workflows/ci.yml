@@ -50,3 +50,6 @@ jobs:
 
       - name: Replay committed Forge parity fixture
         run: make test-forge-parity
+
+      - name: Replay committed historical fixture
+        run: make test-historical-replay

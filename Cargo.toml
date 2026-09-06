@@ -3,6 +3,9 @@ name = "rm-uniswap"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "xtask"]
+
 [dependencies]
 ahash = { version = "0.8.12", features = ["serde"] }
 alloy = "2.4.1"
