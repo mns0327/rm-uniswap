@@ -3,6 +3,7 @@
 [![Build Status](https://github.com/mns0327/rm-uniswap/actions/workflows/ci.yml/badge.svg)](https://github.com/mns0327/rm-uniswap/actions)
 [![crates.io](https://img.shields.io/crates/v/rm-uniswap.svg)](https://crates.io/crates/rm-uniswap)
 [![Documentation](https://docs.rs/rm-uniswap/badge.svg)](https://docs.rs/rm-uniswap)
+[![Rust](https://img.shields.io/badge/rust-1.94.1%2B-blue.svg?maxAge=3600)](https://github.com/mns0327/rm-uniswap)
 
 Uniswap v3/v4 concentrated liquidity pool math and state simulation, in Rust.
 
