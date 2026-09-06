@@ -4,3 +4,4 @@
 /forge/lib/*
 
 .env
+.DS_Store
