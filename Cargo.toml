@@ -6,6 +6,14 @@ description = "Uniswap v3/v4 concentrated liquidity pool math and state simulati
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mns0327/rm-uniswap"
 readme = "README.md"
+exclude = [
+    "/forge",
+    "/samples",
+    "/proptest-regressions",
+    "/.github",
+    "/Makefile",
+    ".DS_Store",
+]
 
 [workspace]
 members = [".", "xtask"]
