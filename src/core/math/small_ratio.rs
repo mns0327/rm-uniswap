@@ -135,7 +135,7 @@ fn mul_div_u32_div_rem(
 
 #[inline(always)]
 #[must_use = "discarding a Result from mul_div_u32_floor silently ignores errors"]
-pub(crate) fn mul_div_u32_floor(
+pub fn mul_div_u32_floor(
     amount: U256,
     numerator: u32,
     denominator: u32,
@@ -146,11 +146,7 @@ pub(crate) fn mul_div_u32_floor(
 
 #[inline(always)]
 #[must_use = "discarding a Result from mul_div_u32_ceil silently ignores errors"]
-pub(crate) fn mul_div_u32_ceil(
-    amount: U256,
-    numerator: u32,
-    denominator: u32,
-) -> Result<U256, MathError> {
+pub fn mul_div_u32_ceil(amount: U256, numerator: u32, denominator: u32) -> Result<U256, MathError> {
     let (quotient, remainder) = mul_div_u32_div_rem(amount, numerator, denominator)?;
 
     if remainder == 0 {

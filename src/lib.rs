@@ -13,8 +13,8 @@ pub use core::concentrated::pool::{Pool, PoolSnapshot, TickCrossInfo};
 pub use core::concentrated::ticks::slab::TickSlab as PoolTicks;
 pub use core::error::Error;
 pub use core::math::{
-    full as full_math, sqrt_price as sqrt_price_math, swap as swap_math, swap::SwapStep,
-    tick as tick_math,
+    full as full_math, small_ratio as small_ratio_math, sqrt_price as sqrt_price_math,
+    swap as swap_math, swap::SwapStep, tick as tick_math,
 };
 pub use core::types::delta::BalanceDelta;
 pub use core::types::fee::Fee;
