@@ -23,7 +23,7 @@ use crate::core::types::{liquidity::Liquidity, sqrt_price::SqrtPriceX96, tick::T
 /// * `liquidity` must equal the net active liquidity at `tick`.
 /// * Fee-growth values use Uniswap's Q128 accumulator semantics and may wrap
 ///   modulo 2^256, matching on-chain arithmetic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PoolState {
     /// Current pool sqrt price in Q64.96 fixed-point.
@@ -53,7 +53,7 @@ pub struct PoolState {
 /// liquidity, and updated fee-growth accumulator after the loop succeeds.
 pub trait StateAccess {
     /// Returns the pool state snapshot used as the swap loop's starting point.
-    fn get(&self) -> PoolState;
+    fn get(&self) -> &PoolState;
 
     /// Commits the final pool state produced by the swap loop.
     ///
@@ -76,14 +76,8 @@ pub trait StateAccess {
 /// ignore the final state passed to [`StateAccess::set`].
 impl StateAccess for &PoolState {
     #[inline(always)]
-    fn get(&self) -> PoolState {
-        PoolState {
-            tick: self.tick,
-            sqrt_price_x96: self.sqrt_price_x96,
-            liquidity: self.liquidity,
-            fee_growth_global0_x128: self.fee_growth_global0_x128,
-            fee_growth_global1_x128: self.fee_growth_global1_x128,
-        }
+    fn get(&self) -> &PoolState {
+        self
     }
 
     #[inline(always)]
@@ -97,14 +91,8 @@ impl StateAccess for &PoolState {
 /// snapshot.
 impl StateAccess for &mut PoolState {
     #[inline(always)]
-    fn get(&self) -> PoolState {
-        PoolState {
-            tick: self.tick,
-            sqrt_price_x96: self.sqrt_price_x96,
-            liquidity: self.liquidity,
-            fee_growth_global0_x128: self.fee_growth_global0_x128,
-            fee_growth_global1_x128: self.fee_growth_global1_x128,
-        }
+    fn get(&self) -> &PoolState {
+        self
     }
 
     #[inline(always)]

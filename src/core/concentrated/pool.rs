@@ -31,7 +31,7 @@ use crate::core::types::fee::swap_fee::SwapFee;
 use crate::core::types::liquidity::Liquidity;
 use crate::core::types::nonzero::NonZeroLiquidity;
 use crate::core::types::params::{
-    ModifyLiquidityParams, ModifyLiquidityResult, StepComputations, SwapParams, SwapResult,
+    ModifyLiquidityParams, ModifyLiquidityResult, StepComputations, SwapParamsInner, SwapResult,
 };
 use crate::core::types::pool_state::{PoolState, StateAccess};
 use crate::core::types::sqrt_price::SqrtPriceX96;
@@ -165,7 +165,7 @@ pub struct PoolSnapshot<P = ()> {
     /// Current pool price, active tick, liquidity, and fee-growth globals.
     pub state: PoolState,
     /// Base LP fee before protocol-fee adjustments.
-    pub fee: Fee,
+    pub fee: Option<Fee>,
     /// Directional protocol-fee configuration.
     #[cfg_attr(feature = "serde", serde(default))]
     pub protocol_fee: ProtocolFee,
@@ -185,8 +185,8 @@ impl<P: Clone + PositionsAccess> Pool<P> {
     /// independent owned storage.
     pub fn snapshot(&self) -> PoolSnapshot<P> {
         PoolSnapshot {
-            state: self.state,
-            fee: *self.swap_fee.lp_fee(),
+            state: self.state.clone(),
+            fee: self.swap_fee.lp_fee().clone(),
             protocol_fee: *self.swap_fee.protocol_fee(),
             tick_spacing: self.tick_spacing,
             ticks: PoolTicksSnapshot {
@@ -205,7 +205,7 @@ impl<P: Clone + PositionsAccess> Pool<P> {
         snapshot.validate()?;
 
         let ticks = TickSlab::from_snapshot(snapshot.ticks.tick_spacing, snapshot.ticks.inner)?;
-        let swap_fee = SwapFee::new(snapshot.fee, snapshot.protocol_fee)?;
+        let swap_fee = SwapFee::from_lp_fee(snapshot.fee, snapshot.protocol_fee)?;
 
         Ok(Self {
             state: snapshot.state,
@@ -225,7 +225,7 @@ impl<P: Clone + PositionsAccess> Pool<P> {
         sqrt_price_x96: SqrtPriceX96,
         tick: TickIndex,
         liquidity: Liquidity,
-        fee: Fee,
+        swap_fee: SwapFee,
         tick_spacing: TickSpacing,
         ticks: TickSlab,
     ) -> Result<Self, SwapSimError> {
@@ -237,8 +237,8 @@ impl<P: Clone + PositionsAccess> Pool<P> {
                 fee_growth_global0_x128: U256::ZERO,
                 fee_growth_global1_x128: U256::ZERO,
             },
-            fee,
-            protocol_fee: ProtocolFee::ZERO,
+            fee: swap_fee.lp_fee().clone(),
+            protocol_fee: *swap_fee.protocol_fee(),
             tick_spacing,
             ticks: ticks.owned_snapshot(),
             positions: P::default(),
@@ -439,9 +439,9 @@ impl<P: PositionsAccess> Pool<P> {
                 self.state.tick,
                 tick_lower,
                 tick_upper,
-                self.state.sqrt_price_x96,
-                lower_sqrt_price,
-                upper_sqrt_price,
+                &self.state.sqrt_price_x96,
+                &lower_sqrt_price,
+                &upper_sqrt_price,
                 liquidity_delta,
             )?
         } else {
@@ -465,9 +465,9 @@ impl<P: PositionsAccess> Pool<P> {
             self.state.tick,
             params.tick_lower,
             params.tick_upper,
-            self.state.sqrt_price_x96,
-            params.tick_lower.sqrt_price_x96(),
-            params.tick_upper.sqrt_price_x96(),
+            &self.state.sqrt_price_x96,
+            &params.tick_lower.sqrt_price_x96(),
+            &params.tick_upper.sqrt_price_x96(),
             params.liquidity_delta,
         )
     }
@@ -523,14 +523,14 @@ impl<P: PositionsAccess> Pool<P> {
         let tick_indexer = self.ticks.indexer(tick_index);
 
         let (
-            sqrt_price_x96,
+            sqrt_price,
             liquidity_gross_before,
             liquidity_net_before,
             fee_growth_outside0_x128,
             fee_growth_outside1_x128,
         ) = if let Some(tick_info) = self.ticks.get(tick_indexer) {
             (
-                tick_info.sqrt_price_x96,
+                tick_info.sqrt_price_x96.clone(),
                 tick_info.inner.liquidity_gross,
                 tick_info.inner.liquidity_net,
                 tick_info.inner.fee_growth_outside0_x128,
@@ -539,7 +539,7 @@ impl<P: PositionsAccess> Pool<P> {
         } else {
             let sqrt_price = tick_index.sqrt_price_x96();
             self.ticks
-                .insert(tick_indexer, TickInfo::new(tick_index, sqrt_price))?;
+                .insert(tick_indexer, TickInfo::new(tick_index, sqrt_price.clone()))?;
             (sqrt_price, Liquidity::ZERO, 0, U256::ZERO, U256::ZERO)
         };
 
@@ -566,14 +566,14 @@ impl<P: PositionsAccess> Pool<P> {
         if liquidity_gross_after.is_zero() {
             self.ticks.remove(tick_indexer);
             return Ok((
-                sqrt_price_x96,
+                sqrt_price,
                 fee_growth_outside0_x128,
                 fee_growth_outside1_x128,
             ));
         }
 
         self.ticks
-            .update_initialized_tick(tick_indexer, |_, sqrt_price_x96, tick_info| {
+            .update_initialized_tick(tick_indexer, |_, sqrt_price, tick_info| {
                 // Newly initialized ticks on or below the current tick start
                 // with outside fee growth set to the current global values.
                 if liquidity_gross_before.is_zero() && tick_index <= self.state.tick {
@@ -585,7 +585,7 @@ impl<P: PositionsAccess> Pool<P> {
                 tick_info.liquidity_net = liquidity_net;
 
                 Ok((
-                    *sqrt_price_x96,
+                    sqrt_price.clone(),
                     tick_info.fee_growth_outside0_x128,
                     tick_info.fee_growth_outside1_x128,
                 ))
@@ -596,10 +596,27 @@ impl<P: PositionsAccess> Pool<P> {
     ///
     /// The returned deltas use the caller / PoolManager perspective: negative
     /// means the caller owes the token, positive means the caller receives it.
-    pub fn swap(&mut self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
-        let result = { swap_inner(&mut self.state, &mut self.ticks, &self.swap_fee, params)? };
+    pub fn swap(&mut self, params: SwapParamsInner) -> Result<SwapResult, SwapSimError> {
+        if let Some(lp_fee_override) = &params.lp_fee_override {
+            let mut new_swap_fee = self.swap_fee.clone();
+            new_swap_fee.set_lp_fee(lp_fee_override.clone())?;
 
-        Ok(result)
+            swap_inner(
+                &mut self.state,
+                &mut self.ticks,
+                &self.tick_spacing,
+                &new_swap_fee,
+                params,
+            )
+        } else {
+            swap_inner(
+                &mut self.state,
+                &mut self.ticks,
+                &self.tick_spacing,
+                &self.swap_fee,
+                params,
+            )
+        }
     }
 
     /// Simulate a swap without mutating pool or tick storage.
@@ -607,8 +624,27 @@ impl<P: PositionsAccess> Pool<P> {
     /// The same swap loop is used as [`Pool::swap`], but read-only state and
     /// tick access ignore final state writes and tick-crossing fee-growth
     /// updates.
-    pub fn quote_swap(&self, params: SwapParams) -> Result<SwapResult, SwapSimError> {
-        swap_inner(&self.state, &self.ticks, &self.swap_fee, params)
+    pub fn quote_swap(&self, params: SwapParamsInner) -> Result<SwapResult, SwapSimError> {
+        if let Some(lp_fee_override) = &params.lp_fee_override {
+            let mut new_swap_fee = self.swap_fee.clone();
+            new_swap_fee.set_lp_fee(lp_fee_override.clone())?;
+
+            swap_inner(
+                &self.state,
+                &self.ticks,
+                &self.tick_spacing,
+                &new_swap_fee,
+                params,
+            )
+        } else {
+            swap_inner(
+                &self.state,
+                &self.ticks,
+                &self.tick_spacing,
+                &self.swap_fee,
+                params,
+            )
+        }
     }
 }
 
@@ -620,13 +656,15 @@ impl<P: PositionsAccess> Pool<P> {
 fn swap_inner<T: TickAccess, S: StateAccess>(
     mut state: S,
     mut ticks: T,
+    tick_spacing: &TickSpacing,
     swap_fee: &SwapFee,
-    params: SwapParams,
+    params: SwapParamsInner,
 ) -> Result<SwapResult, SwapSimError> {
-    let SwapParams {
+    let SwapParamsInner {
         zero_for_one,
         amount_specified,
-        sqrt_price_limit_x96,
+        sqrt_price_limit: sqrt_price_limit_x96,
+        lp_fee_override: _,
     } = params;
 
     let exact_in = amount_specified.is_negative();
@@ -636,8 +674,8 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
     let mut result = SwapResult {
         swap_delta: BalanceDelta::DEFAULT,
         amount_to_protocol: U256::ZERO,
-        swap_fee: *swap_fee.swap_fee(zero_for_one),
-        sqrt_price_x96: pool_state.sqrt_price_x96,
+        swap_fee: swap_fee.swap_fee(zero_for_one).clone(),
+        sqrt_price_x96: pool_state.sqrt_price_x96.clone(),
         tick: pool_state.tick,
         liquidity: pool_state.liquidity,
     };
@@ -679,34 +717,56 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
             break;
         }
 
-        step.sqrt_price_start_x96 = result.sqrt_price_x96;
+        step.sqrt_price_start_x96 = result.sqrt_price_x96.clone();
 
-        if let Some(tick_info) =
-            ticks.next_initialized_tick(ticks.indexer(result.tick), zero_for_one)
-        {
-            step.next_tick_indexer = tick_info.0;
-            step.next_tick_info = *tick_info.1;
-        } else if zero_for_one {
-            step.next_tick_info.sqrt_price_x96 = SqrtPriceX96::MIN;
+        // Uniswap V4 walks the tick bitmap one 256-tick word at a time: when the
+        // current word holds no initialized tick, the step ends at the word
+        // boundary without crossing. Each step rounds on its own, so skipping
+        // those boundaries would drift from onchain amounts.
+        let spacing = tick_spacing.as_i32();
+        let compressed = result.tick.value().div_euclid(spacing);
+        let word_boundary = if zero_for_one {
+            (compressed >> 8 << 8) * spacing
         } else {
-            step.next_tick_info.sqrt_price_x96 = SqrtPriceX96::MAX;
+            (((compressed + 1) >> 8 << 8) + 255) * spacing
+        }
+        .clamp(TickIndex::MIN.value(), TickIndex::MAX.value());
+
+        let next_tick = ticks
+            .next_initialized_tick(ticks.indexer(result.tick), zero_for_one)
+            .filter(|(_, info)| {
+                if zero_for_one {
+                    info.tick_index.value() >= word_boundary
+                } else {
+                    info.tick_index.value() <= word_boundary
+                }
+            });
+        let has_next_tick = next_tick.is_some();
+        if let Some(tick_info) = next_tick {
+            step.next_tick_indexer = tick_info.0;
+            step.next_tick_info = tick_info.1.clone();
+        } else {
+            // Safe: clamped to the valid tick range above.
+            let boundary = unsafe { TickIndex::new_unchecked(word_boundary) };
+            step.next_tick_info.tick_index = boundary;
+            step.next_tick_info.sqrt_price_x96 = boundary.sqrt_price_x96();
         };
 
         step.sqrt_price_next_x96 = get_sqrt_price_target(
             zero_for_one,
-            step.next_tick_info.sqrt_price_x96,
-            sqrt_price_limit_x96,
-        );
+            &step.next_tick_info.sqrt_price_x96,
+            &sqrt_price_limit_x96,
+        )
+        .clone();
 
         let swap_step = compute_swap_step(
-            result.sqrt_price_x96,
-            step.sqrt_price_next_x96,
-            unsafe { NonZeroLiquidity::new_unchecked(result.liquidity) },
-            amount_specified_remaining,
-            result.swap_fee,
+            &result.sqrt_price_x96,
+            &step.sqrt_price_next_x96,
+            &unsafe { NonZeroLiquidity::new_unchecked(result.liquidity) },
+            &amount_specified_remaining,
+            &result.swap_fee,
         )?;
 
-        result.sqrt_price_x96 = swap_step.sqrt_ratio_next_x96;
         step.amount_in = swap_step.amount_in;
         step.amount_out = swap_step.amount_out;
         step.fee_amount = swap_step.fee_amount;
@@ -787,7 +847,15 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
                 .ok_or(SwapSimError::FeeTooLarge)?;
         }
 
-        if result.sqrt_price_x96 == step.sqrt_price_next_x96 {
+        // Compare against the next tick's own price, not the limit-clamped target:
+        // stopping at a price limit must not cross the next initialized tick.
+        let reached_next_price =
+            swap_step.sqrt_ratio_next_x96.as_ref() == &step.next_tick_info.sqrt_price_x96;
+        let moved_from_start = swap_step.sqrt_ratio_next_x96.as_ref() != &step.sqrt_price_start_x96;
+
+        result.sqrt_price_x96 = swap_step.sqrt_ratio_next_x96.into_owned();
+
+        if reached_next_price && has_next_tick {
             let (fee_growth_global0_x128, fee_growth_global1_x128) = if zero_for_one {
                 (
                     step.fee_growth_global_x128,
@@ -818,13 +886,15 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
                     .checked_add_signed(liquidity_net)
                     .ok_or(SwapSimError::LiquidityUnderflow)?,
             );
+        }
 
+        if reached_next_price {
             result.tick = if zero_for_one {
                 unsafe { TickIndex::new_unchecked(step.next_tick_info.tick_index().value() - 1) }
             } else {
                 step.next_tick_info.tick_index()
             };
-        } else if result.sqrt_price_x96 != step.sqrt_price_start_x96 {
+        } else if moved_from_start {
             result.tick = result.sqrt_price_x96.tick_index();
         }
     }
@@ -855,7 +925,7 @@ fn swap_inner<T: TickAccess, S: StateAccess>(
 
     state.set(
         result.tick,
-        result.sqrt_price_x96,
+        result.sqrt_price_x96.clone(),
         result.liquidity,
         zero_for_one,
         step.fee_growth_global_x128,
@@ -989,14 +1059,14 @@ mod tests {
         sqrt_price_x96: SqrtPriceX96,
         tick: i32,
         liquidity: u128,
-        fee: u32,
+        fee: Option<u32>,
         protocol_fee: ProtocolFee,
         tick_spacing: TickSpacing,
         ticks: impl IntoIterator<Item = (TickIndex, TickInfo)>,
     ) -> Pool {
         let tick = TickIndex::new(tick).unwrap();
         let liquidity = Liquidity::new(liquidity);
-        let fee = Fee::new(fee).expect("fee out of range");
+        let fee = fee.map(|fee| Fee::new(fee).expect("fee out of range"));
         let tick_map = TickSlab::from_snapshot(
             tick_spacing,
             ticks
@@ -1006,7 +1076,7 @@ mod tests {
         )
         .expect("valid ticks");
 
-        let swap_fee = SwapFee::new(fee, protocol_fee).expect("swap fee out of range");
+        let swap_fee = SwapFee::from_lp_fee(fee, protocol_fee).expect("swap fee out of range");
 
         Pool {
             state: PoolState {
@@ -1028,10 +1098,10 @@ mod tests {
             sqrt_price_1_1(),
             0,
             1_000_000_000_000_000_000u128,
-            3_000,
+            Some(3_000),
             ProtocolFee::ZERO,
             tick_spacing_60(),
-            ticks.iter().copied(),
+            ticks.iter().cloned(),
         )
     }
 
@@ -1053,11 +1123,12 @@ mod tests {
         zero_for_one: bool,
         amount: I256,
         sqrt_price_limit_x96: SqrtPriceX96,
-    ) -> SwapParams {
-        SwapParams {
+    ) -> SwapParamsInner {
+        SwapParamsInner {
             zero_for_one,
             amount_specified: amount,
-            sqrt_price_limit_x96,
+            sqrt_price_limit: sqrt_price_limit_x96,
+            lp_fee_override: None,
         }
     }
 
@@ -1073,7 +1144,7 @@ mod tests {
     fn swap_zero_amount_does_nothing() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        let before = pool.state;
+        let before = pool.state.clone();
 
         let result = pool
             .swap(make_params(true, exact_in(U256::ZERO), sqrt_at(-120)))
@@ -1089,14 +1160,14 @@ mod tests {
     fn swap_commits_state() {
         let ticks = basic_ticks();
         let mut pool = basic_pool(&ticks);
-        let before = pool.state;
+        let before = pool.state.clone();
         let limit = sqrt_at(-120);
 
         let result = pool
             .swap(make_params(true, exact_in(ether(1)), limit))
             .expect("swap should succeed");
 
-        let after = pool.state;
+        let after = &pool.state;
         assert_ne!(after.sqrt_price_x96, before.sqrt_price_x96);
         assert_eq!(after.sqrt_price_x96, result.sqrt_price_x96);
         assert_eq!(after.tick, result.tick);
@@ -1107,7 +1178,7 @@ mod tests {
     fn forked_swap_does_not_change_original_pool_state() {
         let ticks = basic_ticks();
         let pool = basic_pool(&ticks);
-        let before = pool.state;
+        let before = pool.state.clone();
         let limit = sqrt_at(-120);
         let mut fork = pool.try_fork().expect("pool snapshot should fork");
 
@@ -1115,7 +1186,7 @@ mod tests {
             .swap(make_params(true, exact_in(ether(1)), limit))
             .expect("forked swap should succeed");
 
-        let after = pool.state;
+        let after = &pool.state;
         assert_eq!(after.sqrt_price_x96, before.sqrt_price_x96);
         assert_eq!(after.tick, before.tick);
         assert_eq!(after.liquidity, before.liquidity);
@@ -1129,7 +1200,9 @@ mod tests {
         let mut second = basic_pool(&ticks);
         let params = make_params(true, exact_in(ether(1)), sqrt_at(-120));
 
-        let first_result = first.swap(params).expect("first swap should succeed");
+        let first_result = first
+            .swap(params.clone())
+            .expect("first swap should succeed");
         let second_result = second.swap(params).expect("second swap should succeed");
 
         assert_eq!(first_result.sqrt_price_x96, second_result.sqrt_price_x96);
@@ -1150,7 +1223,7 @@ mod tests {
         );
 
         let first_result = first
-            .swap(params)
+            .swap(params.clone())
             .expect("first exact-output swap should succeed");
         let second_result = second
             .swap(params)
@@ -1205,9 +1278,9 @@ mod tests {
         let mut pool = basic_pool(&ticks);
         let limit = sqrt_at(-120);
 
-        let before_price = pool.state.sqrt_price_x96;
+        let before_price = pool.state.sqrt_price_x96.clone();
         let result = pool
-            .swap(make_params(true, exact_in(ether(1)), limit))
+            .swap(make_params(true, exact_in(ether(1)), limit.clone()))
             .unwrap();
 
         assert!(result.sqrt_price_x96 <= before_price, "price must not rise");
@@ -1220,9 +1293,9 @@ mod tests {
         let mut pool = basic_pool(&ticks);
         let limit = sqrt_at(120);
 
-        let before_price = pool.state.sqrt_price_x96;
+        let before_price = pool.state.sqrt_price_x96.clone();
         let result = pool
-            .swap(make_params(false, exact_in(ether(1)), limit))
+            .swap(make_params(false, exact_in(ether(1)), limit.clone()))
             .unwrap();
 
         assert!(result.sqrt_price_x96 >= before_price, "price must not fall");
@@ -1366,7 +1439,7 @@ mod tests {
             sqrt_at(0),
             0,
             liq,
-            3_000,
+            Some(3_000),
             ProtocolFee::ZERO,
             tick_spacing_60(),
             [
@@ -1416,7 +1489,7 @@ mod tests {
             sqrt_price_1_1(),
             0,
             0,
-            3_000,
+            Some(3_000),
             ProtocolFee::ZERO,
             tick_spacing_60(),
             [],
@@ -1457,7 +1530,7 @@ mod tests {
             sqrt_at(-240),
             -240,
             0,
-            3_000,
+            Some(3_000),
             ProtocolFee::ZERO,
             tick_spacing_60(),
             [],
@@ -1484,7 +1557,7 @@ mod tests {
             sqrt_price_1_1(),
             0,
             0,
-            3_000,
+            Some(3_000),
             ProtocolFee::ZERO,
             tick_spacing_60(),
             [],
@@ -1563,7 +1636,7 @@ mod tests {
             sqrt_price_1_1(),
             0,
             1_000_000_000_000_000_000u128,
-            3_000,
+            Some(3_000),
             ProtocolFee::new(0, 500).unwrap(),
             tick_spacing_60(),
             ticks,
@@ -1577,7 +1650,7 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(result.swap_fee.pips() > pool.swap_fee.lp_fee().pips());
+        assert!(result.swap_fee.pips() > pool.swap_fee.lp_fee().as_ref().unwrap().pips());
         assert!(result.amount_to_protocol > U256::ZERO);
     }
 
@@ -1628,6 +1701,75 @@ mod tests {
         );
     }
 
+    fn override_params(lp_fee: Fee) -> SwapParamsInner {
+        SwapParamsInner {
+            lp_fee_override: Some(lp_fee),
+            ..make_params(true, exact_in(ether(1)), sqrt_at(-120))
+        }
+    }
+
+    #[test]
+    fn swap_with_lp_fee_override_uses_override_fee() {
+        let ticks = basic_ticks();
+        let mut pool = basic_pool(&ticks);
+
+        let result = pool
+            .swap(override_params(Fee::new(500).unwrap()))
+            .expect("swap should succeed");
+
+        assert_eq!(result.swap_fee.pips(), 500);
+        // The override applies to this swap only; the stored LP fee is untouched.
+        assert_eq!(pool.swap_fee.lp_fee(), &Fee::new(3_000));
+    }
+
+    #[test]
+    fn quote_swap_with_override_matches_swap() {
+        let ticks = basic_ticks();
+        let mut pool = basic_pool(&ticks);
+        let params = override_params(Fee::new(500).unwrap());
+
+        let quoted = pool
+            .quote_swap(params.clone())
+            .expect("quote should succeed");
+        let swapped = pool.swap(params).expect("swap should succeed");
+
+        assert_eq!(quoted, swapped);
+    }
+
+    #[test]
+    fn dynamic_pool_without_override_charges_zero_fee() {
+        let ticks = basic_ticks();
+        let mut pool = make_pool(
+            sqrt_price_1_1(),
+            0,
+            1_000_000_000_000_000_000u128,
+            None,
+            ProtocolFee::ZERO,
+            tick_spacing_60(),
+            ticks,
+        );
+
+        let result = pool
+            .swap(make_params(true, exact_in(ether(1)), sqrt_at(-120)))
+            .expect("swap should succeed");
+
+        assert_eq!(result.swap_fee.pips(), 0);
+    }
+
+    #[test]
+    fn invalid_lp_fee_override_errors_without_mutation() {
+        let ticks = basic_ticks();
+        let mut pool = basic_pool(&ticks);
+        let before = pool.state.clone();
+
+        assert_eq!(
+            pool.swap(override_params(Fee::DYNAMIC)).unwrap_err(),
+            SwapSimError::InvalidLpFee
+        );
+        assert_eq!(pool.state, before);
+        assert_eq!(pool.swap_fee.lp_fee(), &Fee::new(3_000));
+    }
+
     proptest! {
         #[test]
         fn fuzz_price_never_crosses_limit(
@@ -1646,7 +1788,7 @@ mod tests {
                 sqrt_at(0),
                 0,
                 liq,
-                fee,
+                Some(fee),
                 ProtocolFee::ZERO,
                 tick_spacing_60(),
                 ticks,
@@ -1661,7 +1803,7 @@ mod tests {
             };
 
             let result = pool
-                .swap(make_params(zero_for_one, amount, limit))
+                .swap(make_params(zero_for_one, amount, limit.clone()))
                 .expect("swap should succeed");
 
             let before_price = sqrt_at(0);
@@ -1688,7 +1830,7 @@ mod tests {
                 sqrt_at(0),
                 0,
                 liq,
-                3_000,
+                Some(3_000),
                 ProtocolFee::ZERO,
                 tick_spacing_60(),
                 ticks,
@@ -1733,7 +1875,7 @@ mod tests {
                 sqrt_at(0),
                 0,
                 liq,
-                3_000,
+                Some(3_000),
                 ProtocolFee::ZERO,
                 tick_spacing_60(),
                 ticks,

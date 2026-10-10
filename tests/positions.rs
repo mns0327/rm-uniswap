@@ -1,10 +1,10 @@
 use alloy::primitives::{Address, B256, I256};
 use parking_lot::Mutex;
 use rm_uniswap::{
-    BalanceDelta, Error, Fee, Liquidity, ModifyLiquidityParams, Pool, PoolTicks, SqrtPriceX96,
-    SwapParams, TickIndex, TickSpacing,
+    BalanceDelta, Error, Fee, Liquidity, ModifyLiquidityParams, Pool, PoolTicks, ProtocolFee,
+    SqrtPriceX96, SwapFee, SwapParams, SwapParamsInner, TickIndex, TickSpacing,
     v4::{
-        BeforeSwapDelta, Hooks, HooksImpl, PoolKey,
+        BeforeSwapDelta, HookEnv, Hooks, HooksImpl, PoolKey,
         positions::{PositionIndex, SinglePoolManager},
     },
 };
@@ -28,7 +28,7 @@ fn empty_pool() -> Pool {
         sqrt_price_1_1(),
         tick(0),
         Liquidity::ZERO,
-        Fee::new(3_000).unwrap(),
+        SwapFee::new(Fee::new(3_000).unwrap(), ProtocolFee::ZERO).unwrap(),
         tick_spacing_60(),
         PoolTicks::new(tick_spacing_60()),
     )
@@ -39,7 +39,7 @@ fn pool_key() -> PoolKey {
     PoolKey::new(
         Address::repeat_byte(0x01),
         Address::repeat_byte(0x02),
-        3_000,
+        Some(3_000),
         60,
         Address::repeat_byte(0x03),
     )
@@ -74,7 +74,7 @@ fn liquidity_modification_realizes_fees_through_positions() {
     manager.modify_liquidity(add, b"").unwrap();
     manager
         .pool_mut()
-        .swap(SwapParams::new(
+        .swap(SwapParamsInner::new(
             false,
             -I256::from(U256::from(1_000_000_000u64)),
         ))
@@ -115,6 +115,7 @@ struct ScriptedHook {
     after_modify_delta: BalanceDelta,
     before_swap_delta: BeforeSwapDelta,
     after_swap_delta: i128,
+    before_swap_fee: Fee,
 }
 
 impl Default for ScriptedHook {
@@ -126,6 +127,7 @@ impl Default for ScriptedHook {
             after_modify_delta: BalanceDelta::DEFAULT,
             before_swap_delta: BeforeSwapDelta::ZERO,
             after_swap_delta: 0,
+            before_swap_fee: Fee::ZERO,
         }
     }
 }
@@ -137,7 +139,7 @@ impl Hooks for ScriptedHook {
         &mut self,
         _sender: &Address,
         _pool_key: &PoolKey,
-        _params: ModifyLiquidityParams,
+        _params: &ModifyLiquidityParams,
         _hook_data: &[u8],
     ) -> Result<(), Error> {
         self.events.lock().push("before_add_liquidity");
@@ -151,7 +153,7 @@ impl Hooks for ScriptedHook {
         &mut self,
         _sender: &Address,
         _pool_key: &PoolKey,
-        _params: ModifyLiquidityParams,
+        _params: &ModifyLiquidityParams,
         _delta: BalanceDelta,
         _fees_accrued: BalanceDelta,
         _hook_data: &[u8],
@@ -167,7 +169,7 @@ impl Hooks for ScriptedHook {
         &mut self,
         _sender: &Address,
         _pool_key: &PoolKey,
-        _params: ModifyLiquidityParams,
+        _params: &ModifyLiquidityParams,
         _hook_data: &[u8],
     ) -> Result<(), Error> {
         self.events.lock().push("before_remove_liquidity");
@@ -178,7 +180,7 @@ impl Hooks for ScriptedHook {
         &mut self,
         _sender: &Address,
         _pool_key: &PoolKey,
-        _params: ModifyLiquidityParams,
+        _params: &ModifyLiquidityParams,
         _delta: BalanceDelta,
         _fees_accrued: BalanceDelta,
         _hook_data: &[u8],
@@ -191,7 +193,8 @@ impl Hooks for ScriptedHook {
         &mut self,
         _sender: &Address,
         _pool_key: &PoolKey,
-        _params: SwapParams,
+        _params: &SwapParams,
+        _env: &HookEnv<'_>,
         _hook_data: &[u8],
     ) -> Result<(BeforeSwapDelta, Fee), Error> {
         self.events.lock().push("before_swap");
@@ -200,7 +203,7 @@ impl Hooks for ScriptedHook {
                 specified_delta: self.before_swap_delta.specified_delta,
                 unspecified_delta: self.before_swap_delta.unspecified_delta,
             },
-            Fee::ZERO,
+            self.before_swap_fee.clone(),
         ))
     }
 
@@ -208,7 +211,7 @@ impl Hooks for ScriptedHook {
         &mut self,
         _sender: &Address,
         _pool_key: &PoolKey,
-        _params: SwapParams,
+        _params: &SwapParams,
         _delta: BalanceDelta,
         _hook_data: &[u8],
     ) -> Result<i128, Error> {
@@ -305,7 +308,7 @@ fn swap_hooks_run_in_order_and_adjust_caller_delta() {
 
     let mut baseline = SinglePoolManager::new(empty_pool(), None);
     baseline.modify_liquidity(add, b"").unwrap();
-    let raw_delta = baseline.swap(trader, swap, b"").unwrap();
+    let raw_delta = baseline.swap(trader, swap.clone(), b"").unwrap();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let hook = ScriptedHook {
@@ -331,6 +334,54 @@ fn swap_hooks_run_in_order_and_adjust_caller_delta() {
 
     assert_eq!(caller_delta, expected);
     assert_eq!(&*events.lock(), &["before_swap", "after_swap"]);
+}
+
+#[test]
+fn dynamic_fee_pool_applies_before_swap_fee_through_manager() {
+    let owner = Address::repeat_byte(0x67);
+    let trader = Address::repeat_byte(0x68);
+    let add = position_params(owner, salt(0x66), tick(-120), tick(120), 1_000_000_000_000);
+    let amount = -I256::from(U256::from(1_000_000_000u64));
+    let hook_fee = Fee::new(500).unwrap();
+    let hook = || ScriptedHook {
+        before_swap_fee: hook_fee.clone(),
+        ..ScriptedHook::default()
+    };
+
+    let mut baseline = SinglePoolManager::new(empty_pool(), None);
+    baseline.modify_liquidity(add, b"").unwrap();
+    let static_delta = baseline
+        .pool()
+        .quote_swap(SwapParamsInner::new(false, amount))
+        .unwrap()
+        .swap_delta;
+    let override_delta = baseline
+        .pool()
+        .quote_swap(SwapParamsInner {
+            lp_fee_override: Some(hook_fee.clone()),
+            ..SwapParamsInner::new(false, amount)
+        })
+        .unwrap()
+        .swap_delta;
+    assert_ne!(static_delta, override_delta);
+
+    let dynamic_key = PoolKey {
+        fee: None,
+        ..pool_key()
+    };
+    let mut dynamic = SinglePoolManager::new(empty_pool(), Some((dynamic_key, Box::new(hook()))));
+    dynamic.modify_liquidity(add, b"").unwrap();
+    let dynamic_delta = dynamic
+        .swap(trader, SwapParams::new(false, amount), b"")
+        .unwrap();
+    assert_eq!(dynamic_delta, override_delta);
+
+    let mut static_fee = SinglePoolManager::new(empty_pool(), Some((pool_key(), Box::new(hook()))));
+    static_fee.modify_liquidity(add, b"").unwrap();
+    let static_fee_delta = static_fee
+        .swap(trader, SwapParams::new(false, amount), b"")
+        .unwrap();
+    assert_eq!(static_fee_delta, static_delta);
 }
 
 #[test]

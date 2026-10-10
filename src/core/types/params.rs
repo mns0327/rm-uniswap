@@ -10,7 +10,7 @@ use crate::core::types::{
 ///
 /// Carries direction, signed input/output amount, and the caller's sqrt-price
 /// safety limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapParams {
     /// `true`  → sell token0, buy token1 (price moves **down**).
     /// `false` → sell token1, buy token0 (price moves **up**).
@@ -26,7 +26,7 @@ pub struct SwapParams {
     ///
     /// * `zero_for_one = true`  → must be in `(MIN_SQRT_PRICE, current_sqrt_price)`.
     /// * `zero_for_one = false` → must be in `(current_sqrt_price, MAX_SQRT_PRICE)`.
-    pub sqrt_price_limit_x96: SqrtPriceX96,
+    pub sqrt_price_limit: SqrtPriceX96,
 }
 
 impl SwapParams {
@@ -35,7 +35,53 @@ impl SwapParams {
         Self {
             zero_for_one,
             amount_specified: amount,
-            sqrt_price_limit_x96: SqrtPriceX96::extreme_price_limit(zero_for_one),
+            sqrt_price_limit: SqrtPriceX96::extreme_price_limit(zero_for_one),
+        }
+    }
+}
+
+/// Parameters for one concentrated-liquidity swap, plus an optional LP fee
+/// override for dynamic-fee pools.
+///
+/// This is the low-level counterpart to [`SwapParams`] used by [`Pool::swap`](crate::Pool::swap)
+/// and [`Pool::quote_swap`](crate::Pool::quote_swap) directly. Callers going
+/// through [`SinglePoolManager::swap`](crate::core::concentrated::pool_manager::SinglePoolManager::swap)
+/// supply plain [`SwapParams`]; the manager resolves `lp_fee_override` from
+/// the before-swap hook itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwapParamsInner {
+    /// `true`  → sell token0, buy token1 (price moves **down**).
+    /// `false` → sell token1, buy token0 (price moves **up**).
+    pub zero_for_one: bool,
+
+    /// Signed swap amount.
+    ///
+    /// * negative → exact-input; absolute value is the input amount.
+    /// * positive → exact-output; absolute value is the desired output amount.
+    pub amount_specified: I256,
+
+    /// Worst acceptable sqrt price after the swap, in Q64.96.
+    ///
+    /// * `zero_for_one = true`  → must be in `(MIN_SQRT_PRICE, current_sqrt_price)`.
+    /// * `zero_for_one = false` → must be in `(current_sqrt_price, MAX_SQRT_PRICE)`.
+    pub sqrt_price_limit: SqrtPriceX96,
+
+    /// LP fee to apply instead of the pool's stored fee.
+    ///
+    /// `None` keeps the pool's current fee. Only dynamic-fee pools
+    /// (`pool_key.fee == DYNAMIC_FEE_FLAG`) are expected to set this.
+    pub lp_fee_override: Option<Fee>,
+}
+
+impl SwapParamsInner {
+    /// Constructs a swap with the loosest valid price limit for the
+    /// direction and no LP fee override.
+    pub fn new(zero_for_one: bool, amount: I256) -> Self {
+        Self {
+            zero_for_one,
+            amount_specified: amount,
+            sqrt_price_limit: SqrtPriceX96::extreme_price_limit(zero_for_one),
+            lp_fee_override: None,
         }
     }
 }
@@ -147,7 +193,7 @@ impl StepComputations {
 /// This result shape keeps the hot quote path focused on final pool state,
 /// token deltas, fee growth, and protocol fee collection, without carrying
 /// debug-only crossing metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapSimulationResult {
     /// Pool sqrt price after the simulated swap, in Q64.96.
     pub sqrt_price_x96: SqrtPriceX96,

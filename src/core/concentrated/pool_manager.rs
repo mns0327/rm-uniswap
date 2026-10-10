@@ -11,8 +11,8 @@ use crate::{
         concentrated::{pool::Pool, position::Positions},
         types::{
             delta::{BalanceDelta, BeforeSwapDelta},
-            hooks::HooksImpl,
-            params::{ModifyLiquidityParams, ModifyLiquidityResult, SwapParams},
+            hooks::{HookEnv, HooksImpl},
+            params::{ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapParamsInner},
             pool_key::PoolKey,
         },
     },
@@ -28,6 +28,7 @@ use crate::{
 pub struct SinglePoolManager {
     pool: Pool<Positions>,
     hooks: Option<(PoolKey, Box<dyn HooksImpl>)>,
+    block_number: u64,
 }
 
 impl SinglePoolManager {
@@ -54,7 +55,19 @@ impl SinglePoolManager {
                 positions: Positions::new(),
             },
             hooks,
+            block_number: 0,
         }
+    }
+
+    /// Block number exposed to hooks through [`HookEnv`]. Defaults to `0`.
+    pub fn block_number(&self) -> u64 {
+        self.block_number
+    }
+
+    /// Sets the block number subsequent operations execute in, for hooks that
+    /// depend on it (e.g. per-block fee decay).
+    pub fn set_block_number(&mut self, block_number: u64) {
+        self.block_number = block_number;
     }
 
     /// Returns the managed pool for inspection.
@@ -79,7 +92,7 @@ impl SinglePoolManager {
         hook_data: &[u8],
     ) -> Result<ModifyLiquidityResult, Error> {
         if let Some((pool_key, hooks)) = self.hooks.as_mut() {
-            hooks.before_modify_liquidity(&params.owner, pool_key, params, hook_data)?;
+            hooks.before_modify_liquidity(&params.owner, pool_key, &params, hook_data)?;
         }
 
         let pool_result = self.pool.modify_liquidity(params)?;
@@ -91,7 +104,7 @@ impl SinglePoolManager {
                 let (caller_delta, _hook_delta) = hooks.after_modify_liquidity(
                     &params.owner,
                     pool_key,
-                    params,
+                    &params,
                     caller_delta,
                     pool_result.fee_delta,
                     hook_data,
@@ -123,23 +136,30 @@ impl SinglePoolManager {
             return Err(Error::ZeroValue);
         }
 
-        let (amount_to_swap, before_swap_delta) = match self.hooks.as_mut() {
+        let (amount_to_swap, before_swap_delta, lp_fee_override) = match self.hooks.as_mut() {
             Some((pool_key, hooks)) => {
-                let (amount_to_swap, before_swap_delta, _lp_fee_override) = HooksImpl::before_swap(
+                let env = HookEnv {
+                    block_number: self.block_number,
+                    pool_state: &self.pool.state,
+                };
+                let (amount_to_swap, before_swap_delta, lp_fee_override) = HooksImpl::before_swap(
                     hooks.deref_mut(),
                     &sender,
                     pool_key,
-                    params,
+                    &params,
+                    &env,
                     hook_data,
                 )?;
-                (amount_to_swap, before_swap_delta)
+                (amount_to_swap, before_swap_delta, lp_fee_override)
             }
-            None => (params.amount_specified, BeforeSwapDelta::ZERO),
+            None => (params.amount_specified, BeforeSwapDelta::ZERO, None),
         };
 
-        let executable_params = SwapParams {
+        let executable_params = SwapParamsInner {
             amount_specified: amount_to_swap,
-            ..params
+            lp_fee_override,
+            zero_for_one: params.zero_for_one,
+            sqrt_price_limit: params.sqrt_price_limit.clone(),
         };
 
         let swap_result = self.pool.swap(executable_params)?;

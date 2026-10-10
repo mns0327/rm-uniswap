@@ -3,7 +3,9 @@
 //! Run with: `cargo bench --bench sqrt_price`
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::{NonZeroLiquidity, SqrtPriceX96, TickIndex, sqrt_price_math, tick_math};
+use rm_uniswap::{
+    NonZeroLiquidity, NonZeroU256, SqrtPriceX96, TickIndex, sqrt_price_math, tick_math,
+};
 use ruint::aliases::U256;
 
 fn tick(value: i32) -> TickIndex {
@@ -27,7 +29,7 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
 
     let sqrt_p = sqrt_price_1_1();
     let liquidity = liq(1_000_000_000_000_000_000u128);
-    let amount = ether(1);
+    let amount = NonZeroU256::new(ether(1)).unwrap();
 
     group.bench_function(
         "sqrt_price_math::get_next_sqrt_price_from_amount0_rounding_up",
@@ -35,7 +37,7 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
             b.iter(|| {
                 black_box(
                     sqrt_price_math::get_next_sqrt_price_from_amount0_rounding_up(
-                        sqrt_p, liquidity, amount, true,
+                        &sqrt_p, &liquidity, &amount, true,
                     ),
                 )
             })
@@ -48,7 +50,7 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
             b.iter(|| {
                 black_box(
                     sqrt_price_math::get_next_sqrt_price_from_amount1_rounding_down(
-                        sqrt_p, liquidity, amount, true,
+                        &sqrt_p, &liquidity, &amount, true,
                     ),
                 )
             })
@@ -60,8 +62,8 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
         let sqrt_b = tick_math::get_sqrt_price_at_tick(tick(60));
         b.iter(|| {
             black_box(sqrt_price_math::get_amount0_delta(
-                sqrt_a,
-                sqrt_b,
+                &sqrt_a,
+                &sqrt_b,
                 liquidity.unwrap(),
                 true,
             ))
@@ -73,8 +75,8 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
         let sqrt_b = tick_math::get_sqrt_price_at_tick(tick(60));
         b.iter(|| {
             black_box(sqrt_price_math::get_amount1_delta(
-                sqrt_a,
-                sqrt_b,
+                &sqrt_a,
+                &sqrt_b,
                 liquidity.unwrap(),
                 true,
             ))
@@ -84,7 +86,7 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
     group.bench_function("sqrt_price_math::get_next_sqrt_price_from_input", |b| {
         b.iter(|| {
             black_box(sqrt_price_math::get_next_sqrt_price_from_input(
-                sqrt_p, liquidity, amount, true,
+                &sqrt_p, &liquidity, &amount, true,
             ))
         })
     });
@@ -92,7 +94,7 @@ fn bench_sqrt_price_math(c: &mut Criterion) {
     group.bench_function("sqrt_price_math::get_next_sqrt_price_from_output", |b| {
         b.iter(|| {
             black_box(sqrt_price_math::get_next_sqrt_price_from_output(
-                sqrt_p, liquidity, amount, true,
+                &sqrt_p, &liquidity, &amount, true,
             ))
         })
     });

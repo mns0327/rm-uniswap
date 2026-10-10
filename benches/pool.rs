@@ -6,7 +6,7 @@ use std::path::Path;
 
 use alloy::primitives::{Address, B256, I256};
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
-use rm_uniswap::{ModifyLiquidityParams, Pool, PoolTicks, SwapParams, TickIndex, TickSpacing};
+use rm_uniswap::{ModifyLiquidityParams, Pool, PoolTicks, SwapParamsInner, TickIndex, TickSpacing};
 use ruint::aliases::U256;
 
 fn build_test_pool() -> Pool {
@@ -98,7 +98,7 @@ fn bench_pool(c: &mut Criterion) {
 
     group.bench_function("quote_swap_exact_in", |b| {
         b.iter(|| {
-            pool.quote_swap(SwapParams::new(
+            pool.quote_swap(SwapParamsInner::new(
                 black_box(true),
                 black_box(-I256::from(ether(10))),
             ))
@@ -108,7 +108,7 @@ fn bench_pool(c: &mut Criterion) {
 
     group.bench_function("quote_swap_exact_out", |b| {
         b.iter(|| {
-            pool.quote_swap(SwapParams::new(
+            pool.quote_swap(SwapParamsInner::new(
                 black_box(true),
                 black_box(I256::from(ether(1))),
             ))
@@ -120,7 +120,7 @@ fn bench_pool(c: &mut Criterion) {
         b.iter_batched(
             build_test_pool,
             |mut pool| {
-                pool.swap(SwapParams::new(
+                pool.swap(SwapParamsInner::new(
                     black_box(true),
                     black_box(-I256::from(ether(1))),
                 ))

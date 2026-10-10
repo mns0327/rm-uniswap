@@ -30,11 +30,11 @@ fn bench_swap_math(c: &mut Criterion) {
     group.bench_function("compute_swap_step_exact_in", |b| {
         b.iter(|| {
             swap_math::compute_swap_step(
-                black_box(sqrt_current),
-                black_box(sqrt_target),
-                black_box(liquidity),
-                black_box(-I256::from(ether(1))),
-                black_box(fee),
+                black_box(&sqrt_current),
+                black_box(&sqrt_target),
+                black_box(&liquidity),
+                black_box(&-I256::from(ether(1))),
+                black_box(&fee),
             )
         })
     });
@@ -42,11 +42,11 @@ fn bench_swap_math(c: &mut Criterion) {
     group.bench_function("compute_swap_step_exact_out", |b| {
         b.iter(|| {
             swap_math::compute_swap_step(
-                black_box(sqrt_current),
-                black_box(sqrt_target),
-                black_box(liquidity),
-                black_box(I256::from(ether(1))),
-                black_box(fee),
+                black_box(&sqrt_current),
+                black_box(&sqrt_target),
+                black_box(&liquidity),
+                black_box(&I256::from(ether(1))),
+                black_box(&fee),
             )
         })
     });
@@ -55,8 +55,8 @@ fn bench_swap_math(c: &mut Criterion) {
         b.iter(|| {
             swap_math::get_sqrt_price_target(
                 black_box(true),
-                black_box(sqrt_target),
-                black_box(sqrt_current),
+                black_box(&sqrt_target),
+                black_box(&sqrt_current),
             )
         })
     });

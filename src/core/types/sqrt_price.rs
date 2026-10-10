@@ -15,7 +15,7 @@ use crate::core::{math::tick::get_tick_at_sqrt_price, types::tick::TickIndex};
 /// circulation is inside the protocol-supported sqrt-price range. This mirrors
 /// [`TickIndex`]: callers validate once at the boundary, then pass a compact
 /// type through pool math without repeatedly checking raw values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 pub struct SqrtPriceX96(U160);
@@ -136,8 +136,11 @@ impl SqrtPriceX96 {
     }
 
     /// Returns the pair ordered by ascending sqrt price.
+    ///
+    /// Borrows both operands instead of consuming them, since `SqrtPriceX96`
+    /// is not `Copy` and callers typically still need `self`/`rhs` afterward.
     #[inline(always)]
-    pub fn sort(self, rhs: Self) -> (Self, Self) {
+    pub fn sort<'a>(&'a self, rhs: &'a Self) -> (&'a Self, &'a Self) {
         if self.0 < rhs.0 {
             (self, rhs)
         } else {
@@ -351,10 +354,13 @@ mod tests {
 
     #[test]
     fn checked_add_returns_sum_when_result_stays_in_range() {
+        // `checked_add` consumes both operands (no `Copy`), so the expected
+        // sum is captured before either is moved into the call.
         let lhs = SqrtPriceX96::MIN;
         let rhs = SqrtPriceX96::MIN;
+        let expected = lhs.value() + rhs.value();
         let sum = lhs.checked_add(rhs).unwrap();
-        assert_eq!(sum.value(), lhs.value() + rhs.value());
+        assert_eq!(sum.value(), expected);
     }
 
     #[test]
@@ -365,8 +371,9 @@ mod tests {
     #[test]
     fn checked_sub_returns_difference_when_result_stays_in_range() {
         let lhs = SqrtPriceX96::new(sqrt_price_1_1()).unwrap();
+        let expected = lhs.value() - SqrtPriceX96::MIN.value();
         let diff = lhs.checked_sub(SqrtPriceX96::MIN).unwrap();
-        assert_eq!(diff.value(), lhs.value() - SqrtPriceX96::MIN.value());
+        assert_eq!(diff.value(), expected);
     }
 
     #[test]
@@ -377,9 +384,19 @@ mod tests {
     #[test]
     fn sort_returns_values_in_ascending_order() {
         assert_eq!(
-            SqrtPriceX96::MAX.sort(SqrtPriceX96::MIN),
-            (SqrtPriceX96::MIN, SqrtPriceX96::MAX)
+            SqrtPriceX96::MAX.sort(&SqrtPriceX96::MIN),
+            (&SqrtPriceX96::MIN, &SqrtPriceX96::MAX)
         );
+    }
+
+    #[test]
+    fn sort_borrows_without_consuming_operands() {
+        // `sort` takes and returns references so callers can keep using
+        // `self`/`rhs` afterward instead of losing them to the call.
+        let lhs = SqrtPriceX96::MIN;
+        let rhs = SqrtPriceX96::MAX;
+        let (low, high) = lhs.sort(&rhs);
+        assert_eq!((low, high), (&lhs, &rhs));
     }
 
     // ---------- formatting and deref ----------

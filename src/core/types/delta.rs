@@ -96,9 +96,9 @@ impl BalanceDelta {
         tick_current: TickIndex,
         tick_lower: TickIndex,
         tick_upper: TickIndex,
-        sqrt_price_current_x96: SqrtPriceX96,
-        sqrt_price_lower_x96: SqrtPriceX96,
-        sqrt_price_upper_x96: SqrtPriceX96,
+        sqrt_price_current_x96: &SqrtPriceX96,
+        sqrt_price_lower_x96: &SqrtPriceX96,
+        sqrt_price_upper_x96: &SqrtPriceX96,
         liquidity_delta: i128,
     ) -> Result<Self, Error> {
         let liquidity_delta_positive = liquidity_delta >= 0;
@@ -209,8 +209,8 @@ impl BalanceDelta {
 }
 
 fn amount0_delta_for_liquidity_change(
-    sqrt_price_a_x96: SqrtPriceX96,
-    sqrt_price_b_x96: SqrtPriceX96,
+    sqrt_price_a_x96: &SqrtPriceX96,
+    sqrt_price_b_x96: &SqrtPriceX96,
     liquidity_delta: Liquidity,
     liquidity_delta_positive: bool,
 ) -> Result<i128, Error> {
@@ -226,8 +226,8 @@ fn amount0_delta_for_liquidity_change(
 }
 
 fn amount1_delta_for_liquidity_change(
-    sqrt_price_a_x96: SqrtPriceX96,
-    sqrt_price_b_x96: SqrtPriceX96,
+    sqrt_price_a_x96: &SqrtPriceX96,
+    sqrt_price_b_x96: &SqrtPriceX96,
     liquidity_delta: Liquidity,
     liquidity_delta_positive: bool,
 ) -> Result<i128, Error> {
@@ -334,9 +334,9 @@ mod tests {
             tick(-240),
             tick(-120),
             tick(120),
-            sqrt_at(-240),
-            sqrt_at(-120),
-            sqrt_at(120),
+            &sqrt_at(-240),
+            &sqrt_at(-120),
+            &sqrt_at(120),
             1_000_000,
         )
         .unwrap();
@@ -351,9 +351,9 @@ mod tests {
             tick(0),
             tick(-120),
             tick(120),
-            sqrt_at(0),
-            sqrt_at(-120),
-            sqrt_at(120),
+            &sqrt_at(0),
+            &sqrt_at(-120),
+            &sqrt_at(120),
             1_000_000,
         )
         .unwrap();
@@ -368,9 +368,9 @@ mod tests {
             tick(240),
             tick(-120),
             tick(120),
-            sqrt_at(240),
-            sqrt_at(-120),
-            sqrt_at(120),
+            &sqrt_at(240),
+            &sqrt_at(-120),
+            &sqrt_at(120),
             1_000_000,
         )
         .unwrap();
@@ -385,9 +385,9 @@ mod tests {
             tick(0),
             tick(-120),
             tick(120),
-            sqrt_at(0),
-            sqrt_at(-120),
-            sqrt_at(120),
+            &sqrt_at(0),
+            &sqrt_at(-120),
+            &sqrt_at(120),
             -1_000_000,
         )
         .unwrap();

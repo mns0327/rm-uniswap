@@ -6,7 +6,20 @@ use crate::core::types::{
     fee::Fee,
     params::{ModifyLiquidityParams, SwapParams},
     pool_key::PoolKey,
+    pool_state::PoolState,
 };
+
+/// Chain and pool state visible to a hook during a swap.
+///
+/// Mirrors what an onchain V4 hook reads on its own: `block.number` and the
+/// pool's current state through `PoolManager.getSlot0` / `getLiquidity`.
+#[derive(Debug, Clone, Copy)]
+pub struct HookEnv<'a> {
+    /// Block number the operation executes in.
+    pub block_number: u64,
+    /// Pool state before the operation is applied.
+    pub pool_state: &'a PoolState,
+}
 
 /// Convenience adapter that applies Uniswap V4 hook accounting around raw
 /// [`Hooks`] callbacks.
@@ -32,7 +45,7 @@ pub trait HooksImpl: Hooks {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: ModifyLiquidityParams,
+        params: &ModifyLiquidityParams,
         hook_data: &[u8],
     ) -> Result<(), crate::Error> {
         if params.liquidity_delta > 0 {
@@ -52,7 +65,7 @@ pub trait HooksImpl: Hooks {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: ModifyLiquidityParams,
+        params: &ModifyLiquidityParams,
         delta: BalanceDelta,
         fees_accrued: BalanceDelta,
         hook_data: &[u8],
@@ -75,28 +88,35 @@ pub trait HooksImpl: Hooks {
     /// exact-input amount or exact-output target, but it must not flip the swap
     /// from exact input to exact output or vice versa.
     ///
-    /// Dynamic fee support is intentionally not wired through this adapter yet,
-    /// so the returned fee is currently `Fee::ZERO`.
+    /// The hook's returned fee becomes the LP fee override only for
+    /// dynamic-fee pools ([`PoolKey::is_dynamic_fee`]); static-fee pools
+    /// ignore it and get `None`.
     #[inline]
     fn before_swap(
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: SwapParams,
+        params: &SwapParams,
+        env: &HookEnv<'_>,
         hook_data: &[u8],
-    ) -> Result<(I256, BeforeSwapDelta, Fee), crate::Error> {
+    ) -> Result<(I256, BeforeSwapDelta, Option<Fee>), crate::Error> {
         let mut amount_to_swap = params.amount_specified;
 
-        // TODO: add dynamic fee feature
-        let (before_swap_delta, _fee) =
-            Hooks::before_swap(&mut *self, sender, pool_key, params, hook_data)?;
+        let (before_swap_delta, fee) =
+            Hooks::before_swap(&mut *self, sender, pool_key, params, env, hook_data)?;
 
-        let hook_delta_specified = before_swap_delta.specified_delta;
+        let lp_fee_override = if pool_key.is_dynamic_fee() {
+            Some(fee)
+        } else {
+            None
+        };
 
-        if hook_delta_specified != 0 {
+        if before_swap_delta.specified_delta != 0 {
             let exact_input = amount_to_swap.is_negative();
             amount_to_swap = amount_to_swap
-                .checked_add(I256::try_from(hook_delta_specified).expect("should not overflow"))
+                .checked_add(
+                    I256::try_from(before_swap_delta.specified_delta).expect("should not overflow"),
+                )
                 .ok_or(crate::Error::AmountOverflow)?;
 
             if exact_input {
@@ -110,7 +130,7 @@ pub trait HooksImpl: Hooks {
             }
         }
 
-        Ok((amount_to_swap, before_swap_delta, Fee::ZERO))
+        Ok((amount_to_swap, before_swap_delta, lp_fee_override))
     }
 
     /// Runs the post-swap callback and separates caller and hook deltas.
@@ -135,7 +155,7 @@ pub trait HooksImpl: Hooks {
 
         hook_delta_unspecified = hook_delta_unspecified
             .checked_add(Hooks::after_swap(
-                &mut *self, sender, pool_key, params, swap_delta, hook_data,
+                &mut *self, sender, pool_key, &params, swap_delta, hook_data,
             )?)
             .ok_or(crate::Error::I128Overflow)?;
 
@@ -181,7 +201,7 @@ pub trait Hooks: Send + Sync {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: ModifyLiquidityParams,
+        params: &ModifyLiquidityParams,
         hook_data: &[u8],
     ) -> Result<(), crate::Error>;
 
@@ -197,7 +217,7 @@ pub trait Hooks: Send + Sync {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: ModifyLiquidityParams,
+        params: &ModifyLiquidityParams,
         delta: BalanceDelta,
         fees_accrued: BalanceDelta,
         hook_data: &[u8],
@@ -211,7 +231,7 @@ pub trait Hooks: Send + Sync {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: ModifyLiquidityParams,
+        params: &ModifyLiquidityParams,
         hook_data: &[u8],
     ) -> Result<(), crate::Error>;
 
@@ -227,7 +247,7 @@ pub trait Hooks: Send + Sync {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: ModifyLiquidityParams,
+        params: &ModifyLiquidityParams,
         delta: BalanceDelta,
         fees_accrued: BalanceDelta,
         hook_data: &[u8],
@@ -239,13 +259,18 @@ pub trait Hooks: Send + Sync {
     /// and positive for exact output.
     ///
     /// Return a [`BeforeSwapDelta`] to adjust the specified and/or unspecified
-    /// side of the swap. The returned fee is reserved for dynamic-fee support by
-    /// callers that opt into fee overrides.
+    /// side of the swap. The returned fee is always produced; [`HooksImpl::before_swap`]
+    /// is what decides whether it is actually used, applying it as the LP fee
+    /// override only when `pool_key.fee` marks the pool as dynamic-fee.
+    ///
+    /// `env` carries the block number and pre-swap pool state, for hooks that
+    /// price the swap from them.
     fn before_swap(
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: SwapParams,
+        params: &SwapParams,
+        env: &HookEnv<'_>,
         hook_data: &[u8],
     ) -> Result<(BeforeSwapDelta, Fee), crate::Error>;
 
@@ -262,7 +287,7 @@ pub trait Hooks: Send + Sync {
         &mut self,
         sender: &Address,
         pool_key: &PoolKey,
-        params: SwapParams,
+        params: &SwapParams,
         delta: BalanceDelta,
         hook_data: &[u8],
     ) -> Result<i128, crate::Error>;
@@ -333,7 +358,7 @@ mod tests {
             &mut self,
             _sender: &Address,
             _pool_key: &PoolKey,
-            _params: ModifyLiquidityParams,
+            _params: &ModifyLiquidityParams,
             _hook_data: &[u8],
         ) -> Result<(), Error> {
             self.events.push("before_add_liquidity");
@@ -344,7 +369,7 @@ mod tests {
             &mut self,
             _sender: &Address,
             _pool_key: &PoolKey,
-            _params: ModifyLiquidityParams,
+            _params: &ModifyLiquidityParams,
             _delta: BalanceDelta,
             _fees_accrued: BalanceDelta,
             _hook_data: &[u8],
@@ -357,7 +382,7 @@ mod tests {
             &mut self,
             _sender: &Address,
             _pool_key: &PoolKey,
-            _params: ModifyLiquidityParams,
+            _params: &ModifyLiquidityParams,
             _hook_data: &[u8],
         ) -> Result<(), Error> {
             self.events.push("before_remove_liquidity");
@@ -368,7 +393,7 @@ mod tests {
             &mut self,
             _sender: &Address,
             _pool_key: &PoolKey,
-            _params: ModifyLiquidityParams,
+            _params: &ModifyLiquidityParams,
             _delta: BalanceDelta,
             _fees_accrued: BalanceDelta,
             _hook_data: &[u8],
@@ -381,7 +406,8 @@ mod tests {
             &mut self,
             _sender: &Address,
             _pool_key: &PoolKey,
-            _params: SwapParams,
+            _params: &SwapParams,
+            _env: &HookEnv<'_>,
             _hook_data: &[u8],
         ) -> Result<(BeforeSwapDelta, Fee), Error> {
             self.events.push("before_swap");
@@ -390,7 +416,7 @@ mod tests {
                     specified_delta: self.before_swap_delta.specified_delta,
                     unspecified_delta: self.before_swap_delta.unspecified_delta,
                 },
-                self.before_swap_fee,
+                self.before_swap_fee.clone(),
             ))
         }
 
@@ -398,7 +424,7 @@ mod tests {
             &mut self,
             _sender: &Address,
             _pool_key: &PoolKey,
-            _params: SwapParams,
+            _params: &SwapParams,
             _delta: BalanceDelta,
             _hook_data: &[u8],
         ) -> Result<i128, Error> {
@@ -439,7 +465,17 @@ mod tests {
         PoolKey::new(
             Address::repeat_byte(0x01),
             Address::repeat_byte(0x02),
-            3_000,
+            Some(3_000),
+            60,
+            Address::repeat_byte(0x03),
+        )
+    }
+
+    fn dynamic_fee_pool_key() -> PoolKey {
+        PoolKey::new(
+            Address::repeat_byte(0x01),
+            Address::repeat_byte(0x02),
+            None,
             60,
             Address::repeat_byte(0x03),
         )
@@ -455,11 +491,28 @@ mod tests {
         }
     }
 
+    fn test_state() -> PoolState {
+        PoolState {
+            sqrt_price_x96: SqrtPriceX96::from_u256(U256::ONE << 96).unwrap(),
+            tick: TickIndex::new(0).unwrap(),
+            liquidity: crate::core::types::liquidity::Liquidity::ZERO,
+            fee_growth_global0_x128: U256::ZERO,
+            fee_growth_global1_x128: U256::ZERO,
+        }
+    }
+
+    fn env(state: &PoolState) -> HookEnv<'_> {
+        HookEnv {
+            block_number: 1,
+            pool_state: state,
+        }
+    }
+
     fn swap_params(zero_for_one: bool, amount_specified: I256) -> SwapParams {
         SwapParams {
             zero_for_one,
             amount_specified,
-            sqrt_price_limit_x96: SqrtPriceX96::extreme_price_limit(zero_for_one),
+            sqrt_price_limit: SqrtPriceX96::extreme_price_limit(zero_for_one),
         }
     }
 
@@ -480,11 +533,11 @@ mod tests {
         let pool_key = pool_key();
         let mut hook = RecordingHook::default();
 
-        hook.before_modify_liquidity(&sender, &pool_key, modify_params(100), b"add")
+        hook.before_modify_liquidity(&sender, &pool_key, &modify_params(100), b"add")
             .unwrap();
-        hook.before_modify_liquidity(&sender, &pool_key, modify_params(0), b"collect")
+        hook.before_modify_liquidity(&sender, &pool_key, &modify_params(0), b"collect")
             .unwrap();
-        hook.before_modify_liquidity(&sender, &pool_key, modify_params(-100), b"remove")
+        hook.before_modify_liquidity(&sender, &pool_key, &modify_params(-100), b"remove")
             .unwrap();
 
         assert_eq!(
@@ -525,7 +578,7 @@ mod tests {
             .after_modify_liquidity(
                 &sender,
                 &pool_key,
-                modify_params(100),
+                &modify_params(100),
                 pool_delta,
                 fees_accrued,
                 b"add",
@@ -544,7 +597,7 @@ mod tests {
             .after_modify_liquidity(
                 &sender,
                 &pool_key,
-                modify_params(0),
+                &modify_params(0),
                 pool_delta,
                 fees_accrued,
                 b"remove",
@@ -566,6 +619,7 @@ mod tests {
 
     #[test]
     fn before_swap_applies_specified_delta_without_mode_flip() {
+        let state = test_state();
         let sender = sender();
         let pool_key = pool_key();
         let mut exact_input_hook = RecordingHook {
@@ -585,35 +639,72 @@ mod tests {
             ..RecordingHook::default()
         };
 
-        let (amount_to_swap, before_swap_delta, fee) = HooksImpl::before_swap(
+        let (amount_to_swap, before_swap_delta, lp_fee_override) = HooksImpl::before_swap(
             &mut exact_input_hook,
             &sender,
             &pool_key,
-            swap_params(true, -i256(100)),
+            &swap_params(true, -i256(100)),
+            &env(&state),
             b"input",
         )
         .unwrap();
         assert_eq!(amount_to_swap, -i256(60));
         assert_eq!(before_swap_delta.specified_delta, 40);
         assert_eq!(before_swap_delta.unspecified_delta, -7);
-        assert_eq!(fee, Fee::ZERO);
+        assert_eq!(lp_fee_override, None);
 
-        let (amount_to_swap, before_swap_delta, fee) = HooksImpl::before_swap(
+        let (amount_to_swap, before_swap_delta, lp_fee_override) = HooksImpl::before_swap(
             &mut exact_output_hook,
             &sender,
             &pool_key,
-            swap_params(false, i256(100)),
+            &swap_params(false, i256(100)),
+            &env(&state),
             b"output",
         )
         .unwrap();
         assert_eq!(amount_to_swap, i256(75));
         assert_eq!(before_swap_delta.specified_delta, -25);
         assert_eq!(before_swap_delta.unspecified_delta, 8);
-        assert_eq!(fee, Fee::ZERO);
+        assert_eq!(lp_fee_override, None);
+    }
+
+    #[test]
+    fn before_swap_overrides_lp_fee_only_for_dynamic_fee_pools() {
+        let state = test_state();
+        let sender = sender();
+        let static_pool_key = pool_key();
+        let dynamic_pool_key = dynamic_fee_pool_key();
+        let mut hook = RecordingHook {
+            before_swap_fee: Fee::new(500).unwrap(),
+            ..RecordingHook::default()
+        };
+
+        let (_, _, lp_fee_override) = HooksImpl::before_swap(
+            &mut hook,
+            &sender,
+            &static_pool_key,
+            &swap_params(true, -i256(100)),
+            &env(&state),
+            b"static",
+        )
+        .unwrap();
+        assert_eq!(lp_fee_override, None);
+
+        let (_, _, lp_fee_override) = HooksImpl::before_swap(
+            &mut hook,
+            &sender,
+            &dynamic_pool_key,
+            &swap_params(true, -i256(100)),
+            &env(&state),
+            b"dynamic",
+        )
+        .unwrap();
+        assert_eq!(lp_fee_override, Some(hook.before_swap_fee));
     }
 
     #[test]
     fn before_swap_rejects_specified_delta_that_flips_exactness() {
+        let state = test_state();
         let sender = sender();
         let pool_key = pool_key();
         let mut flips_exact_input = RecordingHook {
@@ -636,7 +727,8 @@ mod tests {
                 &mut flips_exact_input,
                 &sender,
                 &pool_key,
-                swap_params(true, -i256(100)),
+                &swap_params(true, -i256(100)),
+                &env(&state),
                 b"input",
             ),
             Error::AmountOverflow,
@@ -646,7 +738,8 @@ mod tests {
                 &mut flips_exact_output,
                 &sender,
                 &pool_key,
-                swap_params(false, i256(100)),
+                &swap_params(false, i256(100)),
+                &env(&state),
                 b"output",
             ),
             Error::AmountOverflow,
