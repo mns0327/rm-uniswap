@@ -13,7 +13,7 @@ The library is built for high-performance simulation and includes both v3 and v4
 
 ```toml
 [dependencies]
-rm-uniswap = "0.1"
+rm-uniswap = "0.2"
 ```
 
 ```rust
