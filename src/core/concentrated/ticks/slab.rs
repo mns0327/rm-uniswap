@@ -603,7 +603,7 @@ mod tests {
         tick_indexer: TickSlabIndexer,
     ) -> Option<(TickSlabIndexer, TickInfo)> {
         slab.next(tick_indexer)
-            .map(|(next_indexer, tick_info)| (next_indexer, *tick_info))
+            .map(|(next_indexer, tick_info)| (next_indexer, tick_info.clone()))
     }
 
     fn prev_result(
@@ -611,7 +611,7 @@ mod tests {
         tick_indexer: TickSlabIndexer,
     ) -> Option<(TickSlabIndexer, TickInfo)> {
         slab.prev(tick_indexer)
-            .map(|(prev_indexer, tick_info)| (prev_indexer, *tick_info))
+            .map(|(prev_indexer, tick_info)| (prev_indexer, tick_info.clone()))
     }
 
     #[test]
@@ -691,9 +691,9 @@ mod tests {
         slab.insert(zero, info(2)).unwrap();
         slab.insert(max, info(3)).unwrap();
 
-        assert_eq!(slab.get(min).copied(), Some(info(1)));
-        assert_eq!(slab.get(zero).copied(), Some(info(2)));
-        assert_eq!(slab.get(max).copied(), Some(info(3)));
+        assert_eq!(slab.get(min).cloned(), Some(info(1)));
+        assert_eq!(slab.get(zero).cloned(), Some(info(2)));
+        assert_eq!(slab.get(max).cloned(), Some(info(3)));
     }
 
     #[test]
@@ -704,7 +704,7 @@ mod tests {
 
         slab.insert(compressed_tick, info(42)).unwrap();
 
-        assert_eq!(slab.get(compressed_tick).copied(), Some(info(42)));
+        assert_eq!(slab.get(compressed_tick).cloned(), Some(info(42)));
         assert_eq!(slab.get(neighboring_tick), None);
         assert_ne!(compressed_tick, neighboring_tick);
     }
@@ -719,7 +719,7 @@ mod tests {
 
         assert_eq!(aligned_tick, unaligned_tick_in_same_bucket);
         assert_eq!(
-            slab.get(unaligned_tick_in_same_bucket).copied(),
+            slab.get(unaligned_tick_in_same_bucket).cloned(),
             Some(info(100))
         );
     }
@@ -731,7 +731,7 @@ mod tests {
 
         slab.insert(indexer, TickInfo::DEFAULT).unwrap();
 
-        assert_eq!(slab.get(indexer).copied(), Some(TickInfo::DEFAULT));
+        assert_eq!(slab.get(indexer).cloned(), Some(TickInfo::DEFAULT));
         assert_eq!(slab.values.len(), 1);
     }
 
@@ -756,7 +756,7 @@ mod tests {
         slab.insert(indexer, info(100)).unwrap();
         slab.insert(indexer, info(250)).unwrap();
 
-        assert_eq!(slab.get(indexer).copied(), Some(info(250)));
+        assert_eq!(slab.get(indexer).cloned(), Some(info(250)));
         assert_eq!(slab.values.len(), 1);
         assert_eq!(
             slab.get_slab(indexer.cache_index())
@@ -780,7 +780,7 @@ mod tests {
         });
 
         assert_eq!(updated, Ok(true));
-        assert_eq!(slab.get(indexer).copied(), Some(info(250)));
+        assert_eq!(slab.get(indexer).cloned(), Some(info(250)));
     }
 
     #[test]
@@ -817,7 +817,7 @@ mod tests {
 
         assert_eq!(updated, Err(SwapSimError::MissingInitializedTick));
         assert!(!called);
-        assert_eq!(slab.get(initialized).copied(), Some(info(100)));
+        assert_eq!(slab.get(initialized).cloned(), Some(info(100)));
         assert_eq!(slab.get(missing), None);
         assert_eq!(
             slab.get_slab(initialized.cache_index())
@@ -840,7 +840,7 @@ mod tests {
         slab.remove(first);
 
         assert_eq!(slab.get(first), None);
-        assert_eq!(slab.get(second).copied(), Some(info(200)));
+        assert_eq!(slab.get(second).cloned(), Some(info(200)));
         assert_eq!(slab.values.len(), 1);
         assert_eq!(
             slab.get_slab(first.cache_index())
@@ -862,7 +862,7 @@ mod tests {
         slab.insert(initialized, info(100)).unwrap();
         slab.remove(missing);
 
-        assert_eq!(slab.get(initialized).copied(), Some(info(100)));
+        assert_eq!(slab.get(initialized).cloned(), Some(info(100)));
         assert_eq!(slab.get(missing), None);
         assert_eq!(slab.values.len(), 1);
         assert_eq!(
@@ -898,7 +898,7 @@ mod tests {
         slab.remove(indexer);
         slab.insert(indexer, info(300)).unwrap();
 
-        assert_eq!(slab.get(indexer).copied(), Some(info(300)));
+        assert_eq!(slab.get(indexer).cloned(), Some(info(300)));
         assert_eq!(slab.values.len(), 1);
         assert!(slab.bitmap.contains(cache_index));
         assert_ne!(slab.cache[cache_index as usize], INITIAL_CACHE_VALUE);
@@ -1019,19 +1019,19 @@ mod tests {
 
         assert_eq!(
             slab.next_initialized_tick(page_1_first, true)
-                .map(|(indexer, tick_info)| (indexer, *tick_info)),
+                .map(|(indexer, tick_info)| (indexer, tick_info.clone())),
             Some((page_1_first, info(100))),
             "zero_for_one search is inclusive of an initialized current tick"
         );
         assert_eq!(
             slab.next_initialized_tick(page_0_last, true)
-                .map(|(indexer, tick_info)| (indexer, *tick_info)),
+                .map(|(indexer, tick_info)| (indexer, tick_info.clone())),
             Some((page_0_last, info(31))),
             "zero_for_one search returns the current tick itself when initialized"
         );
         assert_eq!(
             slab.next_initialized_tick(page_1_first, false)
-                .map(|(indexer, tick_info)| (indexer, *tick_info)),
+                .map(|(indexer, tick_info)| (indexer, tick_info.clone())),
             Some((page_3_first, info(300)))
         );
     }
@@ -1080,7 +1080,7 @@ mod tests {
 
             match maybe_info {
                 Some(tick_info) => {
-                    slab.insert(indexer, tick_info).unwrap();
+                    slab.insert(indexer, tick_info.clone()).unwrap();
                     model.insert(raw_tick, tick_info);
                 }
                 None => {
@@ -1090,8 +1090,8 @@ mod tests {
             }
 
             for probe in [*TickIndex::MIN, -9, 0, 8, 64, 512, *TickIndex::MAX] {
-                let actual = slab.get(slab.indexer(tick(probe))).copied();
-                let expected = model.get(&probe).copied();
+                let actual = slab.get(slab.indexer(tick(probe))).cloned();
+                let expected = model.get(&probe).cloned();
                 assert_eq!(
                     actual, expected,
                     "slab diverged from reference model after operation on tick {raw_tick}, probing tick {probe}"

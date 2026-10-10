@@ -146,7 +146,7 @@ sol! {
 #[derive(Debug, Clone)]
 struct PoolCoreSnapshot {
     state: PoolState,
-    fee: Fee,
+    fee: Option<Fee>,
     protocol_fee: ProtocolFee,
     tick_spacing: TickSpacing,
 }
@@ -402,7 +402,7 @@ impl RpcClient {
                 fee_growth_global0_x128,
                 fee_growth_global1_x128,
             },
-            fee: Fee::new(lp_fee).context("invalid lp fee")?,
+            fee: Some(Fee::new(lp_fee).context("invalid lp fee")?),
             protocol_fee,
             tick_spacing,
         })

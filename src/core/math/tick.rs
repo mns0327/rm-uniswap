@@ -114,6 +114,7 @@ const fn widening_mul_u128(a: u128, b: u128) -> (u128, u128) {
     let hi = hh + (lh >> 64) + (hl >> 64) + (mid >> 64);
     (hi, lo)
 }
+
 /// Multiply a signed `i128` by a `u128` and return a signed high half plus low half.
 ///
 /// The result represents `high * 2^128 + low`. The caller only uses ranges
@@ -133,11 +134,27 @@ const fn smul_i128_u128(a: i128, b: u128) -> (i64, u128) {
         (hi as i64, lo)
     }
 }
+
 /// Return the greatest tick whose square-root price is less than or equal to `sqrt_price_x96`.
 ///
 /// This is the inverse of [`get_sqrt_price_at_tick`] over the validated
 /// `SqrtPriceX96` domain. The final candidate check preserves the same floor
 /// semantics as the Uniswap reference implementation.
+///
+/// Approach, mirroring Uniswap's `TickMath.getTickAtSqrtRatio`:
+///
+/// ```text
+/// log2(ratio)      // binary logarithm, computed to Q128.128 precision
+/// tick ≈ log2(ratio) * log2(1.0001)   // change of base, scaled to Q64
+/// ```
+///
+/// `log2(ratio)` is found by taking the position of the most significant bit
+/// as the integer part, then refining the fractional part one bit at a time
+/// by repeated squaring. Multiplying by the fixed-point `log2(1.0001)`
+/// constant (`LOG_MUL`) converts that into a tick estimate, and the low/high
+/// offsets bracket the rounding error introduced by the fixed-point log2
+/// approximation so the final price comparison can resolve the at-most-one-
+/// tick ambiguity.
 #[inline]
 pub fn get_tick_at_sqrt_price(sqrt_price_x96: &SqrtPriceX96) -> TickIndex {
     // Shift Q64.96 input into Q128.128 before extracting a binary logarithm.
@@ -165,10 +182,13 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: &SqrtPriceX96) -> TickIndex {
         r = if f != 0 { hi } else { (hi << 1) | (lo >> 127) };
     }
 
+    // log2(1.0001) in Q128.128, the fixed-point change-of-base factor from
+    // TickMath.sol that turns `log2(ratio)` into a Q64-scaled tick estimate.
     const LOG_MUL: u128 = 255_738_958_999_603_826_347_141;
     let (log_hi, log_lo) = smul_i128_u128(log2, LOG_MUL);
 
-    // The offsets bracket the exact log conversion. The final price comparison
+    // The offsets bracket the exact log conversion, taken directly from
+    // TickMath.sol's `tickLow`/`tickHigh` constants. The final price comparison
     // below resolves the at-most-one-tick ambiguity.
     const TICK_LOW_OFFSET: u128 = 3_402_992_956_809_132_418_596_140_100_660_247_210;
     const TICK_HIGH_OFFSET: u128 = 291_339_464_771_989_622_907_027_621_153_398_088_495;
@@ -188,6 +208,12 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x96: &SqrtPriceX96) -> TickIndex {
     }
 }
 
+/// Clamp a raw `log2`-derived tick estimate into the validated `TickIndex` domain.
+///
+/// The bracketing offsets above can push `tick_low`/`tick_high` one step
+/// outside the protocol range at the extreme ends of the tick space; clamping
+/// keeps the candidate tick within `[TickIndex::MIN, TickIndex::MAX]` before
+/// the final price comparison.
 #[inline(always)]
 fn clamp_i64_to_tick_index(tick: i64) -> TickIndex {
     let clamped = tick.clamp(
@@ -284,6 +310,17 @@ mod tests {
     }
 
     // Keep helper arithmetic covered with values that exercise carries.
+    #[test]
+    fn mul_hi_u128_identity() {
+        let base: u128 = 1u128 << 127;
+        assert_eq!(mul_hi_u128(base, base), 1u128 << 126);
+    }
+
+    #[test]
+    fn mul_hi_u128_max() {
+        assert_eq!(mul_hi_u128(u128::MAX, u128::MAX), u128::MAX - 1);
+    }
+
     #[test]
     fn widening_mul_identity() {
         let base: u128 = 1u128 << 127;
@@ -447,10 +484,10 @@ mod tests {
             ),
         ];
 
-        for &(sqrt_price, expected_tick) in cases {
-            let got = get_tick_at_sqrt_price(&sqrt_price);
+        for (sqrt_price, expected_tick) in cases {
+            let got = get_tick_at_sqrt_price(sqrt_price);
             assert_eq!(
-                got, expected_tick,
+                got, *expected_tick,
                 "getTickAtSqrtPrice({sqrt_price}): got {got}, expected {expected_tick}"
             );
         }
@@ -476,6 +513,20 @@ mod tests {
                 "early-exit round-trip failed for tick={tick}"
             );
         }
+    }
+
+    // The bracketing offsets can push a candidate tick one step outside the
+    // protocol range at the extremes; the clamp must pull it back in.
+    #[test]
+    fn clamp_i64_to_tick_index_clamps_out_of_range_values() {
+        assert_eq!(
+            clamp_i64_to_tick_index(i64::from(TickIndex::MIN.value()) - 1),
+            TickIndex::MIN
+        );
+        assert_eq!(
+            clamp_i64_to_tick_index(i64::from(TickIndex::MAX.value()) + 1),
+            TickIndex::MAX
+        );
     }
 
     #[test]

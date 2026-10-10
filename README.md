@@ -19,7 +19,7 @@ rm-uniswap = "0.1"
 ```rust
 use rm_uniswap::{
     Address, Fee, FixedBytes, I256, Liquidity, ModifyLiquidityParams, Pool, ProtocolFee,
-    SqrtPriceX96, SwapFee, SwapParams, TickIndex, TickSpacing, U256,
+    SqrtPriceX96, SwapFee, SwapParamsInner, TickIndex, TickSpacing, U256,
 };
 
 // Pools start empty, at price 1.0, with a 0.3% swap fee.
@@ -47,7 +47,7 @@ pool.modify_liquidity(ModifyLiquidityParams {
 
 // Exact input swap of 1_000_000 units of token0 for token1.
 let result = pool
-    .swap(SwapParams::new(true, -I256::from(U256::from(1_000_000u64))))
+    .swap(SwapParamsInner::new(true, -I256::from(U256::from(1_000_000u64))))
     .unwrap();
 
 println!("{:?}", result.swap_delta);
@@ -59,11 +59,11 @@ indexer or archive node), build a `PoolTicks` snapshot and use
 
 ## What's included
 
-- Concentrated-liquidity pool state and swap simulation (`Pool`, `SwapParams`, `SwapResult`)
+- Concentrated-liquidity pool state and swap simulation (`Pool`, `SwapParams`, `SwapParamsInner`, `SwapResult`)
 - Tick math and tick-crossing bookkeeping (`tick_math`, `TickIndex`, `TickSpacing`, `PoolTicks`)
 - Fee and protocol-fee accounting (`Fee`, `SwapFee`, `ProtocolFee`)
 - Full-precision and sqrt-price math primitives (`full_math`, `sqrt_price_math`, `swap_math`)
-- `v4`: hooks, `PoolKey`/`PoolId`, and a single-pool manager with position tracking
+- `v4`: hooks, `PoolKey`/`PoolId`, a single-pool manager with position tracking, and `stable_pair::StablePairHook`, a bit-exact port of Uniswap Labs' dynamic-fee hook for stable pairs
 - `v3`: reserved for v3-specific types; shared concentrated-liquidity types above already cover v3 pool math
 
 ## Flags

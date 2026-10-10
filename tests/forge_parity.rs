@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf, str::FromStr};
 use alloy::primitives::{Address, B256, I256};
 use rm_uniswap::{
     BalanceDelta, Error, ModifyLiquidityParams, ModifyLiquidityResult, Pool, PoolSnapshot,
-    ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
+    ProtocolFee, SqrtPriceX96, SwapParamsInner, TickIndex,
     v4::positions::{PositionIndex, Positions},
 };
 use ruint::aliases::U256;
@@ -444,9 +444,9 @@ fn run_fixture(name: &str, fixture: ForgeParityFixture, final_pool_has_protocol_
                     Exactness::Input => -signed_amount,
                     Exactness::Output => signed_amount,
                 };
-                let mut params = SwapParams::new(zero_for_one, signed_amount);
+                let mut params = SwapParamsInner::new(zero_for_one, signed_amount);
                 if let Some(limit) = sqrt_price_limit_x96 {
-                    params.sqrt_price_limit_x96 = sqrt_price(limit);
+                    params.sqrt_price_limit = sqrt_price(limit);
                 }
                 {
                     let protocol_fee = protocol_fee

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use alloy::primitives::I256;
 use rm_uniswap::{
-    Error, Fee, Liquidity, Pool, PoolTicks, ProtocolFee, SqrtPriceX96, SwapParams, TickIndex,
-    TickInfoInner, TickSpacing, tick_math,
+    Error, Fee, Liquidity, Pool, PoolTicks, ProtocolFee, SqrtPriceX96, SwapFee, SwapParamsInner,
+    TickIndex, TickInfoInner, TickSpacing, tick_math,
 };
 use ruint::aliases::U256;
 
@@ -54,7 +54,7 @@ fn valid_pool() -> Pool {
         sqrt_price_1_1(),
         tick(0),
         Liquidity::new(LIQUIDITY),
-        FEE,
+        SwapFee::new(FEE, ProtocolFee::ZERO).unwrap(),
         tick_spacing_60(),
         ticks,
     )
@@ -113,9 +113,9 @@ fn serde_rejects_untrusted_invalid_pool_snapshot() {
 fn quote_swap_matches_committed_swap_without_mutating_source_pool() {
     let pool = valid_pool();
     let before = pool.snapshot();
-    let params = SwapParams::new(false, exact_input(1_000_000));
+    let params = SwapParamsInner::new(false, exact_input(1_000_000));
 
-    let quote = pool.quote_swap(params).unwrap();
+    let quote = pool.quote_swap(params.clone()).unwrap();
     assert_eq!(pool.snapshot(), before, "quote must be read-only");
 
     let mut fork = pool.try_fork().unwrap();
@@ -139,7 +139,7 @@ fn snapshot_and_fork_preserve_protocol_fee() {
     let mut pool = valid_pool();
     let protocol_fee = ProtocolFee::new(123, 456).unwrap();
     pool.set_protocol_fee(protocol_fee).unwrap();
-    let params = SwapParams::new(false, exact_input(1_000_000));
+    let params = SwapParamsInner::new(false, exact_input(1_000_000));
 
     let snapshot = pool.snapshot();
     assert_eq!(snapshot.protocol_fee, protocol_fee);
@@ -147,7 +147,7 @@ fn snapshot_and_fork_preserve_protocol_fee() {
     let fork = pool.try_fork().unwrap();
     assert_eq!(*fork.swap_fee.protocol_fee(), protocol_fee);
     assert_eq!(
-        fork.quote_swap(params).unwrap(),
+        fork.quote_swap(params.clone()).unwrap(),
         pool.quote_swap(params).unwrap()
     );
 }
@@ -158,7 +158,7 @@ fn mutating_swap_commits_result_state_and_fee_growth() {
     let before = pool.snapshot();
 
     let result = pool
-        .swap(SwapParams::new(false, exact_input(1_000_000)))
+        .swap(SwapParamsInner::new(false, exact_input(1_000_000)))
         .unwrap();
 
     let after = pool.snapshot();
@@ -175,9 +175,9 @@ fn mutating_swap_commits_result_state_and_fee_growth() {
 #[test]
 fn quote_swap_uses_protocol_fee_in_effective_swap_fee() {
     let mut pool = valid_pool();
-    let params = SwapParams::new(false, exact_input(1_000_000));
+    let params = SwapParamsInner::new(false, exact_input(1_000_000));
 
-    let without_protocol_fee = pool.quote_swap(params).unwrap();
+    let without_protocol_fee = pool.quote_swap(params.clone()).unwrap();
 
     pool.set_protocol_fee(ProtocolFee::new(0, 500).unwrap())
         .unwrap();
@@ -198,13 +198,14 @@ fn quote_swap_uses_protocol_fee_in_effective_swap_fee() {
 #[test]
 fn crossing_quote_is_read_only_but_committed_swap_updates_fee_growth_outside() {
     let pool = valid_pool();
-    let params = SwapParams {
+    let params = SwapParamsInner {
         zero_for_one: true,
         amount_specified: -I256::from(U256::from(1_000_000_000_000_000u64)),
-        sqrt_price_limit_x96: tick(-60).sqrt_price_x96(),
+        sqrt_price_limit: tick(-60).sqrt_price_x96(),
+        lp_fee_override: None,
     };
 
-    let quote = pool.quote_swap(params).unwrap();
+    let quote = pool.quote_swap(params.clone()).unwrap();
     let quoted_snapshot = pool.snapshot();
     let quoted_lower = quoted_snapshot.ticks.inner.get(&tick(-60)).unwrap();
     assert_eq!(quoted_lower.fee_growth_outside0_x128, U256::ZERO);

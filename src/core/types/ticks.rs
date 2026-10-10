@@ -23,7 +23,7 @@ use crate::core::types::{
 /// accounting. This runtime form also stores the validated tick index and its
 /// Q64.96 sqrt price so swap steps can jump to a boundary without recomputing
 /// the price from the map key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickInfo {
     /// Sqrt price for this boundary tick, in Q64.96 fixed-point.
     pub sqrt_price_x96: SqrtPriceX96,

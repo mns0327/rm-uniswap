@@ -21,9 +21,10 @@ pub use core::types::fee::Fee;
 pub use core::types::fee::protocol_fee::ProtocolFee;
 pub use core::types::fee::swap_fee::SwapFee;
 pub use core::types::liquidity::Liquidity;
-pub use core::types::nonzero::NonZeroLiquidity;
+pub use core::types::nonzero::{NonZeroLiquidity, NonZeroU256};
 pub use core::types::params::{
-    ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapResult, SwapSimulationResult,
+    ModifyLiquidityParams, ModifyLiquidityResult, SwapParams, SwapParamsInner, SwapResult,
+    SwapSimulationResult,
 };
 pub use core::types::pool_state::PoolState;
 pub use core::types::sqrt_price::SqrtPriceX96;

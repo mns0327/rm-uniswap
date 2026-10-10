@@ -5,6 +5,7 @@ use ruint::aliases::U256;
 use crate::core::types::liquidity::Liquidity;
 
 /// A `U256` that is guaranteed to be non-zero.
+#[derive(Debug, Clone)]
 pub struct NonZeroU256(U256);
 
 #[allow(dead_code)]
@@ -38,6 +39,13 @@ impl NonZeroU256 {
     #[inline(always)]
     pub fn unwrap(self) -> U256 {
         self.0
+    }
+}
+
+impl AsRef<U256> for NonZeroU256 {
+    #[inline(always)]
+    fn as_ref(&self) -> &U256 {
+        &self.0
     }
 }
 

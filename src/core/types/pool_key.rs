@@ -1,5 +1,7 @@
 use alloy::primitives::{Address, FixedBytes, keccak256};
 
+use crate::core::types::fee::DYNAMIC_FEE_FLAG;
+
 /// Number of bytes hashed by Uniswap v4 `PoolIdLibrary.toId`.
 ///
 /// Solidity stores the in-memory `PoolKey` body as five contiguous 32-byte
@@ -26,9 +28,10 @@ pub struct PoolKey {
     pub currency1: Address,
     /// LP fee in pips.
     ///
-    /// Static fees are capped at `1_000_000`; dynamic-fee pools use the v4
-    /// dynamic fee flag value.
-    pub fee: u32,
+    /// Static fees are capped at `1_000_000`. Dynamic-fee pools use `None`;
+    /// `Some(DYNAMIC_FEE_FLAG)` is accepted as the same thing, see
+    /// [`PoolKey::is_dynamic_fee`].
+    pub fee: Option<u32>,
     /// Pool tick spacing.
     ///
     /// Positions must use ticks that are multiples of this value.
@@ -49,7 +52,7 @@ impl PoolKey {
     pub const fn new(
         currency0: Address,
         currency1: Address,
-        fee: u32,
+        fee: Option<u32>,
         tick_spacing: u32,
         hooks: Address,
     ) -> Self {
@@ -62,6 +65,13 @@ impl PoolKey {
         }
     }
 
+    /// Returns `true` for a dynamic-fee pool: `fee` is `None` or the raw
+    /// [`DYNAMIC_FEE_FLAG`], which both hash to the same `PoolId`.
+    #[inline(always)]
+    pub const fn is_dynamic_fee(&self) -> bool {
+        matches!(self.fee, None | Some(DYNAMIC_FEE_FLAG))
+    }
+
     /// Returns the Uniswap v4 `PoolId` for this key.
     ///
     /// Matches `PoolIdLibrary.toId`: the hash input is the five-word Solidity
@@ -70,7 +80,7 @@ impl PoolKey {
         let mut encoded = [0u8; POOL_KEY_MEMORY_LEN];
         write_address_word(&mut encoded[0..32], &self.currency0);
         write_address_word(&mut encoded[32..64], &self.currency1);
-        write_u32_word(&mut encoded[64..96], self.fee);
+        write_u32_word(&mut encoded[64..96], self.fee.unwrap_or(DYNAMIC_FEE_FLAG));
         write_u32_word(&mut encoded[96..128], self.tick_spacing);
         write_address_word(&mut encoded[128..160], &self.hooks);
 
@@ -111,7 +121,7 @@ mod tests {
         let key = PoolKey::new(
             Address::ZERO,
             address!("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
-            500,
+            Some(500),
             10,
             Address::ZERO,
         );
@@ -122,5 +132,25 @@ mod tests {
                 "0x864abca0a6202dba5b8868772308da953ff125b0f95015adbf89aaf579e903a8"
             ))
         );
+    }
+
+    #[test]
+    fn raw_dynamic_fee_flag_is_the_same_pool_as_none() {
+        let key = |fee| {
+            PoolKey::new(
+                Address::ZERO,
+                Address::repeat_byte(1),
+                fee,
+                1,
+                Address::ZERO,
+            )
+        };
+        let none = key(None);
+        let flag = key(Some(DYNAMIC_FEE_FLAG));
+
+        assert!(none.is_dynamic_fee());
+        assert!(flag.is_dynamic_fee());
+        assert!(!key(Some(500)).is_dynamic_fee());
+        assert_eq!(none.to_id(), flag.to_id());
     }
 }

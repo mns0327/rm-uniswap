@@ -287,7 +287,7 @@ mod tests {
         page.insert(&slot, TickInfo::DEFAULT);
 
         assert_eq!(page.initialized(), 1);
-        assert_eq!(page.get(&slot).copied(), Some(TickInfo::DEFAULT));
+        assert_eq!(page.get(&slot).cloned(), Some(TickInfo::DEFAULT));
     }
 
     #[test]
@@ -299,7 +299,7 @@ mod tests {
         page.insert(&slot, info(200));
 
         assert_eq!(page.initialized(), 1);
-        assert_eq!(page.get(&slot).copied(), Some(info(200)));
+        assert_eq!(page.get(&slot).cloned(), Some(info(200)));
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
 
         assert_eq!(page.initialized(), 1);
         assert_eq!(page.get(&first_slot), None);
-        assert_eq!(page.get(&second_slot).copied(), Some(info(200)));
+        assert_eq!(page.get(&second_slot).cloned(), Some(info(200)));
     }
 
     #[test]
@@ -343,14 +343,14 @@ mod tests {
         page.insert(&slot_4, info(40));
         page.insert(&slot_31, info(310));
 
-        assert_eq!(page.next(&slot_0).copied(), Some(info(20)));
-        assert_eq!(page.next(&slot_1).copied(), Some(info(40)));
-        assert_eq!(page.next(&slot_4).copied(), Some(info(310)));
+        assert_eq!(page.next(&slot_0).cloned(), Some(info(20)));
+        assert_eq!(page.next(&slot_1).cloned(), Some(info(40)));
+        assert_eq!(page.next(&slot_4).cloned(), Some(info(310)));
         assert_eq!(page.next(&slot_31), None);
 
-        assert_eq!(page.prev(&slot_31).copied(), Some(info(40)));
-        assert_eq!(page.prev(&slot_4).copied(), Some(info(20)));
-        assert_eq!(page.prev(&slot_1).copied(), Some(info(10)));
+        assert_eq!(page.prev(&slot_31).cloned(), Some(info(40)));
+        assert_eq!(page.prev(&slot_4).cloned(), Some(info(20)));
+        assert_eq!(page.prev(&slot_1).cloned(), Some(info(10)));
         assert_eq!(page.prev(&slot_0), None);
     }
 
@@ -361,8 +361,8 @@ mod tests {
         page.insert(&page_slot(1), info(20));
         page.insert(&page_slot(15), info(300));
 
-        assert_eq!(page.first().copied(), Some(info(20)));
-        assert_eq!(page.last().copied(), Some(info(300)));
+        assert_eq!(page.first().cloned(), Some(info(20)));
+        assert_eq!(page.last().cloned(), Some(info(300)));
     }
 
     #[test]

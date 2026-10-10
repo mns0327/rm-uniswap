@@ -8,13 +8,14 @@ use std::{
 use alloy::{
     primitives::{Address, B256, I256},
     rpc::types::Log,
-    sol_types::SolCall,
+    sol_types::{SolCall, SolEvent},
 };
 use anyhow::{Context, Result, bail};
 use futures::{StreamExt, stream};
 use rm_uniswap::{
     Fee, ModifyLiquidityParams, Pool, PoolSnapshot, PoolState, ProtocolFee, SqrtPriceX96,
-    SwapParams, TickIndex, TickInfoInner, tick_math, v4::PoolKey,
+    SwapParamsInner, TickIndex, TickInfoInner, tick_math,
+    v4::{DYNAMIC_FEE_FLAG, PoolKey},
 };
 use ruint::aliases::U256;
 use serde::Serialize;
@@ -69,7 +70,7 @@ struct ReplayTransaction {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PoolCheckpoint {
     pub(crate) state: PoolState,
-    pub(crate) fee: Fee,
+    pub(crate) fee: Option<Fee>,
     pub(crate) protocol_fee: ProtocolFee,
     pub(crate) ticks: BTreeMap<TickIndex, TickInfoInner>,
 }
@@ -82,6 +83,9 @@ enum ReplayOperation {
         zero_for_one: bool,
         amount_specified: String,
         sqrt_price_limit_x96: String,
+        /// Per-swap LP fee from the `Swap` event; set only for dynamic-fee pools.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lp_fee: Option<u32>,
     },
     ModifyLiquidity {
         sender: Address,
@@ -162,12 +166,16 @@ impl ReplayOperation {
                 zero_for_one,
                 amount_specified,
                 sqrt_price_limit_x96,
+                lp_fee,
                 ..
             } => {
-                pool.swap(SwapParams {
+                pool.swap(SwapParamsInner {
                     zero_for_one: *zero_for_one,
                     amount_specified: I256::from_str(amount_specified)?,
-                    sqrt_price_limit_x96: parse_sqrt_price(sqrt_price_limit_x96)?,
+                    sqrt_price_limit: parse_sqrt_price(sqrt_price_limit_x96)?,
+                    lp_fee_override: lp_fee
+                        .map(|fee| Fee::new(fee).context("invalid swap lp fee"))
+                        .transpose()?,
                 })?;
                 Ok(())
             }
@@ -245,12 +253,21 @@ impl HistoricalReplayPipeline {
         let progress = Progress::start("historical-replay");
         progress.log("pool key", "resolving");
         let pool_key = resolve_pool_key(&args)?;
+        // Low 4 address bits are the v4 `*_RETURNS_DELTA` hook permissions; replay
+        // applies calldata straight to the pool and cannot model hook deltas.
+        if pool_key.hooks.0[19] & 0x0f != 0 {
+            bail!(
+                "hooks {} return deltas, which historical replay does not model",
+                pool_key.hooks
+            );
+        }
         let pool_id = pool_key.to_id().0;
         progress.log(
             "pool key",
             format!(
                 "resolved pool_id={pool_id}, fee={}, tick_spacing={}",
-                pool_key.fee, pool_key.tick_spacing
+                raw_fee(pool_key.fee),
+                pool_key.tick_spacing
             ),
         );
 
@@ -282,6 +299,11 @@ impl HistoricalReplayPipeline {
             .log("chain id", format!("resolved {chain_id}"));
 
         let initial_pool = self.load_initial_pool().await?;
+        // ponytail: Swap events report lp+protocol fee, so dynamic-fee replay needs a
+        // zero protocol fee. Invert `calculateSwapFee` per direction if that ever matters.
+        if self.pool_key.is_dynamic_fee() && initial_pool.protocol_fee != ProtocolFee::ZERO {
+            bail!("dynamic-fee replay requires a zero protocol fee");
+        }
         let scanned = self.scan_transactions().await?;
         let mut traces = self
             .prefetch_traces(&scanned.tx_order, selected_checkpoint_count(&scanned))
@@ -461,7 +483,7 @@ impl HistoricalReplayPipeline {
             let trace = traces
                 .remove(&tx_hash)
                 .expect("transaction trace was prefetched");
-            let operations = self.decode_operations(&tx_hash, logs.len(), &trace)?;
+            let operations = self.decode_operations(&tx_hash, &logs, &trace)?;
             if current_block != Some(block_number) {
                 current_block = Some(block_number);
                 current_block_touched_ticks.clear();
@@ -511,9 +533,10 @@ impl HistoricalReplayPipeline {
     fn decode_operations(
         &self,
         tx_hash: &B256,
-        expected_log_count: usize,
+        logs: &[Log],
         trace: &CallFrame,
     ) -> Result<Vec<ReplayOperation>> {
+        let expected_log_count = logs.len();
         let mut operations = Vec::new();
         collect_pool_manager_operations(
             trace,
@@ -530,6 +553,9 @@ impl HistoricalReplayPipeline {
                 operations.len(),
                 expected_log_count
             );
+        }
+        if self.pool_key.is_dynamic_fee() {
+            attach_swap_lp_fees(tx_hash, logs, &mut operations)?;
         }
         Ok(operations)
     }
@@ -549,7 +575,7 @@ impl HistoricalReplayPipeline {
                 pool_key: PoolKeyFixture {
                     currency0: self.pool_key.currency0,
                     currency1: self.pool_key.currency1,
-                    fee: self.pool_key.fee,
+                    fee: raw_fee(self.pool_key.fee),
                     tick_spacing: self.pool_key.tick_spacing as i16,
                     hooks: self.pool_key.hooks,
                 },
@@ -797,7 +823,7 @@ fn resolve_pool_key(args: &HistoricalReplayArgs) -> Result<PoolKey> {
         return Ok(PoolKey::new(
             Address::from_str(parts[0])?,
             Address::from_str(parts[1])?,
-            parts[2].parse()?,
+            parse_fee(parts[2].parse()?),
             parse_positive_i16(parts[3])? as u32,
             Address::from_str(parts[4])?,
         ));
@@ -815,7 +841,7 @@ fn resolve_pool_key(args: &HistoricalReplayArgs) -> Result<PoolKey> {
             .context("set --currency0 or provide --pool-key")?,
         args.currency1
             .context("set --currency1 or provide --pool-key")?,
-        args.fee.context("set --fee or provide --pool-key")?,
+        parse_fee(args.fee.context("set --fee or provide --pool-key")?),
         tick_spacing as u32,
         args.hooks,
     ))
@@ -868,6 +894,7 @@ fn collect_pool_manager_operations(
                     zero_for_one: call.params.zeroForOne,
                     amount_specified: call.params.amountSpecified.to_string(),
                     sqrt_price_limit_x96: call.params.sqrtPriceLimitX96.to_string(),
+                    lp_fee: None,
                 });
             }
         } else if data.starts_with(&IPoolManager::modifyLiquidityCall::SELECTOR) {
@@ -899,10 +926,48 @@ fn collect_pool_manager_operations(
     Ok(())
 }
 
+/// Copies each `Swap` event fee onto the matching swap operation, in order.
+///
+/// The event reports the total swap fee, which equals the LP fee only while
+/// the protocol fee is zero; `run` rejects dynamic-fee pools otherwise.
+fn attach_swap_lp_fees(
+    tx_hash: &B256,
+    logs: &[Log],
+    operations: &mut [ReplayOperation],
+) -> Result<()> {
+    let mut fees = logs
+        .iter()
+        .filter(|log| log.topic0() == Some(&IPoolManager::Swap::SIGNATURE_HASH))
+        .map(|log| {
+            log.log_decode::<IPoolManager::Swap>()
+                .map(|swap| swap.inner.data.fee.to::<u32>())
+        });
+    for operation in operations.iter_mut() {
+        if let ReplayOperation::Swap { lp_fee, .. } = operation {
+            *lp_fee = Some(
+                fees.next()
+                    .with_context(|| format!("missing Swap event for swap in {tx_hash}"))??,
+            );
+        }
+    }
+    if fees.next().is_some() {
+        bail!("more Swap events than decoded swaps in {tx_hash}");
+    }
+    Ok(())
+}
+
+fn raw_fee(fee: Option<u32>) -> u32 {
+    fee.unwrap_or(DYNAMIC_FEE_FLAG)
+}
+
+fn parse_fee(raw: u32) -> Option<u32> {
+    (raw != DYNAMIC_FEE_FLAG).then_some(raw)
+}
+
 fn call_key_matches(call_key: &IPoolManager::PoolKey, pool_key: &PoolKey) -> bool {
     call_key.currency0 == pool_key.currency0
         && call_key.currency1 == pool_key.currency1
-        && call_key.fee.to::<u32>() == pool_key.fee
+        && call_key.fee.to::<u32>() == raw_fee(pool_key.fee)
         && signed_to_i32(call_key.tickSpacing.to_string()).ok()
             == Some(pool_key.tick_spacing as i32)
         && call_key.hooks == pool_key.hooks
@@ -964,7 +1029,7 @@ mod tests {
         let pool_key = PoolKey::new(
             Address::repeat_byte(0x01),
             Address::repeat_byte(0x02),
-            500,
+            Some(500),
             10,
             Address::ZERO,
         );
@@ -1051,6 +1116,7 @@ mod tests {
             zero_for_one: true,
             amount_specified: "-1000000".to_string(),
             sqrt_price_limit_x96: tick(-120).sqrt_price_x96().as_u256().to_string(),
+            lp_fee: None,
         };
         let snapshot = test_pool_snapshot(BTreeMap::from([
             (tick(-180), tick_info(1_000_000, 1_000_000)),
@@ -1093,6 +1159,60 @@ mod tests {
         require_logs_found(1, 100, 101).unwrap();
     }
 
+    #[test]
+    fn swap_lp_fees_pair_with_swap_events_in_order() {
+        let tx_hash = B256::repeat_byte(0x44);
+        let swap = || ReplayOperation::Swap {
+            sender: Address::ZERO,
+            zero_for_one: true,
+            amount_specified: "-1".to_string(),
+            sqrt_price_limit_x96: "1".to_string(),
+            lp_fee: None,
+        };
+        let modify = ReplayOperation::ModifyLiquidity {
+            sender: Address::ZERO,
+            tick_lower: -60,
+            tick_upper: 60,
+            liquidity_delta: "1".to_string(),
+            salt: B256::ZERO,
+        };
+        let logs = [swap_log(500), rpc_log(1, tx_hash, 1), swap_log(3_000)];
+
+        let mut operations = vec![swap(), modify, swap()];
+        attach_swap_lp_fees(&tx_hash, &logs, &mut operations).unwrap();
+        let fees = operations
+            .iter()
+            .map(|operation| match operation {
+                ReplayOperation::Swap { lp_fee, .. } => *lp_fee,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fees, [Some(500), None, Some(3_000)]);
+
+        assert!(attach_swap_lp_fees(&tx_hash, &logs[..1], &mut [swap(), swap()]).is_err());
+        assert!(attach_swap_lp_fees(&tx_hash, &logs, &mut [swap()]).is_err());
+    }
+
+    fn swap_log(fee: u32) -> Log {
+        let event = IPoolManager::Swap {
+            id: B256::ZERO,
+            sender: Address::ZERO,
+            amount0: 0,
+            amount1: 0,
+            sqrtPriceX96: Default::default(),
+            liquidity: 0,
+            tick: Default::default(),
+            fee: alloy::primitives::aliases::U24::from(fee),
+        };
+        Log {
+            inner: PrimitiveLog {
+                address: Address::ZERO,
+                data: event.encode_log_data(),
+            },
+            ..rpc_log(1, B256::ZERO, 0)
+        }
+    }
+
     fn rpc_log(block_number: u64, transaction_hash: B256, log_index: u64) -> Log {
         Log {
             inner: PrimitiveLog {
@@ -1123,7 +1243,7 @@ mod tests {
                 fee_growth_global0_x128: U256::ZERO,
                 fee_growth_global1_x128: U256::ZERO,
             },
-            fee: Fee::new(3000).unwrap(),
+            fee: Fee::new(3000),
             protocol_fee: ProtocolFee::ZERO,
             tick_spacing,
             ticks: PoolTicksSnapshot {

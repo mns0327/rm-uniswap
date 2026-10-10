@@ -110,8 +110,11 @@ impl ProtocolFee {
 
     /// Calculates the effective swap fee from protocol and LP fees.
     ///
-    /// When the directional protocol fee is zero, the effective fee is exactly
-    /// the pool LP fee. Otherwise, this mirrors Uniswap V4's
+    /// Returns [`crate::Error::InvalidLpFee`] if `lp_fee` is not
+    /// [`Fee::is_valid`] — most notably [`Fee::DYNAMIC`], the placeholder used
+    /// before a before-swap hook has resolved an actual fee. When the
+    /// directional protocol fee is zero, the effective fee is exactly the pool
+    /// LP fee. Otherwise, this mirrors Uniswap V4's
     /// `ProtocolFeeLibrary.calculateSwapFee` formula:
     ///
     /// ```text
@@ -125,10 +128,14 @@ impl ProtocolFee {
         zero_for_one: bool,
         lp_fee: &Fee,
     ) -> Result<Fee, crate::Error> {
+        if !lp_fee.is_valid() {
+            return Err(crate::Error::InvalidLpFee);
+        }
+
         let protocol_fee = self.get_fee(zero_for_one);
 
         if protocol_fee == 0 {
-            return Ok(*lp_fee);
+            return Ok(lp_fee.clone());
         }
 
         // Match V4's `calculateSwapFee` rounding by flooring the overlap term.
@@ -243,6 +250,24 @@ mod tests {
         assert_eq!(
             protocol_fee.calculate_swap_fee(false, &lp_fee),
             Ok(fee(PIPS_DENOMINATOR))
+        );
+    }
+
+    #[test]
+    fn calculate_swap_fee_rejects_invalid_lp_fee_even_when_protocol_fee_is_zero() {
+        assert_eq!(
+            ProtocolFee::ZERO.calculate_swap_fee(true, &Fee::DYNAMIC),
+            Err(crate::Error::InvalidLpFee)
+        );
+    }
+
+    #[test]
+    fn calculate_swap_fee_rejects_invalid_lp_fee_with_a_nonzero_protocol_fee() {
+        let protocol_fee = ProtocolFee::new(100, 500).unwrap();
+
+        assert_eq!(
+            protocol_fee.calculate_swap_fee(false, &Fee::DYNAMIC),
+            Err(crate::Error::InvalidLpFee)
         );
     }
 

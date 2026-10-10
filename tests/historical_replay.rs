@@ -3,7 +3,11 @@ use std::str::FromStr;
 use alloy::primitives::{Address, B256, I256};
 use rm_uniswap::{
     Fee, ModifyLiquidityParams, Pool, PoolSnapshot, PoolState, ProtocolFee, SqrtPriceX96,
-    SwapParams, TickIndex, TickInfoInner,
+    SwapParams, SwapParamsInner, TickIndex, TickInfoInner,
+    v4::{
+        DYNAMIC_FEE_FLAG, HookEnv, HooksImpl, PoolKey,
+        stable_pair::{StableFeeConfig, StableFeeState, StablePairHook},
+    },
 };
 use ruint::aliases::U256;
 use serde::{Deserialize, Deserializer, de};
@@ -56,7 +60,7 @@ struct ReplayTransaction {
 #[derive(Debug, Deserialize)]
 struct PoolCheckpoint {
     state: PoolState,
-    fee: Fee,
+    fee: Option<Fee>,
     protocol_fee: ProtocolFee,
     ticks: BTreeMap<TickIndex, TickInfoInner>,
 }
@@ -71,6 +75,8 @@ enum ReplayOperation {
         #[serde(deserialize_with = "deserialize_i256_lossless")]
         amount_specified: I256,
         sqrt_price_limit_x96: U256,
+        #[serde(default)]
+        lp_fee: Option<Fee>,
     },
     ModifyLiquidity {
         #[allow(dead_code)]
@@ -226,15 +232,42 @@ fn committed_historical_replay_matches_rust() {
     run_fixture(
         "committed historical replay",
         include_str!("../forge/fixtures/historical_replay.json"),
+        None,
+    );
+}
+
+/// USDC/USDT on mainnet with Uniswap Labs' StablePairHook, blocks 26150000..=26151000.
+/// Each swap's LP fee comes from the ported hook and must equal the Swap event fee.
+#[test]
+fn committed_dynamic_fee_replay_matches_rust() {
+    // `feeConfig(poolId)` / `feeState(poolId)` on the hook at block 26150000.
+    let mut hook = StablePairHook::new(
+        StableFeeConfig {
+            k: 11_744_051,
+            optimal_fee_e6: 7,
+            target_multiplier: 100,
+            reference_sqrt_price_x96: U256::ONE << 96,
+        },
+        StableFeeState {
+            decaying_fee_e12: 19_516_152,
+            sqrt_amm_price_x96: U256::from_str("79256454491193950883953211910").unwrap(),
+            block_number: 26_149_999,
+        },
+    )
+    .unwrap();
+    run_fixture(
+        "committed dynamic-fee replay",
+        include_str!("../forge/fixtures/historical_replay_dynamic_fee.json"),
+        Some(&mut hook),
     );
 }
 
 #[test]
 fn sparse_historical_replay_checkpoint_matches_only_expected_fields() {
-    run_fixture("sparse historical replay", SPARSE_FIXTURE);
+    run_fixture("sparse historical replay", SPARSE_FIXTURE, None);
 }
 
-fn run_fixture(name: &str, json: &str) {
+fn run_fixture(name: &str, json: &str, mut hook: Option<&mut StablePairHook>) {
     let fixture: HistoricalReplayFixture = serde_json::from_str(json)
         .unwrap_or_else(|error| panic!("{name} fixture JSON must match schema: {error}"));
 
@@ -256,6 +289,17 @@ fn run_fixture(name: &str, json: &str) {
     let mut pool = Pool::try_from(fixture.initial_pool)
         .unwrap_or_else(|error| panic!("{name} initial pool snapshot invalid: {error}"));
 
+    // Dynamic-fee pools get the LP fee per swap; the stored slot0 fee can be
+    // changed by the hook outside swaps, so it is not compared.
+    let dynamic_fee = fixture.metadata.pool_key.fee == DYNAMIC_FEE_FLAG;
+    let key = &fixture.metadata.pool_key;
+    let pool_key = PoolKey::new(
+        key.currency0,
+        key.currency1,
+        (!dynamic_fee).then_some(key.fee),
+        key.tick_spacing,
+        key.hooks,
+    );
     let mut replayed_logs = 0usize;
 
     for (tx_idx, tx) in fixture.transactions.into_iter().enumerate() {
@@ -269,18 +313,50 @@ fn run_fixture(name: &str, json: &str) {
             "{name} tx {tx_idx} must contain at least one decoded operation"
         );
 
+        let block_number = tx.block_number;
         for (op_idx, operation) in tx.operations.into_iter().enumerate() {
             match operation {
                 ReplayOperation::Swap {
                     zero_for_one,
                     amount_specified,
                     sqrt_price_limit_x96,
+                    lp_fee,
                     ..
                 } => {
-                    pool.swap(SwapParams {
+                    let sqrt_price_limit = sqrt_price(sqrt_price_limit_x96);
+                    let lp_fee_override = match hook.as_deref_mut() {
+                        Some(hook) => {
+                            let env = HookEnv {
+                                block_number,
+                                pool_state: &pool.state,
+                            };
+                            let params = SwapParams {
+                                zero_for_one,
+                                amount_specified,
+                                sqrt_price_limit: sqrt_price_limit.clone(),
+                            };
+                            let (_, _, hook_fee) = HooksImpl::before_swap(
+                                hook,
+                                &Address::ZERO,
+                                &pool_key,
+                                &params,
+                                &env,
+                                b"",
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                hook_fee, lp_fee,
+                                "{name} tx {tx_idx} operation {op_idx} hook fee vs Swap event fee"
+                            );
+                            hook_fee
+                        }
+                        None => lp_fee,
+                    };
+                    pool.swap(SwapParamsInner {
                         zero_for_one,
                         amount_specified,
-                        sqrt_price_limit_x96: sqrt_price(sqrt_price_limit_x96),
+                        sqrt_price_limit,
+                        lp_fee_override,
                     })
                     .unwrap_or_else(|error| {
                         panic!("{name} tx {tx_idx} operation {op_idx} swap replay failed: {error}")
@@ -336,11 +412,13 @@ fn run_fixture(name: &str, json: &str) {
                 "{name} tx {tx_idx} ({}) state checkpoint",
                 tx.tx_hash
             );
-            assert_eq!(
-                actual.fee, expected.fee,
-                "{name} tx {tx_idx} ({}) fee checkpoint",
-                tx.tx_hash
-            );
+            if !dynamic_fee {
+                assert_eq!(
+                    actual.fee, expected.fee,
+                    "{name} tx {tx_idx} ({}) fee checkpoint",
+                    tx.tx_hash
+                );
+            }
             assert_eq!(
                 actual.protocol_fee, expected.protocol_fee,
                 "{name} tx {tx_idx} ({}) protocol fee checkpoint",
@@ -370,7 +448,7 @@ fn run_fixture(name: &str, json: &str) {
     }
 
     assert_eq!(fixture.metadata.log_count, replayed_logs);
-    assert!(fixture.metadata.pool_key.fee <= 1_000_000);
+    assert!(dynamic_fee || fixture.metadata.pool_key.fee <= 1_000_000);
     assert!(fixture.metadata.pool_key.tick_spacing > 0);
     assert_ne!(fixture.metadata.pool_id, B256::ZERO);
     let _pool_manager = fixture.metadata.pool_manager;
